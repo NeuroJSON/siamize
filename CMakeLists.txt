@@ -103,6 +103,11 @@ endif()
 if(OpenMP_CXX_FOUND)
     set(_omp_static_linked FALSE)
 
+    # OpenMP_CXX_FLAGS may be a space-separated string (e.g. on macOS:
+    # "-Xclang -fopenmp"). target_compile_options treats each list element as
+    # one argv entry, so we must split before adding.
+    separate_arguments(_omp_compile_opts UNIX_COMMAND "${OpenMP_CXX_FLAGS}")
+
     if(SIAMIZE_STATIC_LINK AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # Linux/GCC: link libgomp.a directly so the binary doesn't pull in
         # libgomp.so.1 at runtime.
@@ -114,7 +119,7 @@ if(OpenMP_CXX_FOUND)
         )
         if(GOMP_STATIC_LIB)
             message(STATUS "libgomp static: ${GOMP_STATIC_LIB}")
-            target_compile_options(siamize PRIVATE ${OpenMP_CXX_FLAGS})
+            target_compile_options(siamize PRIVATE ${_omp_compile_opts})
             target_link_libraries(siamize PRIVATE ${GOMP_STATIC_LIB} pthread)
             set(_omp_static_linked TRUE)
         else()
@@ -132,9 +137,10 @@ if(OpenMP_CXX_FOUND)
         )
         if(LIBOMP_STATIC_LIB)
             message(STATUS "libomp static: ${LIBOMP_STATIC_LIB}")
-            # Apple clang needs the preprocessor flag explicitly; CMake's
-            # FindOpenMP discovers this and stores it in OpenMP_CXX_FLAGS.
-            target_compile_options(siamize PRIVATE ${OpenMP_CXX_FLAGS})
+            # Apple clang needs `-Xclang -fopenmp` (passed as TWO argv entries)
+            # plus libomp headers; CMake's FindOpenMP stores both in
+            # OpenMP_CXX_FLAGS as a space-separated string which we split above.
+            target_compile_options(siamize PRIVATE ${_omp_compile_opts})
             target_include_directories(siamize PRIVATE
                 $ENV{OpenMP_ROOT}/include
                 /opt/homebrew/opt/libomp/include
