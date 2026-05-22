@@ -51,8 +51,12 @@ if(NOT EXISTS ${NIFTI_ROOT}/niftilib/nifti1_io.c)
     message(FATAL_ERROR "nifti_clib not found at ${NIFTI_ROOT}.")
 endif()
 
-# zlib: prefer the static .a when SIAMIZE_STATIC_LINK is on (POSIX only;
-# on Windows we let CMake's FindZLIB do the right thing).
+# zlib resolution strategy, in order of preference:
+#   1. POSIX + static-link build: link the explicit libz.a from the host.
+#   2. Otherwise: find_package(ZLIB) and link the system zlib.
+#   3. If find_package fails (typical on Windows GHA runners where no zlib
+#      is preinstalled): FetchContent the upstream zlib v1.3.1 source and
+#      build it as a static target. Adds ~30 s to the first configure.
 set(_zlib_static_found FALSE)
 if(SIAMIZE_STATIC_LINK AND NOT WIN32)
     find_library(ZLIB_STATIC_LIB NAMES libz.a)
@@ -62,7 +66,27 @@ if(SIAMIZE_STATIC_LINK AND NOT WIN32)
     endif()
 endif()
 if(NOT _zlib_static_found)
-    find_package(ZLIB REQUIRED)
+    find_package(ZLIB QUIET)
+    if(NOT ZLIB_FOUND)
+        message(STATUS "System zlib not found; fetching upstream v1.3.1 via FetchContent.")
+        include(FetchContent)
+        # Suppress zlib's own CMake noise.
+        set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(zlib_src
+            URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+            URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(zlib_src)
+        # zlib's CMakeLists creates both `zlib` (shared) and `zlibstatic`
+        # (static). Wire both names to ZLIB::ZLIB so downstream targets
+        # below find the static one through the canonical alias.
+        if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
+            add_library(ZLIB::ZLIB ALIAS zlibstatic)
+        endif()
+        # ZLIB_INCLUDE_DIR needs to be set for users of FindZLIB.cmake idioms.
+        get_target_property(_zlib_inc zlibstatic INCLUDE_DIRECTORIES)
+    endif()
 endif()
 
 add_library(nifti_static STATIC
