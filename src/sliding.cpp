@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -152,8 +153,11 @@ LogitsVolume sliding_window(const Volume& data,
 
     if (verbose) {
         std::fprintf(stderr,
-                     "sliding window: image (%ld, %ld, %ld), patch (%ld, %ld, %ld), step %.2f, %ld tiles, %zu fold(s)\n",
-                     spatZ, spatY, spatX, patch_size[0], patch_size[1], patch_size[2],
+                     "sliding window: image (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
+                     ", patch (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
+                     ", step %.2f, %" PRId64 " tiles, %zu fold(s)\n",
+                     spatZ, spatY, spatX,
+                     patch_size[0], patch_size[1], patch_size[2],
                      step_ratio, n_tiles, model_paths.size());
     }
 
@@ -256,7 +260,8 @@ LogitsVolume sliding_window(const Volume& data,
                     ++tile_idx;
 
                     if (verbose && (tile_idx % 4 == 0 || tile_idx == n_tiles)) {
-                        std::fprintf(stderr, "    tile %ld/%ld\n", tile_idx, n_tiles);
+                        std::fprintf(stderr, "    tile %" PRId64 "/%" PRId64 "\n",
+                                     tile_idx, n_tiles);
                     }
                 }
             }

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -133,7 +134,9 @@ int main(int argc, char** argv) {
     NiftiImage img = siam::load_nifti_ras(input_path);
 
     if (verbose) {
-        std::fprintf(stderr, "  canon shape (Z, Y, X): (%ld, %ld, %ld), zooms canon (X, Y, Z): (%.3f, %.3f, %.3f)\n",
+        std::fprintf(stderr,
+                     "  canon shape (Z, Y, X): (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
+                     ", zooms canon (X, Y, Z): (%.3f, %.3f, %.3f)\n",
                      img.volume.shape[0], img.volume.shape[1], img.volume.shape[2],
                      img.zooms_canon[0], img.zooms_canon[1], img.zooms_canon[2]);
     }
@@ -144,7 +147,8 @@ int main(int argc, char** argv) {
     auto crop = siam::crop_to_nonzero(img.volume);
 
     if (verbose) {
-        std::fprintf(stderr, "  cropped to (Z, Y, X) (%ld, %ld, %ld)\n",
+        std::fprintf(stderr,
+                     "  cropped to (Z, Y, X) (%" PRId64 ", %" PRId64 ", %" PRId64 ")\n",
                      crop.cropped.shape[0], crop.cropped.shape[1], crop.cropped.shape[2]);
     }
 
@@ -160,7 +164,8 @@ int main(int argc, char** argv) {
     spacing_zyx, new_spacing);
 
     if (verbose) {
-        std::fprintf(stderr, "  resample to (%ld, %ld, %ld) @ %.3f mm\n",
+        std::fprintf(stderr,
+                     "  resample to (%" PRId64 ", %" PRId64 ", %" PRId64 ") @ %.3f mm\n",
                      new_shape[0], new_shape[1], new_shape[2], target_spacing);
     }
 
