@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: >-
+  Please cite the SIAM paper (preferred-citation, immediately below).
+  A secondary software citation for siamize is provided after that for
+  tools that require one — it is optional.
+
+# ---- PRIMARY CITATION ------------------------------------------------------
+# This is what GitHub's "Cite this repository" button surfaces, and what
+# almost all CFF consumers pick up. Listed at the top of this file for
+# visual prominence; the software entry below is secondary.
+preferred-citation:
+  type: article
+  title: >-
+    SIAM: Head and Brain MRI Segmentation from Few High-Quality Templates
+    via Synthetic Training
+  authors:
+    - family-names: Valabregue
+      given-names: Romain
+    - family-names: Khemir
+      given-names: Ikram
+    - family-names: Bardinet
+      given-names: Eric
+    - family-names: Rousseau
+      given-names: Francois
+    - family-names: Auzias
+      given-names: Guillaume
+    - family-names: Dorent
+      given-names: Reuben
+  year: 2026
+  journal: arXiv
+  url: "https://arxiv.org/abs/2605.02737"
+  identifiers:
+    - type: other
+      value: "arXiv:2605.02737"
+      description: arXiv preprint identifier
+
+# ---- SECONDARY: software metadata for this port ---------------------------
+title: "siamize"
+type: software
+authors:
+  - given-names: Qianqian
+    family-names: Fang
+    email: q.fang@neu.edu
+    affiliation: Northeastern University
+    orcid: "https://orcid.org/0000-0003-0805-935X"
+repository-code: "https://github.com/NeuroJSON/siamize"
+url: "https://github.com/NeuroJSON/siamize"
+license: Apache-2.0
+abstract: >-
+  Native C++ / ONNX Runtime port of SIAM v0.3 head and brain MRI tissue
+  segmentation, runnable without PyTorch, nnU-Net, or torchio at deployment
+  time.

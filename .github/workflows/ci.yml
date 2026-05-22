@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cpp-build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            binary: build/siamize
+            deps_check: |
+              echo "--- ldd ---"
+              ldd build/siamize
+              echo "--- direct (NEEDED) deps ---"
+              readelf -d build/siamize | grep NEEDED
+          - os: macos-latest
+            binary: build/siamize
+            deps_check: |
+              echo "--- otool -L (linked dylibs) ---"
+              otool -L build/siamize
+          - os: windows-latest
+            # MSVC multi-config generator drops the binary under Release/.
+            binary: build/Release/siamize.exe
+            deps_check: |
+              ls -la build/Release/
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenMP (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Fetch C++ deps
+        run: scripts/fetch_deps.sh
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Inspect runtime deps
+        run: ${{ matrix.deps_check }}
+
+      - name: Smoke-run --help
+        run: ${{ matrix.binary }} --help
+
+  python-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install numpy nibabel scipy scikit-image torch \
+                      dynamic_network_architectures onnxruntime
+      - name: Import smoke test
+        run: |
+          python -c "import sys; sys.path.insert(0, 'py'); import siam_ref; print(siam_ref.build_network.__name__)"
+          python tools/onnx_export/compare.py --help || true
