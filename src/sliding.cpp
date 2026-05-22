@@ -12,11 +12,39 @@
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
 
 namespace siam {
 
 namespace {
+
+#ifdef _WIN32
+// ORT's Session constructor on Windows expects wchar_t* (UTF-16) paths.
+// Convert UTF-8 -> UTF-16 via the Win32 API.
+std::wstring widen_path(const std::string& s) {
+    if (s.empty()) {
+        return std::wstring();
+    }
+
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                nullptr, 0);
+
+    if (n <= 0) {
+        throw std::runtime_error("MultiByteToWideChar failed for path: " + s);
+    }
+
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                        w.data(), n);
+    return w;
+}
+#endif
 
 // Produce a [Z, Y, X] Gaussian importance map matching scipy.ndimage.gaussian_filter
 // with sigma = patch / 8 acting on a delta, then normalized so max == value_scaling.
@@ -186,7 +214,12 @@ LogitsVolume sliding_window(const Volume& data,
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         opts.DisableCpuMemArena();
         opts.DisableMemPattern();
+#ifdef _WIN32
+        auto wpath = widen_path(model_paths[fi]);
+        Ort::Session sess(env, wpath.c_str(), opts);
+#else
         Ort::Session sess(env, model_paths[fi].c_str(), opts);
+#endif
 
         Ort::AllocatedStringPtr in_name_ptr = sess.GetInputNameAllocated(0, allocator);
         Ort::AllocatedStringPtr out_name_ptr = sess.GetOutputNameAllocated(0, allocator);

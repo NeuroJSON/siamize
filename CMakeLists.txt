@@ -88,6 +88,11 @@ endif()
 # coming from that block.
 if(MSVC)
     target_compile_definitions(siamize PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+    target_compile_options(siamize PRIVATE
+        /wd4068   # unknown pragma (zmat.h has #pragma GCC blocks)
+        /wd4244   # implicit narrowing conversions
+        /wd4267   # size_t -> int narrowing
+    )
 else()
     target_compile_options(siamize PRIVATE -Wall -Wno-deprecated-declarations
         -Wno-unused-function -Wno-unused-variable -Wno-sign-compare
