@@ -101,7 +101,11 @@ endif()
 
 # OpenMP linkage
 if(OpenMP_CXX_FOUND)
+    set(_omp_static_linked FALSE)
+
     if(SIAMIZE_STATIC_LINK AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # Linux/GCC: link libgomp.a directly so the binary doesn't pull in
+        # libgomp.so.1 at runtime.
         find_library(GOMP_STATIC_LIB NAMES libgomp.a
             HINTS /usr/lib/gcc/x86_64-linux-gnu/12
                   /usr/lib/gcc/x86_64-linux-gnu/11
@@ -112,11 +116,39 @@ if(OpenMP_CXX_FOUND)
             message(STATUS "libgomp static: ${GOMP_STATIC_LIB}")
             target_compile_options(siamize PRIVATE ${OpenMP_CXX_FLAGS})
             target_link_libraries(siamize PRIVATE ${GOMP_STATIC_LIB} pthread)
+            set(_omp_static_linked TRUE)
         else()
             message(WARNING "libgomp.a not found; OpenMP will link dynamically.")
-            target_link_libraries(siamize PRIVATE OpenMP::OpenMP_CXX)
         endif()
-    else()
+    elseif(SIAMIZE_STATIC_LINK AND APPLE
+           AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # macOS/Apple-Clang: Homebrew's libomp ships both .dylib and .a.
+        # Find the .a from $OpenMP_ROOT (set by `brew --prefix libomp` in CI),
+        # or fall back to the standard Homebrew install paths for arm64 / x86_64.
+        find_library(LIBOMP_STATIC_LIB NAMES libomp.a
+            HINTS $ENV{OpenMP_ROOT}/lib
+                  /opt/homebrew/opt/libomp/lib
+                  /usr/local/opt/libomp/lib
+        )
+        if(LIBOMP_STATIC_LIB)
+            message(STATUS "libomp static: ${LIBOMP_STATIC_LIB}")
+            # Apple clang needs the preprocessor flag explicitly; CMake's
+            # FindOpenMP discovers this and stores it in OpenMP_CXX_FLAGS.
+            target_compile_options(siamize PRIVATE ${OpenMP_CXX_FLAGS})
+            target_include_directories(siamize PRIVATE
+                $ENV{OpenMP_ROOT}/include
+                /opt/homebrew/opt/libomp/include
+                /usr/local/opt/libomp/include
+            )
+            target_link_libraries(siamize PRIVATE ${LIBOMP_STATIC_LIB})
+            set(_omp_static_linked TRUE)
+        else()
+            message(WARNING "libomp.a not found; OpenMP will link dynamically. "
+                            "Run `brew install libomp` and set OpenMP_ROOT.")
+        endif()
+    endif()
+
+    if(NOT _omp_static_linked)
         target_link_libraries(siamize PRIVATE OpenMP::OpenMP_CXX)
     endif()
 endif()

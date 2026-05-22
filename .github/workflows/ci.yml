@@ -48,7 +48,10 @@ jobs:
         run: scripts/fetch_deps.sh
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        # -DSIAMIZE_STATIC_LINK=ON is the default but we pin it for clarity:
+        # statically links libstdc++/libgcc/libgomp (Linux), libomp (macOS),
+        # /MT static CRT (Windows). Only libonnxruntime remains dynamic.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_STATIC_LINK=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
