@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 project(siamize LANGUAGES CXX)
 
+# siamize's own source is C++11-clean (no structured bindings, if-constexpr,
+# std::optional/string_view/filesystem, nested-namespace, or [[nodiscard]]).
+# We require C++17 strictly because the ONNX Runtime C API uses `noexcept`
+# as part of function-pointer typedefs (the C++17 P0012R1 feature where
+# exception specs became part of the type system, e.g.
+# `typedef void (*Fn)() noexcept;`). Pre-C++17 compilers reject those
+# typedefs even with the `noexcept` keyword itself available. ORT also
+# uses C++14-relaxed `constexpr` constructors. Bottom line: ORT pins us
+# to C++17; we don't get a choice.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

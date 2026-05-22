@@ -248,6 +248,21 @@ This is **secondary** — please always cite the SIAM paper above first.
 by Valabregue, Khemir, Bardinet, Rousseau, Auzias & Dorent (2026), and reuses
 the published SIAM v0.3 weights without modification.
 
+### Bundled third-party code
+
+- **[zmat](https://github.com/NeuroJSON/zmat)** by Qianqian Fang — the
+  single-header amalgamation `src/zmat/zmat.h` provides all `.nii.gz`
+  compression and decompression. zmat is part of the
+  [NeuroJSON project](https://neurojson.org), supported by US NIH grant
+  [U24-NS124027](https://reporter.nih.gov/project-details/10308329).
+  Upstream zmat is GPL-3.0; this single file has been **dual-licensed
+  under Apache-2.0 for siamize** by the zmat author, as documented in
+  the file's header. Inside zmat:
+  - **[miniz](https://github.com/richgel999/miniz)** by Rich Geldreich
+    — public-domain (Unlicense) zlib-subset deflate/inflate.
+
+### Test data
+
 The bundled test image `tests/sub-01_T1w.nii.gz` is the `sub-01` anatomical
 T1-weighted scan from [OpenNeuro ds000001 v1.0.0](https://openneuro.org/datasets/ds000001/versions/1.0.0),
 redistributed here under its original **CC0** public-domain dedication.
