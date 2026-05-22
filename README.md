@@ -124,6 +124,57 @@ With a system CUDA install (`/usr/local/cuda`), the standard
 GPUs (e.g., Volta sm_70) may need a cuDNN build that explicitly includes
 those kernels.
 
+#### Optional: TensorRT EP (advanced, batch-processing workloads only)
+
+For workloads that process hundreds of volumes with the same model/GPU
+combo, the TensorRT Execution Provider can shave ~35% off CUDA EP wall
+time. It's an opt-in build:
+
+```bash
+# Build with TRT enabled (gpu ORT prebuilt also has the TRT provider plugin).
+cmake -S . -B build -DSIAMIZE_GPU=tensorrt
+cmake --build build -j
+
+# Install the matching TensorRT Python wheel (ships libnvinfer + per-SM
+# builder resources). Pin it to your CUDA runtime version.
+pip install --user "tensorrt~=10.0"
+
+# Make TRT libs visible alongside the CUDA libs.
+TRT=$(python3 -c "import os, tensorrt_libs; print(os.path.dirname(tensorrt_libs.__file__))")
+export LD_LIBRARY_PATH="$TRT:$LD_LIBRARY_PATH"
+
+build/siamize -i input.nii.gz -o output.nii.gz \
+    --models models/fold_0_fp16.onnx \
+    --device tensorrt \
+    --trt-cache-dir $HOME/.cache/siamize/trt
+```
+
+**Cost model on a Turing RTX 2080 SUPER (single fold):**
+
+| Mode | Wall time | Notes |
+|---|---|---|
+| CUDA EP | 13.3 s | warm |
+| TRT EP, first run | **962 s** | one-time engine build per fold/GPU/TRT-version |
+| TRT EP, cached | **8.7 s** | ~35 % faster than CUDA, every subsequent run |
+
+Correctness: TRT vs CUDA output → 99.97 % voxel agreement, worst per-class
+Dice 0.997 (fused-kernel rounding only).
+
+**Breakeven**: amortizing one cold engine build (962 s) against the per-run
+savings (13.3 − 8.7 = 4.6 s) takes **~209 inferences per fold**. For a
+5-fold ensemble that's ~209 full-volume runs end-to-end.
+
+**Hidden costs:**
+
+- TensorRT Python wheel: ~1 GB on disk (libnvinfer + per-arch builder
+  resources for sm_75…sm_120).
+- Engine cache: 274 MB per fold (1.37 GB for the 5-fold ensemble).
+- Cache invalidation: any change to the ONNX model, the GPU compute
+  capability, or the TRT minor version forces a fresh ~16 min/fold rebuild.
+
+If you're not deploying to a batch server, **stick with the default CUDA
+EP**. The TRT path stays available for the lab that needs it.
+
 ### 3. Run
 
 ```bash

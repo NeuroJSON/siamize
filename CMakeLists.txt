@@ -57,23 +57,29 @@ else()
     set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.so.1)
 endif()
 
-# If GPU was requested, sanity-check that the fetched ORT actually contains
-# the CUDA provider plugin. The CPU-only tarball does not.
-if(SIAMIZE_GPU STREQUAL "cuda")
+# If a GPU backend was requested, sanity-check that the fetched ORT actually
+# contains the right provider plugin(s). The CPU-only tarball does not ship
+# them; the GPU tarball ships both CUDA and TensorRT plugin shared libs.
+if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
     if(WIN32)
         set(_cuda_provider "${ORT_ROOT}/lib/onnxruntime_providers_cuda.dll")
+        set(_trt_provider  "${ORT_ROOT}/lib/onnxruntime_providers_tensorrt.dll")
     else()
         set(_cuda_provider "${ORT_ROOT}/lib/libonnxruntime_providers_cuda.so")
+        set(_trt_provider  "${ORT_ROOT}/lib/libonnxruntime_providers_tensorrt.so")
     endif()
     if(NOT EXISTS "${_cuda_provider}")
         message(FATAL_ERROR
-            "SIAMIZE_GPU=cuda but the CUDA provider library was not found at\n"
-            "  ${_cuda_provider}\n"
-            "You probably fetched the CPU-only ORT prebuilt. Remove\n"
-            "third_party/onnxruntime/ and re-fetch with:\n"
+            "SIAMIZE_GPU=${SIAMIZE_GPU} but the CUDA provider library was not "
+            "found at ${_cuda_provider}.\n"
+            "You probably fetched the CPU-only ORT prebuilt. Re-fetch with:\n"
             "  rm -rf third_party/onnxruntime\n"
-            "  ORT_BUILD=gpu scripts/fetch_deps.sh           # default CUDA\n"
-            "  ORT_BUILD=gpu ORT_CUDA=13 scripts/fetch_deps.sh   # CUDA 13.x")
+            "  ORT_BUILD=gpu scripts/fetch_deps.sh")
+    endif()
+    if(SIAMIZE_GPU STREQUAL "tensorrt" AND NOT EXISTS "${_trt_provider}")
+        message(FATAL_ERROR
+            "SIAMIZE_GPU=tensorrt but the TensorRT provider library was not "
+            "found at ${_trt_provider}.")
     endif()
 endif()
 
@@ -127,9 +133,14 @@ else()
         -Wno-unused-but-set-variable -Wno-misleading-indentation)
 endif()
 
-# GPU backend preprocessor define — drives the runtime CUDA-EP-try block.
-if(SIAMIZE_GPU STREQUAL "cuda")
+
+# GPU backend preprocessor defines — drive the runtime EP-try blocks.
+# tensorrt implies cuda (TRT EP is registered first, CUDA second as fallback).
+if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
     target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_CUDA)
+endif()
+if(SIAMIZE_GPU STREQUAL "tensorrt")
+    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_TENSORRT)
 endif()
 
 # OpenMP linkage

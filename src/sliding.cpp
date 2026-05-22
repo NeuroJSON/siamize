@@ -11,6 +11,8 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -146,20 +148,62 @@ LogitsVolume sliding_window(const Volume& data,
                             int intra_threads,
                             float step_ratio,
                             bool verbose,
-                            const std::string& device) {
+                            const std::string& device,
+                            const std::string& trt_cache_dir) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
 
+    const bool trt_required  = (device == "tensorrt");
+    const bool trt_try       = trt_required;
     const bool cuda_required = (device == "cuda");
-    const bool cuda_try      = (device == "cuda" || device == "auto");
+    const bool cuda_try      = (device == "cuda" || device == "auto"
+                                || device == "tensorrt");
 
 #ifndef SIAMIZE_HAS_CUDA
 
-    if (cuda_required) {
+    if (cuda_required || trt_required) {
         throw std::runtime_error(
-            "device=cuda requested but siamize was built without GPU support. "
-            "Rebuild with -DSIAMIZE_GPU=cuda and the onnxruntime-gpu prebuilt.");
+            "device=" + device + " requested but siamize was built without GPU "
+            "support. Rebuild with -DSIAMIZE_GPU=cuda (or =tensorrt) and the "
+            "onnxruntime-gpu prebuilt.");
+    }
+
+#endif
+#ifndef SIAMIZE_HAS_TENSORRT
+
+    if (trt_required) {
+        throw std::runtime_error(
+            "device=tensorrt requested but siamize was built without TensorRT. "
+            "Rebuild with -DSIAMIZE_GPU=tensorrt.");
+    }
+
+#endif
+
+    // Resolve the TRT engine cache directory (used only when TRT is enabled).
+    std::string trt_cache = trt_cache_dir;
+
+    if (trt_try && trt_cache.empty()) {
+        const char* home = std::getenv("HOME");
+
+        if (home == nullptr) {
+            home = ".";
+        }
+
+        trt_cache = std::string(home) + "/.cache/siamize/trt";
+    }
+
+#ifdef SIAMIZE_HAS_TENSORRT
+
+    if (trt_try) {
+        try {
+            std::filesystem::create_directories(trt_cache);
+        } catch (const std::exception& e) {
+            if (trt_required) {
+                throw std::runtime_error(
+                    "failed to create TRT engine cache dir " + trt_cache + ": " + e.what());
+            }
+        }
     }
 
 #endif
@@ -221,10 +265,12 @@ LogitsVolume sliding_window(const Volume& data,
     Ort::AllocatorWithDefaultOptions allocator;
     auto mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-    // Decide on the execution provider once per call. On "auto", probe CUDA
-    // on the first fold and remember the outcome for the rest.
-    bool use_cuda = false;
-    bool cuda_probed = false;
+    // Decide on the execution providers once. On the first fold, try to
+    // register TRT (if requested) then CUDA (if available). Remember the
+    // outcome for subsequent folds.
+    bool use_trt   = false;
+    bool use_cuda  = false;
+    bool ep_probed = false;
 
     for (size_t fi = 0; fi < model_paths.size(); ++fi) {
         Ort::SessionOptions opts;
@@ -232,27 +278,74 @@ LogitsVolume sliding_window(const Volume& data,
         opts.SetInterOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        // For GPU runs we let ORT manage device memory itself; the
-        // disable-cpu-arena tweak only matters for the CPU EP path and can
-        // actually hurt GPU sessions if the arena is also used for staging.
-        if (!use_cuda && !cuda_try) {
+        const bool will_use_gpu = (use_trt || use_cuda || (!ep_probed && (trt_try || cuda_try)));
+
+        if (!will_use_gpu) {
             opts.DisableCpuMemArena();
             opts.DisableMemPattern();
         }
 
+#ifdef SIAMIZE_HAS_TENSORRT
+
+        // TRT EP first so it gets to claim subgraphs it can fuse; CUDA EP
+        // (registered below) picks up whatever TRT declines.
+        if (trt_try && (!ep_probed || use_trt)) {
+            try {
+                OrtTensorRTProviderOptionsV2* trt_opts = nullptr;
+                Ort::ThrowOnError(Ort::GetApi().CreateTensorRTProviderOptions(&trt_opts));
+
+                std::vector<const char*> tkeys;
+                std::vector<const char*> tvals;
+                tkeys.push_back("trt_engine_cache_enable");
+                tvals.push_back("1");
+                tkeys.push_back("trt_engine_cache_path");
+                tvals.push_back(trt_cache.c_str());
+                tkeys.push_back("trt_fp16_enable");
+                tvals.push_back("1");
+                Ort::ThrowOnError(Ort::GetApi().UpdateTensorRTProviderOptions(
+                                      trt_opts, tkeys.data(), tvals.data(), tkeys.size()));
+                opts.AppendExecutionProvider_TensorRT_V2(*trt_opts);
+                Ort::GetApi().ReleaseTensorRTProviderOptions(trt_opts);
+
+                if (!ep_probed) {
+                    use_trt = true;
+
+                    if (verbose) {
+                        std::fprintf(stderr,
+                                     "  TensorRT EP enabled (engine cache: %s)\n"
+                                     "  (first run on a new GPU/TRT version builds engines; ~1-5 min/fold)\n",
+                                     trt_cache.c_str());
+                    }
+                }
+            } catch (const Ort::Exception& e) {
+                if (trt_required) {
+                    throw;   // user explicitly asked for TensorRT
+                }
+
+                if (!ep_probed && verbose) {
+                    std::fprintf(stderr,
+                                 "  TensorRT EP unavailable (%s); falling back\n",
+                                 e.what());
+                }
+
+                use_trt = false;
+            }
+        }
+
+#endif
 #ifdef SIAMIZE_HAS_CUDA
 
-        if (cuda_try && (!cuda_probed || use_cuda)) {
+        if (cuda_try && (!ep_probed || use_cuda || use_trt)) {
             try {
                 OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
                 Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
                 opts.AppendExecutionProvider_CUDA_V2(*cuda_opts);
                 Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts);
 
-                if (!cuda_probed) {
+                if (!ep_probed) {
                     use_cuda = true;
 
-                    if (verbose) {
+                    if (verbose && !use_trt) {
                         std::fprintf(stderr, "  CUDA EP enabled\n");
                     }
                 }
@@ -261,7 +354,7 @@ LogitsVolume sliding_window(const Volume& data,
                     throw;   // user explicitly asked for CUDA
                 }
 
-                if (!cuda_probed && verbose) {
+                if (!ep_probed && verbose) {
                     std::fprintf(stderr,
                                  "  CUDA EP unavailable (%s); using CPU\n",
                                  e.what());
@@ -274,7 +367,7 @@ LogitsVolume sliding_window(const Volume& data,
         }
 
 #endif
-        cuda_probed = true;
+        ep_probed = true;
 
 #ifdef _WIN32
         auto wpath = widen_path(model_paths[fi]);

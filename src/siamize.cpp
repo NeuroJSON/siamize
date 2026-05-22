@@ -59,9 +59,12 @@ void usage(const char* exe) {
                  "  -i, --input         input NIfTI (.nii or .nii.gz, 3D)\n"
                  "  -o, --output        output label NIfTI (.nii.gz)\n"
                  "      --models        comma-separated .onnx files (one per fold), logits are averaged\n"
-                 "      --device D      execution provider: auto|cpu|cuda (default auto).\n"
+                 "      --device D      execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA (if compiled in) then falls back to CPU.\n"
-                 "      --threads N     ORT intra-op threads (default 8; ignored for CUDA)\n"
+                 "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
+                 "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
+                 "                         Engines are GPU- and TRT-version-specific; cached on first run.\n"
+                 "      --threads N     ORT intra-op threads (default 8; ignored for GPU EPs)\n"
                  "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans)\n"
                  "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training)\n"
                  "      --classes N     number of output classes, default 18 (SIAM v0.3)\n"
@@ -74,7 +77,8 @@ void usage(const char* exe) {
 
 int main(int argc, char** argv) {
     std::string input_path, output_path, models_csv;
-    std::string device = "auto";   // auto | cpu | cuda
+    std::string device = "auto";       // auto | cpu | cuda | tensorrt
+    std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     int threads = 8;
     bool verbose = false;
     std::array<int64_t, 3> patch = {256, 256, 192};
@@ -101,11 +105,20 @@ int main(int argc, char** argv) {
         } else if (a == "--device") {
             device = need();
 
-            if (device != "auto" && device != "cpu" && device != "cuda") {
-                std::fprintf(stderr, "--device must be auto|cpu|cuda (got '%s')\n",
+            // Allow `trt` as an alias for `tensorrt`.
+            if (device == "trt") {
+                device = "tensorrt";
+            }
+
+            if (device != "auto" && device != "cpu" && device != "cuda"
+                    && device != "tensorrt") {
+                std::fprintf(stderr,
+                             "--device must be auto|cpu|cuda|tensorrt (got '%s')\n",
                              device.c_str());
                 return 2;
             }
+        } else if (a == "--trt-cache-dir") {
+            trt_cache_dir = need();
         } else if (a == "--threads") {
             threads = std::stoi(need());
         } else if (a == "--spacing") {
@@ -187,7 +200,7 @@ int main(int argc, char** argv) {
     // sliding window
     LogitsVolume logits = siam::sliding_window(
                               resampled, model_paths, patch, num_classes,
-                              threads, 0.5f, verbose, device);
+                              threads, 0.5f, verbose, device, trt_cache_dir);
     resampled = Volume{};  // free
 
     // resample logits back to cropped (pre-resample) shape, per channel, with trilinear.
