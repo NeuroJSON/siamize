@@ -53,8 +53,26 @@ else
     archive="$tmp/ort.$ORT_EXT"
     curl -fsSL "$ORT_URL" -o "$archive"
     case "$ORT_EXT" in
-        tgz) tar xzf "$archive" -C "$tmp" ;;
-        zip) tar -xf "$archive" -C "$tmp" ;;   # bsdtar (Linux/macOS/Windows) handles zip
+        tgz)
+            tar xzf "$archive" -C "$tmp"
+            ;;
+        zip)
+            # Try multiple unzip strategies — what's available depends on the
+            # host (GNU tar can't handle .zip; bsdtar can; unzip and Python's
+            # zipfile module are also usually around).
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -q "$archive" -d "$tmp"
+            elif [[ -x /c/Windows/System32/tar.exe ]]; then
+                /c/Windows/System32/tar.exe -xf "$archive" -C "$tmp"
+            elif command -v 7z >/dev/null 2>&1; then
+                7z x "$archive" -o"$tmp" >/dev/null
+            elif command -v python3 >/dev/null 2>&1; then
+                python3 -m zipfile -e "$archive" "$tmp"
+            else
+                echo "no unzip / bsdtar / 7z / python3 available to extract $archive" >&2
+                exit 1
+            fi
+            ;;
     esac
     mv "$tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}" "$TP/onnxruntime"
     echo "[fetch_deps] ORT installed at $TP/onnxruntime"
