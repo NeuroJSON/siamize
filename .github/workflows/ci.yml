@@ -153,6 +153,92 @@ jobs:
           test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
           ls -lh pred_ci.nii.gz
 
+  mex-build:
+    # Build siamize's MATLAB/Octave MEX wrapper and verify it loads. Heavy
+    # full-inference test is left to cpp-build-cuda; this job's job is just
+    # to catch MEX build regressions on each supported host.
+    name: mex (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-octave
+            os: ubuntu-22.04
+            kind: octave
+            cmake_flag: -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+            mex_file: build/siamize.mex
+          - label: linux-matlab
+            os: ubuntu-22.04
+            kind: matlab
+            cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
+            mex_file: build/siamize.mexa64
+          - label: windows-matlab
+            os: windows-latest
+            kind: matlab
+            cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
+            mex_file: build/Release/siamize.mexw64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Octave (Linux)
+        if: matrix.kind == 'octave' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends octave liboctave-dev
+
+      - name: Set up MATLAB
+        if: matrix.kind == 'matlab'
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: R2024a
+
+      - name: Fetch C++ deps (CPU ORT)
+        run: scripts/fetch_deps.sh
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flag }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify MEX exists
+        run: |
+          ls -la "${{ matrix.mex_file }}"
+          test -s "${{ matrix.mex_file }}"
+
+      - name: Smoke-load MEX (Octave)
+        if: matrix.kind == 'octave' && runner.os == 'Linux'
+        run: |
+          # Calling with zero args triggers our "Usage:" error -- proves
+          # the .mex loads + reaches mexFunction.
+          octave-cli --no-gui --eval "addpath('build'); \
+            try; siamize(); catch err; \
+              if isempty(strfind(err.message, 'Usage:')); error('unexpected: %s', err.message); end; \
+              fprintf('MEX loaded and reached argument check\\n'); \
+            end" 2>&1 | tee mex.log
+          grep -q "MEX loaded" mex.log
+
+      - name: Smoke-load MEX (MATLAB)
+        if: matrix.kind == 'matlab'
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(fullfile(pwd, 'build'));
+            % cd into build/Release on Windows so the MEX picks up neighboring
+            % onnxruntime.dll via the EXE search rule.
+            if ispc; cd(fullfile('build', 'Release')); end
+            try
+              siamize();
+              error('siamize() with no args should have thrown');
+            catch err
+              if isempty(strfind(err.message, 'Usage:'))
+                error('unexpected: %s', err.message);
+              end
+              fprintf('MEX loaded and reached argument check\n');
+            end
+
   python-smoke:
     runs-on: ubuntu-22.04
     steps:

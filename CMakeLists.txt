@@ -23,6 +23,14 @@ option(SIAMIZE_STATIC_LINK
     "Statically link the C++ runtime / OpenMP into the binary so the only \
 non-system shared lib at runtime is libonnxruntime." ON)
 
+option(SIAMIZE_BUILD_MATLAB_MEX
+    "Build the MATLAB MEX wrapper (mex/siamize_mex.cpp). Auto-skipped if MATLAB \
+is not found." OFF)
+
+option(SIAMIZE_BUILD_OCTAVE_MEX
+    "Build the GNU Octave MEX wrapper via mkoctfile. Auto-skipped if mkoctfile \
+is not found." OFF)
+
 # GPU backend selection. "none" = CPU only (the smallest deployable bundle).
 # "cuda" = enable the ONNX Runtime CUDA Execution Provider; requires the
 # onnxruntime-gpu prebuilt (fetched via ORT_BUILD=gpu scripts/fetch_deps.sh)
@@ -42,6 +50,7 @@ endif()
 
 # ---- ORT (prebuilt) under third_party/onnxruntime/ --------------------------
 set(ORT_ROOT ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
+set(ORT_LIB_DIR ${ORT_ROOT}/lib)
 if(NOT EXISTS ${ORT_ROOT}/include/onnxruntime_cxx_api.h)
     message(FATAL_ERROR
         "ORT not found at ${ORT_ROOT}. Run scripts/fetch_deps.sh (Linux/macOS) "
@@ -103,6 +112,7 @@ endif()
 add_executable(siamize
     src/siamize.cpp
     src/nifti_io.cpp
+    src/orient.cpp
     src/preprocess.cpp
     src/sliding.cpp
 )
@@ -255,6 +265,118 @@ else()
     )
 endif()
 
+# ---- MATLAB MEX target ------------------------------------------------------
+set(_siamize_mex_sources
+    mex/siamize_mex.cpp
+    src/nifti_io.cpp
+    src/orient.cpp
+    src/preprocess.cpp
+    src/sliding.cpp
+)
+set(_siamize_mex_includes
+    src
+    ${ORT_ROOT}/include
+    ${ZMAT_INCLUDE}
+)
+
+if(SIAMIZE_BUILD_MATLAB_MEX)
+    find_package(Matlab COMPONENTS MX_LIBRARY)
+
+    if(Matlab_FOUND)
+        message(STATUS "MATLAB found at ${Matlab_ROOT_DIR}; building MEX")
+        matlab_add_mex(
+            NAME siamize_mex
+            SRC ${_siamize_mex_sources}
+            OUTPUT_NAME siamize
+        )
+        target_include_directories(siamize_mex PRIVATE ${_siamize_mex_includes})
+        target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
+        if(WIN32)
+            target_link_libraries(siamize_mex PRIVATE ${ORT_IMPORT_LIB})
+        else()
+            target_link_libraries(siamize_mex PRIVATE onnxruntime)
+        endif()
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(siamize_mex PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        if(MSVC)
+            target_compile_definitions(siamize_mex PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+            target_compile_options(siamize_mex PRIVATE /wd4068 /wd4244 /wd4267)
+        else()
+            target_compile_options(siamize_mex PRIVATE -Wall
+                -Wno-deprecated-declarations -Wno-unused-function
+                -Wno-unused-variable -Wno-sign-compare
+                -Wno-unused-but-set-variable -Wno-misleading-indentation)
+        endif()
+        # Make libonnxruntime findable when MATLAB loads the .mex*.
+        if(APPLE)
+            set_target_properties(siamize_mex PROPERTIES
+                BUILD_RPATH   "${ORT_LIB_DIR};@loader_path"
+                INSTALL_RPATH "@loader_path"
+            )
+        elseif(WIN32)
+            # Windows: copy onnxruntime.dll next to siamize.mexw64 so the
+            # PE loader resolves it at MEX load time.
+            add_custom_command(TARGET siamize_mex POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${ORT_RUNTIME_DLL} $<TARGET_FILE_DIR:siamize_mex>
+                COMMENT "Copying onnxruntime.dll next to siamize.mexw64")
+        else()
+            set_target_properties(siamize_mex PROPERTIES
+                BUILD_RPATH   "${ORT_LIB_DIR};\$ORIGIN"
+                INSTALL_RPATH "\$ORIGIN"
+            )
+        endif()
+    else()
+        message(STATUS "SIAMIZE_BUILD_MATLAB_MEX=ON but MATLAB not found; skipping")
+    endif()
+endif()
+
+# ---- GNU Octave MEX target --------------------------------------------------
+# Octave doesn't have a CMake target wrapper like FindMatlab, so we invoke
+# mkoctfile via a custom command. Output is siamize.mex (Octave's binary mex).
+if(SIAMIZE_BUILD_OCTAVE_MEX)
+    find_program(MKOCTFILE NAMES mkoctfile)
+    if(MKOCTFILE)
+        message(STATUS "Octave mkoctfile found: ${MKOCTFILE}")
+        set(_oct_out ${CMAKE_BINARY_DIR}/siamize.mex)
+        set(_oct_sources "")
+        foreach(s IN LISTS _siamize_mex_sources)
+            list(APPEND _oct_sources ${CMAKE_SOURCE_DIR}/${s})
+        endforeach()
+        set(_oct_inc "")
+        foreach(i IN LISTS _siamize_mex_includes)
+            if(IS_ABSOLUTE ${i})
+                list(APPEND _oct_inc "-I${i}")
+            else()
+                list(APPEND _oct_inc "-I${CMAKE_SOURCE_DIR}/${i}")
+            endif()
+        endforeach()
+        # mkoctfile defaults to C++11 on Octave 6.x; ORT 1.26 requires
+        # C++17 typedef-noexcept support. Inject -std=c++17 via env.
+        # mkoctfile honors LDFLAGS env for link-stage flags; -L/-l args
+        # on the command line get dropped silently.
+        set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR}")
+        add_custom_command(
+            OUTPUT ${_oct_out}
+            COMMAND ${CMAKE_COMMAND} -E env
+                "CXXFLAGS=-std=c++17 -O2 -fPIC"
+                "LDFLAGS=${_oct_ld}"
+                ${MKOCTFILE} --mex
+                ${_oct_inc}
+                ${_oct_sources}
+                $<$<BOOL:${OpenMP_CXX_FOUND}>:-fopenmp>
+                -Wno-unused -Wno-unknown-pragmas
+                -o ${_oct_out}
+            DEPENDS ${_oct_sources}
+            COMMENT "Building Octave MEX via mkoctfile -> ${_oct_out}"
+            VERBATIM)
+        add_custom_target(siamize_oct ALL DEPENDS ${_oct_out})
+    else()
+        message(STATUS "SIAMIZE_BUILD_OCTAVE_MEX=ON but mkoctfile not found; skipping")
+    endif()
+endif()
+
 # ---- summary ----------------------------------------------------------------
 message(STATUS "")
 message(STATUS "siamize configuration:")
@@ -267,4 +389,6 @@ message(STATUS "  zmat header:      ${ZMAT_INCLUDE}/zmat.h (bundled)")
 message(STATUS "  build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  OpenMP:           ${OpenMP_CXX_FOUND}")
 message(STATUS "  GPU backend:      ${SIAMIZE_GPU}")
+message(STATUS "  MATLAB MEX:       ${SIAMIZE_BUILD_MATLAB_MEX}")
+message(STATUS "  Octave MEX:       ${SIAMIZE_BUILD_OCTAVE_MEX}")
 message(STATUS "")
