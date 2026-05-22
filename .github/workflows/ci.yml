@@ -69,11 +69,13 @@ jobs:
     # fail to dlopen the CUDA runtime libraries, and silently fall back to
     # the CPU EP. This validates the build path AND the runtime fallback.
     #
-    # The fp16 ONNX weight file (~270 MB) is too big for git, so CI grabs
-    # fold_0 from a public URL configured in the repository's GitHub
-    # Actions "variables" (Settings -> Secrets and variables -> Actions ->
-    # Variables -> SIAMIZE_WEIGHTS_URL). The job is skipped if the variable
-    # is not configured.
+    # The fp16 ONNX weight file (~270 MB raw, ~87 MB 7z-compressed) is too
+    # big for git, so CI grabs it from a public URL configured in the
+    # repository's GitHub Actions variables: Settings -> Secrets and
+    # variables -> Actions -> Variables -> SIAMIZE_WEIGHTS_URL must point
+    # at the FULL URL of the compressed fold_0 archive, e.g.
+    #   https://neurojson.org/siamize/weights/siam_v03/fold_0_fp16.onnx.7z
+    # The job is skipped if the variable is not configured.
     name: build+run cuda (${{ matrix.os }})
     if: vars.SIAMIZE_WEIGHTS_URL != ''
     runs-on: ${{ matrix.os }}
@@ -93,6 +95,10 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
+      - name: Install 7-Zip (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends p7zip-full
+
       - name: Cache fold_0 weight
         id: cache-fold0
         uses: actions/cache@v4
@@ -100,12 +106,17 @@ jobs:
           path: models/fold_0_fp16.onnx
           key: siam-fold0-fp16-v1
 
-      - name: Fetch fold_0 weight (cache miss)
+      - name: Fetch + extract fold_0 weight (cache miss)
         if: steps.cache-fold0.outputs.cache-hit != 'true'
         env:
-          SIAMIZE_RELEASE_BASE: ${{ vars.SIAMIZE_WEIGHTS_URL }}
-          SIAMIZE_FOLDS: "0"
-        run: scripts/fetch_weights.sh
+          URL: ${{ vars.SIAMIZE_WEIGHTS_URL }}
+        run: |
+          mkdir -p models
+          echo "Downloading $URL"
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
+          7z x -y models/fold_0_fp16.onnx.7z -omodels/
+          rm -f models/fold_0_fp16.onnx.7z
+          ls -la models/
 
       - name: Configure (CUDA EP)
         run: |
