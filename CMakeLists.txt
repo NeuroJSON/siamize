@@ -23,6 +23,14 @@ option(SIAMIZE_STATIC_LINK
     "Statically link the C++ runtime / OpenMP into the binary so the only \
 non-system shared lib at runtime is libonnxruntime." ON)
 
+# GPU backend selection. "none" = CPU only (the smallest deployable bundle).
+# "cuda" = enable the ONNX Runtime CUDA Execution Provider; requires the
+# onnxruntime-gpu prebuilt (fetched via ORT_BUILD=gpu scripts/fetch_deps.sh)
+# and a runtime CUDA + cuDNN install. At runtime the binary tries CUDA first
+# and falls back to CPU if libcudart / libcudnn cannot be loaded.
+set(SIAMIZE_GPU "none" CACHE STRING "GPU backend: none, cuda")
+set_property(CACHE SIAMIZE_GPU PROPERTY STRINGS none cuda)
+
 # ---- platform detection -----------------------------------------------------
 if(WIN32)
     set(SIAMIZE_PLATFORM "win")
@@ -47,6 +55,26 @@ elseif(APPLE)
     set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.dylib)
 else()
     set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.so.1)
+endif()
+
+# If GPU was requested, sanity-check that the fetched ORT actually contains
+# the CUDA provider plugin. The CPU-only tarball does not.
+if(SIAMIZE_GPU STREQUAL "cuda")
+    if(WIN32)
+        set(_cuda_provider "${ORT_ROOT}/lib/onnxruntime_providers_cuda.dll")
+    else()
+        set(_cuda_provider "${ORT_ROOT}/lib/libonnxruntime_providers_cuda.so")
+    endif()
+    if(NOT EXISTS "${_cuda_provider}")
+        message(FATAL_ERROR
+            "SIAMIZE_GPU=cuda but the CUDA provider library was not found at\n"
+            "  ${_cuda_provider}\n"
+            "You probably fetched the CPU-only ORT prebuilt. Remove\n"
+            "third_party/onnxruntime/ and re-fetch with:\n"
+            "  rm -rf third_party/onnxruntime\n"
+            "  ORT_BUILD=gpu scripts/fetch_deps.sh           # default CUDA\n"
+            "  ORT_BUILD=gpu ORT_CUDA=13 scripts/fetch_deps.sh   # CUDA 13.x")
+    endif()
 endif()
 
 # ---- zmat (bundled, single-header at src/zmat/zmat.h) ----------------------
@@ -97,6 +125,11 @@ else()
     target_compile_options(siamize PRIVATE -Wall -Wno-deprecated-declarations
         -Wno-unused-function -Wno-unused-variable -Wno-sign-compare
         -Wno-unused-but-set-variable -Wno-misleading-indentation)
+endif()
+
+# GPU backend preprocessor define — drives the runtime CUDA-EP-try block.
+if(SIAMIZE_GPU STREQUAL "cuda")
+    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_CUDA)
 endif()
 
 # OpenMP linkage
@@ -204,4 +237,5 @@ message(STATUS "  ORT:              ${ORT_ROOT}")
 message(STATUS "  zmat header:      ${ZMAT_INCLUDE}/zmat.h (bundled)")
 message(STATUS "  build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  OpenMP:           ${OpenMP_CXX_FOUND}")
+message(STATUS "  GPU backend:      ${SIAMIZE_GPU}")
 message(STATUS "")

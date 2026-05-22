@@ -74,6 +74,8 @@ scripts\fetch_deps.ps1
 
 ### 2. Build the C++ binary
 
+CPU-only (default):
+
 ```bash
 cmake -S . -B build
 cmake --build build -j
@@ -84,6 +86,43 @@ the binary looks first in `$ORIGIN` (next to itself) and then in
 `third_party/onnxruntime/lib/` (the development tree), so you can either
 drop the .so next to the binary for distribution or run from a fresh
 checkout without setting `LD_LIBRARY_PATH`.
+
+#### Optional: NVIDIA GPU build (CUDA Execution Provider)
+
+```bash
+# Re-fetch ORT with CUDA provider plugins.
+rm -rf third_party/onnxruntime
+ORT_BUILD=gpu scripts/fetch_deps.sh                  # default = CUDA 12.x build
+# or, if your NVIDIA driver is CUDA 13:
+# ORT_BUILD=gpu ORT_CUDA=13 scripts/fetch_deps.sh
+
+# Configure with the CUDA backend enabled.
+rm -rf build
+cmake -S . -B build -DSIAMIZE_GPU=cuda
+cmake --build build -j
+```
+
+The binary then accepts `--device {auto,cpu,cuda}` (default `auto`). On
+`auto` it tries to register the CUDA Execution Provider and falls back to
+CPU if the runtime libraries (`libcudart`, `libcudnn`, `libcublasLt`) can't
+be loaded. Pass `--device cuda` to force GPU and fail loudly if it isn't
+available; pass `--device cpu` to skip GPU even when compiled in.
+
+CUDA runtime libraries are loaded via `dlopen`, so you may need to set
+`LD_LIBRARY_PATH` to include their location. With PyTorch-managed CUDA
+(pip's `nvidia-*` packages):
+
+```bash
+NV=$(python3 -c "import os, nvidia; print(os.path.dirname(nvidia.__file__))")
+export LD_LIBRARY_PATH="$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/cudnn/lib:$NV/cufft/lib:$NV/curand/lib:$NV/cuda_nvrtc/lib:$NV/nvjitlink/lib:$LD_LIBRARY_PATH"
+build/siamize -i ... --device cuda ...
+```
+
+With a system CUDA install (`/usr/local/cuda`), the standard
+`LD_LIBRARY_PATH=/usr/local/cuda/lib64` is enough. ORT 1.26 requires
+**cuDNN 9** with a kernel image for your GPU's compute capability — older
+GPUs (e.g., Volta sm_70) may need a cuDNN build that explicitly includes
+those kernels.
 
 ### 3. Run
 

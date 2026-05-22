@@ -8,6 +8,8 @@
 set -euo pipefail
 
 ORT_VERSION="${ORT_VERSION:-1.26.0}"
+ORT_BUILD="${ORT_BUILD:-cpu}"        # cpu | gpu
+ORT_CUDA="${ORT_CUDA:-}"             # blank (default CUDA), or 13 for cuda13 variant
 
 OS_NAME="$(uname -s)"
 ARCH="$(uname -m)"
@@ -37,6 +39,22 @@ case "$OS_NAME" in
         exit 1
         ;;
 esac
+
+# Optional GPU build. NVIDIA CUDA prebuilts exist for Linux x64 and Windows x64.
+# macOS / aarch64 have no CUDA prebuilts — they fall back to CPU silently.
+if [[ "$ORT_BUILD" == "gpu" ]]; then
+    case "$ORT_ARCH" in
+        linux-x64|win-x64)
+            ORT_ARCH="${ORT_ARCH}-gpu"
+            if [[ -n "$ORT_CUDA" ]]; then
+                ORT_ARCH="${ORT_ARCH}_cuda${ORT_CUDA}"   # e.g. linux-x64-gpu_cuda13
+            fi
+            ;;
+        *)
+            echo "[fetch_deps] GPU build not available for $ORT_ARCH; falling back to CPU." >&2
+            ;;
+    esac
+fi
 
 ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${ORT_ARCH}-${ORT_VERSION}.${ORT_EXT}"
 
@@ -74,7 +92,16 @@ else
             fi
             ;;
     esac
-    mv "$tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}" "$TP/onnxruntime"
+    # The extracted top-level directory name doesn't always match ORT_ARCH
+    # verbatim (e.g. the gpu_cuda13 tarball extracts into a plain "gpu" dir).
+    # Just take whichever onnxruntime-* directory landed in $tmp.
+    extracted="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'onnxruntime-*' | head -1)"
+    if [[ -z "$extracted" ]]; then
+        echo "[fetch_deps] no onnxruntime-* dir found inside the tarball" >&2
+        ls -la "$tmp" >&2
+        exit 1
+    fi
+    mv "$extracted" "$TP/onnxruntime"
     echo "[fetch_deps] ORT installed at $TP/onnxruntime"
 fi
 

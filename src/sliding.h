@@ -11,6 +11,10 @@ namespace siam {
 //
 // `intra_threads` is forwarded to ORT's SessionOptions.
 // `verbose` prints per-tile progress.
+// `device` is "auto", "cpu", or "cuda":
+//    "auto" -> try CUDA if compiled in, fall back to CPU silently.
+//    "cpu"  -> never try CUDA.
+//    "cuda" -> require CUDA; throws if it can't be registered.
 //
 // Returns logits with shape (num_classes, Z, Y, X) at the same grid as input.
 LogitsVolume sliding_window(const Volume& data,
@@ -19,6 +23,7 @@ LogitsVolume sliding_window(const Volume& data,
                             int64_t num_classes,
                             int intra_threads,
                             float step_ratio,
-                            bool verbose);
+                            bool verbose,
+                            const std::string& device = "auto");
 
 }  // namespace siam

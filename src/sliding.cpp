@@ -145,10 +145,24 @@ LogitsVolume sliding_window(const Volume& data,
                             int64_t num_classes,
                             int intra_threads,
                             float step_ratio,
-                            bool verbose) {
+                            bool verbose,
+                            const std::string& device) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
+
+    const bool cuda_required = (device == "cuda");
+    const bool cuda_try      = (device == "cuda" || device == "auto");
+
+#ifndef SIAMIZE_HAS_CUDA
+
+    if (cuda_required) {
+        throw std::runtime_error(
+            "device=cuda requested but siamize was built without GPU support. "
+            "Rebuild with -DSIAMIZE_GPU=cuda and the onnxruntime-gpu prebuilt.");
+    }
+
+#endif
 
     const int64_t Z = data.shape[0], Y = data.shape[1], X = data.shape[2];
     // Pad if input is smaller than patch in any dim.
@@ -207,13 +221,61 @@ LogitsVolume sliding_window(const Volume& data,
     Ort::AllocatorWithDefaultOptions allocator;
     auto mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
+    // Decide on the execution provider once per call. On "auto", probe CUDA
+    // on the first fold and remember the outcome for the rest.
+    bool use_cuda = false;
+    bool cuda_probed = false;
+
     for (size_t fi = 0; fi < model_paths.size(); ++fi) {
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(intra_threads);
         opts.SetInterOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        opts.DisableCpuMemArena();
-        opts.DisableMemPattern();
+
+        // For GPU runs we let ORT manage device memory itself; the
+        // disable-cpu-arena tweak only matters for the CPU EP path and can
+        // actually hurt GPU sessions if the arena is also used for staging.
+        if (!use_cuda && !cuda_try) {
+            opts.DisableCpuMemArena();
+            opts.DisableMemPattern();
+        }
+
+#ifdef SIAMIZE_HAS_CUDA
+
+        if (cuda_try && (!cuda_probed || use_cuda)) {
+            try {
+                OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
+                Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
+                opts.AppendExecutionProvider_CUDA_V2(*cuda_opts);
+                Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts);
+
+                if (!cuda_probed) {
+                    use_cuda = true;
+
+                    if (verbose) {
+                        std::fprintf(stderr, "  CUDA EP enabled\n");
+                    }
+                }
+            } catch (const Ort::Exception& e) {
+                if (cuda_required) {
+                    throw;   // user explicitly asked for CUDA
+                }
+
+                if (!cuda_probed && verbose) {
+                    std::fprintf(stderr,
+                                 "  CUDA EP unavailable (%s); using CPU\n",
+                                 e.what());
+                }
+
+                use_cuda = false;
+                opts.DisableCpuMemArena();
+                opts.DisableMemPattern();
+            }
+        }
+
+#endif
+        cuda_probed = true;
+
 #ifdef _WIN32
         auto wpath = widen_path(model_paths[fi]);
         Ort::Session sess(env, wpath.c_str(), opts);
