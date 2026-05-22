@@ -67,7 +67,7 @@ endif()
 
 # ---- main binary ------------------------------------------------------------
 add_executable(siamize
-    src/main.cpp
+    src/siamize.cpp
     src/nifti_io.cpp
     src/preprocess.cpp
     src/sliding.cpp
