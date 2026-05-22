@@ -210,13 +210,35 @@ Locally tested: Linux x86_64. macOS / Windows are exercised by CI (see
 
 ## Performance
 
-Measured on a TITAN V workstation, CPU only:
+All measurements use the bundled `tests/sub-01_T1w.nii.gz` (160×192×192,
+1.0/1.333/1.333 mm) running siamize's 5-fold ensemble with `models/fold_*_fp16.onnx`.
+
+### CPU (TITAN V workstation, x86, 8 threads)
 
 | Run | Time |
 |---|---|
-| C++ 5-fold ensemble | 634 s (10.5 min) |
+| C++ 5-fold ensemble (`siamize --device cpu`) | 634 s (10.5 min) |
+| C++ single fold | 126 s |
 | Python ORT 5-fold | 781 s (13 min) |
 | Original `siam-pred` 5-fold CPU (per upstream README) | ~25 min |
+
+### NVIDIA GPU (siamize built with `-DSIAMIZE_GPU=cuda`)
+
+| Run | GPU | Time | vs CPU C++ |
+|---|---|---|---|
+| Single fold | RTX 2080 Super (Turing sm_75, 8 GB) | 13.3 s (±0.04 s, n=3) | **9.5×** |
+| 5-fold ensemble | RTX 2080 Super (Turing sm_75, 8 GB) | 58.5 s | **~11×** |
+| Single fold | A100 (Ampere sm_80, 40 GB) | pending — device contended at benchmark time |
+
+Correctness: the Turing 5-fold output matches the Phase-1 PyTorch reference
+at 99.7167% voxel agreement — identical to the CPU C++ result. Switching to
+the CUDA Execution Provider does not introduce additional numerical drift on
+top of fp16 ONNX + cubic-Hermite resampling.
+
+GPU memory: the full 5-fold run fits on the 8 GB RTX 2080 Super with no OOM.
+Estimated peak total ≈ 4–6 GB (model weights + held activations + cuDNN
+workspace + output). For low-VRAM cards a `gpu_mem_limit` knob can be wired
+in; in practice 8 GB has been sufficient.
 
 ## Engine choice / GPU portability
 
