@@ -2,12 +2,12 @@
 # Fetch C++ build dependencies into third_party/.
 #   - ONNX Runtime prebuilt for the host platform (Linux x64/aarch64,
 #     macOS x86_64/arm64, Windows x64 via Git Bash).
-#   - nifti_clib (git clone)
-# Re-runnable; skips already-present trees.
+#
+# zmat (the single-header compression library) is bundled directly in this
+# repo under src/zmat/zmat.h — no fetch needed.
 set -euo pipefail
 
 ORT_VERSION="${ORT_VERSION:-1.26.0}"
-NIFTI_REPO="${NIFTI_REPO:-https://github.com/NIFTI-Imaging/nifti_clib.git}"
 
 OS_NAME="$(uname -s)"
 ARCH="$(uname -m)"
@@ -78,13 +78,6 @@ else
     echo "[fetch_deps] ORT installed at $TP/onnxruntime"
 fi
 
-if [[ -d "$TP/nifti_clib" ]]; then
-    echo "[fetch_deps] nifti_clib already present, skipping"
-else
-    echo "[fetch_deps] cloning nifti_clib ..."
-    git clone --depth 1 "$NIFTI_REPO" "$TP/nifti_clib"
-fi
-
 echo "[fetch_deps] done."
 echo "  ORT:    $TP/onnxruntime"
-echo "  NIfTI:  $TP/nifti_clib"
+echo "  zmat:   src/zmat/zmat.h (bundled, dual-licensed Apache-2.0)"

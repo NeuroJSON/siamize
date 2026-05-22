@@ -3,7 +3,7 @@ build/
 *.o
 *.a
 
-# Vendored deps (fetched via scripts/fetch_deps.sh)
+# Fetched dependencies (pulled by scripts/fetch_deps.sh on demand)
 third_party/
 
 # Pretrained weights (fetched via scripts/fetch_weights.sh)

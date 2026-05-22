@@ -10,7 +10,6 @@
 $ErrorActionPreference = "Stop"
 
 $OrtVersion = if ($env:ORT_VERSION) { $env:ORT_VERSION } else { "1.26.0" }
-$NiftiRepo  = if ($env:NIFTI_REPO)  { $env:NIFTI_REPO }  else { "https://github.com/NIFTI-Imaging/nifti_clib.git" }
 $OrtArch    = "win-x64"
 $OrtUrl     = "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVersion/onnxruntime-$OrtArch-$OrtVersion.zip"
 
@@ -34,14 +33,6 @@ if (Test-Path $OrtDir) {
     Write-Host "[fetch_deps] ORT installed at $OrtDir"
 }
 
-$NiftiDir = Join-Path $TP "nifti_clib"
-if (Test-Path $NiftiDir) {
-    Write-Host "[fetch_deps] nifti_clib already present, skipping"
-} else {
-    Write-Host "[fetch_deps] cloning nifti_clib ..."
-    git clone --depth 1 $NiftiRepo $NiftiDir
-}
-
 Write-Host "[fetch_deps] done."
-Write-Host "  ORT:   $OrtDir"
-Write-Host "  NIfTI: $NiftiDir"
+Write-Host "  ORT:  $OrtDir"
+Write-Host "  zmat: src\zmat\zmat.h (bundled, dual-licensed Apache-2.0)"
