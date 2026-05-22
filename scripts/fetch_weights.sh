@@ -11,10 +11,12 @@
 # $HOME/siam_params/v0.3/pred_DS108_LcsfP_Ano (the default `siam-pred` cache).
 set -euo pipefail
 
-# TODO: replace with a real release tag URL once the first siamize release
-# is cut. Example URL pattern:
-#   https://github.com/NeuroJSON/siamize/releases/download/v0.1.0/fold_${f}_fp16.onnx
+# SIAMIZE_RELEASE_BASE: base URL hosting the fp16 ONNX folds.
+#   Each fold is expected at  <base>/fold_<N>_fp16.onnx
+# SIAMIZE_FOLDS: comma-separated list of folds to fetch (default 0,1,2,3,4).
+#   Set SIAMIZE_FOLDS=0 to grab just fold 0 (CI smoke tests).
 RELEASE_BASE="${SIAMIZE_RELEASE_BASE:-}"
+FOLDS="${SIAMIZE_FOLDS:-0,1,2,3,4}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS="$HERE/models"
@@ -40,7 +42,8 @@ EOF
     exit 1
 fi
 
-for f in 0 1 2 3 4; do
+IFS=',' read -ra FOLD_LIST <<< "$FOLDS"
+for f in "${FOLD_LIST[@]}"; do
     out="$MODELS/fold_${f}_fp16.onnx"
     if [[ -s "$out" ]]; then
         echo "[fetch_weights] fold_${f}_fp16.onnx already present"

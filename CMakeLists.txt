@@ -221,10 +221,28 @@ endif()
 
 # ---- RPATH / DLL placement --------------------------------------------------
 if(WIN32)
+    # Always copy the main ORT DLL next to siamize.exe (no RPATH on Windows).
     add_custom_command(TARGET siamize POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${ORT_RUNTIME_DLL} $<TARGET_FILE_DIR:siamize>
         COMMENT "Copying onnxruntime.dll next to siamize.exe")
+
+    # For GPU builds, also copy the provider plugin DLLs so ORT can dlopen them.
+    if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+        add_custom_command(TARGET siamize POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ORT_ROOT}/lib/onnxruntime_providers_shared.dll"
+                "${ORT_ROOT}/lib/onnxruntime_providers_cuda.dll"
+                $<TARGET_FILE_DIR:siamize>
+            COMMENT "Copying ORT CUDA provider DLLs next to siamize.exe")
+    endif()
+    if(SIAMIZE_GPU STREQUAL "tensorrt")
+        add_custom_command(TARGET siamize POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ORT_ROOT}/lib/onnxruntime_providers_tensorrt.dll"
+                $<TARGET_FILE_DIR:siamize>
+            COMMENT "Copying ORT TensorRT provider DLL next to siamize.exe")
+    endif()
 elseif(APPLE)
     set_target_properties(siamize PROPERTIES
         BUILD_RPATH   "${ORT_ROOT}/lib;@executable_path;@loader_path"

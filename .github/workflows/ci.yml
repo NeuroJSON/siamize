@@ -62,6 +62,86 @@ jobs:
       - name: Smoke-run --help
         run: ${{ matrix.binary }} --help
 
+  cpp-build-cuda:
+    # Builds siamize with the CUDA Execution Provider enabled, then runs a
+    # single-fold inference on the bundled sample. GitHub-hosted runners
+    # have no NVIDIA GPU, so we expect siamize to register CUDA at startup,
+    # fail to dlopen the CUDA runtime libraries, and silently fall back to
+    # the CPU EP. This validates the build path AND the runtime fallback.
+    #
+    # The fp16 ONNX weight file (~270 MB) is too big for git, so CI grabs
+    # fold_0 from a public URL configured in the repository's GitHub
+    # Actions "variables" (Settings -> Secrets and variables -> Actions ->
+    # Variables -> SIAMIZE_WEIGHTS_URL). The job is skipped if the variable
+    # is not configured.
+    name: build+run cuda (${{ matrix.os }})
+    if: vars.SIAMIZE_WEIGHTS_URL != ''
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            binary: build/siamize
+          - os: windows-latest
+            binary: build/Release/siamize.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch C++ deps (GPU ORT prebuilt)
+        env:
+          ORT_BUILD: gpu
+        run: scripts/fetch_deps.sh
+
+      - name: Cache fold_0 weight
+        id: cache-fold0
+        uses: actions/cache@v4
+        with:
+          path: models/fold_0_fp16.onnx
+          key: siam-fold0-fp16-v1
+
+      - name: Fetch fold_0 weight (cache miss)
+        if: steps.cache-fold0.outputs.cache-hit != 'true'
+        env:
+          SIAMIZE_RELEASE_BASE: ${{ vars.SIAMIZE_WEIGHTS_URL }}
+          SIAMIZE_FOLDS: "0"
+        run: scripts/fetch_weights.sh
+
+      - name: Configure (CUDA EP)
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSIAMIZE_STATIC_LINK=ON \
+              -DSIAMIZE_GPU=cuda
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
+        run: |
+          set -e
+          ${{ matrix.binary }} \
+              -i tests/sub-01_T1w.nii.gz \
+              -o pred_ci.nii.gz \
+              --models models/fold_0_fp16.onnx \
+              --device auto \
+              -v 2>&1 | tee siamize.log
+
+      - name: Verify CPU fallback happened
+        run: |
+          if grep -q "CUDA EP unavailable" siamize.log; then
+            echo "OK: CUDA EP correctly fell back to CPU."
+          else
+            echo "FAIL: expected 'CUDA EP unavailable' fallback message; got:"
+            cat siamize.log
+            exit 1
+          fi
+
+      - name: Verify output produced
+        run: |
+          test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
+          ls -lh pred_ci.nii.gz
+
   python-smoke:
     runs-on: ubuntu-22.04
     steps:
