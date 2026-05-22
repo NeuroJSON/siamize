@@ -20,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using siam::LogitsVolume;
@@ -64,7 +65,7 @@ void usage(const char* exe) {
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
                  "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
                  "                         Engines are GPU- and TRT-version-specific; cached on first run.\n"
-                 "      --threads N     ORT intra-op threads (default 8; ignored for GPU EPs)\n"
+                 "      --threads N     ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs)\n"
                  "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans)\n"
                  "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training)\n"
                  "      --classes N     number of output classes, default 18 (SIAM v0.3)\n"
@@ -79,7 +80,7 @@ int main(int argc, char** argv) {
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
-    int threads = 8;
+    int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     bool verbose = false;
     std::array<int64_t, 3> patch = {256, 256, 192};
     float target_spacing = 0.75f;
@@ -148,6 +149,20 @@ int main(int argc, char** argv) {
     }
 
     auto model_paths = split_csv(models_csv);
+
+    if (threads <= 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        threads = (hc > 0) ? static_cast<int>(hc) : 4;
+
+        if (verbose) {
+            std::fprintf(stderr,
+                         "intra-op threads: %d (auto-detected from "
+                         "std::thread::hardware_concurrency())\n",
+                         threads);
+        }
+    } else if (verbose) {
+        std::fprintf(stderr, "intra-op threads: %d (user-supplied)\n", threads);
+    }
 
     auto t_start = std::chrono::steady_clock::now();
 
