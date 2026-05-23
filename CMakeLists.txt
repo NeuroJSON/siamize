@@ -24,7 +24,7 @@ option(SIAMIZE_STATIC_LINK
 non-system shared lib at runtime is libonnxruntime." ON)
 
 option(SIAMIZE_BUILD_MATLAB_MEX
-    "Build the MATLAB MEX wrapper (matlab/siamize_mex.cpp). Auto-skipped if MATLAB \
+    "Build the MATLAB MEX wrapper (src/siamize_mex.cpp). Auto-skipped if MATLAB \
 is not found." OFF)
 
 option(SIAMIZE_BUILD_OCTAVE_MEX
@@ -268,7 +268,7 @@ endif()
 
 # ---- MATLAB MEX target ------------------------------------------------------
 set(_siamize_mex_sources
-    matlab/siamize_mex.cpp
+    src/siamize_mex.cpp
     src/nifti_io.cpp
     src/orient.cpp
     src/preprocess.cpp

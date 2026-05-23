@@ -197,13 +197,14 @@ Default URL base: `https://neurojson.org/siamize/weights/siam_v03/`.
 matlab/
 ├── README.md            # this file
 ├── siamize.m            # public dispatcher (loadjd, shortcuts, cache, save)
-├── siamize_mex.cpp      # MEX entry point -> siamex.mex*
 ├── jsonlab/             # submodule: NeuroJSON jsonlab (loadjd/savejd/...)
 └── tests/               # unit tests for siamize.m (Octave + MATLAB)
 ```
 
-The MEX C++ links the same `siamize_core` library as the CLI binary;
-shared headers live under `src/` at the repo root.
+The MEX C++ entry point (`src/siamize_mex.cpp`) lives next to the rest of
+the C++ sources at `src/`; CMake's `matlab_add_mex` / `mkoctfile` rules
+compile it together with the shared `siamize_core` translation units, so
+MEX-side and CLI predictions stay bit-identical.
 
 ## Platforms
 
