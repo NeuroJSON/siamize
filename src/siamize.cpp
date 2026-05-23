@@ -263,6 +263,7 @@ int main(int argc, char** argv) {
     // exception re-raises so the user sees the explicit failure they
     // asked for.
     LogitsVolume logits;
+
     try {
         logits = siam::sliding_window(
                      resampled, model_paths, patch, num_classes,
@@ -288,6 +289,7 @@ int main(int argc, char** argv) {
             throw;
         }
     }
+
     resampled = Volume{};  // free
 
     // resample logits back to cropped (pre-resample) shape, per channel, with trilinear.

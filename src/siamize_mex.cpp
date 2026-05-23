@@ -60,14 +60,17 @@ std::string mx_to_string(const mxArray* a) {
     if (!mxIsChar(a)) {
         die("siamize:type", "expected a char array");
     }
+
     mwSize n = mxGetNumberOfElements(a) + 1;
     // Octave's mex.h declares mxGetString with a non-const char*; use a
     // std::vector buffer rather than std::string::data() to avoid a
     // const-correctness mismatch on older mex.h variants.
     std::vector<char> buf(n, '\0');
+
     if (mxGetString(a, buf.data(), n) != 0) {
         die("siamize:string", "failed to read string argument");
     }
+
     return std::string(buf.data());
 }
 
@@ -89,9 +92,11 @@ std::array<float, 16> read_affine(const mxArray* a) {
     if (mxIsComplex(a)) {
         die("siamize:affine", "affine must be real");
     }
+
     if (mxGetNumberOfDimensions(a) != 2) {
         die("siamize:affine", "affine must be a 2D matrix");
     }
+
     const mwSize* d = mxGetDimensions(a);
 
     // Read the (row, col) element from a column-major MATLAB matrix as float,
@@ -99,19 +104,24 @@ std::array<float, 16> read_affine(const mxArray* a) {
     // nii.NIFTIHeader.Affine is single-precision; many other tools use double.
     auto get = [&](mwSize r, mwSize c, mwSize nrows) -> float {
         const size_t off = r + c * nrows;
+
         switch (mxGetClassID(a)) {
             case mxDOUBLE_CLASS:
                 return static_cast<float>(static_cast<const double*>(mxGetData(a))[off]);
+
             case mxSINGLE_CLASS:
                 return static_cast<const float*>(mxGetData(a))[off];
+
             default:
                 die("siamize:affine", "affine must be single or double");
         }
+
         return 0.0f;
     };
 
     std::array<float, 16> aff{};
     aff[15] = 1.0f;
+
     if (d[0] == 3 && d[1] == 4) {
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 4; ++j) {
@@ -127,20 +137,24 @@ std::array<float, 16> read_affine(const mxArray* a) {
             "affine must be 3x4 or 4x4 (got " + std::to_string(d[0]) +
             "x" + std::to_string(d[1]) + ")");
     }
+
     return aff;
 }
 
 std::vector<std::string> read_models(const mxArray* a) {
     std::vector<std::string> out;
+
     if (mxIsEmpty(a)) {
         // empty -> caller wants the default single-fold
         return out;
     }
+
     if (mxIsChar(a)) {
         out.push_back(mx_to_string(a));
     } else if (mxIsCell(a)) {
         mwSize n = mxGetNumberOfElements(a);
         out.reserve(n);
+
         for (mwSize i = 0; i < n; ++i) {
             const mxArray* c = mxGetCell(a, i);
             out.push_back(mx_to_string(c));
@@ -148,6 +162,7 @@ std::vector<std::string> read_models(const mxArray* a) {
     } else {
         die("siamize:models", "models must be a char array, cellstr, or [] for default");
     }
+
     return out;
 }
 
@@ -170,32 +185,42 @@ void read_opts(const mxArray* a, Opts& o) {
     if (!mxIsStruct(a)) {
         die("siamize:opts", "opts must be a struct");
     }
+
     const mxArray* f;
+
     if ((f = mxGetField(a, 0, "device"))   && !mxIsEmpty(f)) {
         o.device = mx_to_string(f);
+
         if (o.device == "trt") {
             o.device = "tensorrt";
         }
     }
+
     if ((f = mxGetField(a, 0, "threads"))  && !mxIsEmpty(f)) {
         o.threads = static_cast<int>(mxGetScalar(f));
     }
+
     if ((f = mxGetField(a, 0, "spacing"))  && !mxIsEmpty(f)) {
         o.spacing = static_cast<float>(mxGetScalar(f));
     }
+
     if ((f = mxGetField(a, 0, "classes"))  && !mxIsEmpty(f)) {
         o.classes = static_cast<int64_t>(mxGetScalar(f));
     }
+
     if ((f = mxGetField(a, 0, "trt_cache")) && !mxIsEmpty(f)) {
         o.trt_cache = mx_to_string(f);
     }
+
     if ((f = mxGetField(a, 0, "verbose"))  && !mxIsEmpty(f)) {
         o.verbose = mxGetScalar(f) != 0.0;
     }
+
     if ((f = mxGetField(a, 0, "patch")) && !mxIsEmpty(f)) {
         if (!mxIsDouble(f) || mxGetNumberOfElements(f) != 3) {
             die("siamize:patch", "opts.patch must be a [pz, py, px] double vector");
         }
+
         const double* p = mxGetPr(f);
         o.patch = {(int64_t)p[0], (int64_t)p[1], (int64_t)p[2]};
     }
@@ -219,6 +244,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (mxGetNumberOfDimensions(a_img) != 3) {
             die("siamize:img", "img must be a 3D array");
         }
+
         const mwSize* dims = mxGetDimensions(a_img);
         const int64_t X = static_cast<int64_t>(dims[0]);
         const int64_t Y = static_cast<int64_t>(dims[1]);
@@ -228,6 +254,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         std::vector<std::string> models = read_models(a_models);
 
         Opts opts;
+
         if (nrhs >= 4) {
             read_opts(prhs[3], opts);
         }
@@ -239,9 +266,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (models.empty()) {
             models.push_back("fold_0_fp16.onnx");
         }
+
         for (auto& m : models) {
             m = siam::resolve_model_path(m, opts.verbose);
         }
+
         if (opts.threads <= 0) {
             unsigned hc = std::thread::hardware_concurrency();
             opts.threads = (hc > 0) ? static_cast<int>(hc) : 4;
@@ -257,41 +286,50 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 load_volume<double>(mxGetPr(a_img),
                                     X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxSINGLE_CLASS:
                 load_volume<float>(static_cast<const float*>(mxGetData(a_img)),
                                    X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxUINT8_CLASS:
                 load_volume<uint8_t>(static_cast<const uint8_t*>(mxGetData(a_img)),
                                      X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxINT16_CLASS:
                 load_volume<int16_t>(static_cast<const int16_t*>(mxGetData(a_img)),
                                      X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxUINT16_CLASS:
                 load_volume<uint16_t>(static_cast<const uint16_t*>(mxGetData(a_img)),
                                       X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxINT32_CLASS:
                 load_volume<int32_t>(static_cast<const int32_t*>(mxGetData(a_img)),
                                      X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxUINT32_CLASS:
                 load_volume<uint32_t>(static_cast<const uint32_t*>(mxGetData(a_img)),
                                       X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             case mxINT8_CLASS:
                 load_volume<int8_t>(static_cast<const int8_t*>(mxGetData(a_img)),
                                     X, Y, Z, affine, canon, dst, sgn, affine_canon);
                 break;
+
             default:
                 die("siamize:dtype", "img dtype not supported (try double, single, int16, etc.)");
         }
 
         // ---- pipeline (same as siamize.cpp main) -------------------------
         std::array<int64_t, 3> shape_canon = {
-            canon.shape[0], canon.shape[1], canon.shape[2]};
+            canon.shape[0], canon.shape[1], canon.shape[2]
+        };
 
         auto crop = siam::crop_to_nonzero(canon);
         canon = siam::Volume{};   // free
@@ -350,11 +388,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                     for (int64_t c = 1; c < opts.classes; ++c) {
                         float v = logits_back.channel_ptr(c)[i];
+
                         if (v > bestv) {
                             bestv = v;
                             best = static_cast<int>(c);
                         }
                     }
+
                     labels_crop[i] = static_cast<uint8_t>(best);
                 }
             }
@@ -363,13 +403,14 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         // Un-crop into full canonical (Z, Y, X) volume.
         std::vector<uint8_t> labels_canon(
             static_cast<size_t>(shape_canon[0]) * shape_canon[1] * shape_canon[2], 0);
+
         for (int64_t z = 0; z < cZ; ++z) {
             for (int64_t y = 0; y < cY; ++y) {
                 std::copy_n(&labels_crop[z * cY * cX + y * cX],
                             cX,
                             &labels_canon[(z + crop.bbox[0][0]) * shape_canon[1] * shape_canon[2]
-                                          + (y + crop.bbox[1][0]) * shape_canon[2]
-                                          + crop.bbox[2][0]]);
+                                                                + (y + crop.bbox[1][0]) * shape_canon[2]
+                                                                + crop.bbox[2][0]]);
             }
         }
 

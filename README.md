@@ -90,8 +90,9 @@ scripts/fetch_weights.sh     # downloads the 5 fp16 .onnx folds (~1.35 GB) into 
 CPU-only (default):
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
+make            # convenience target -- wraps cmake configure + build
+# or, equivalently:
+cmake -S . -B build && cmake --build build -j
 ```
 
 This produces `build/siamize`. `libonnxruntime.so.1` is located by RPATH:
@@ -103,14 +104,16 @@ checkout without setting `LD_LIBRARY_PATH`.
 #### Optional: NVIDIA GPU build (CUDA Execution Provider)
 
 ```bash
-# Re-fetch ORT with CUDA provider plugins.
-rm -rf third_party/onnxruntime
+make cuda       # re-fetches GPU ORT prebuilt (only if needed) + configures + builds
+```
+
+That's the convenience shortcut. The equivalent explicit form:
+
+```bash
+rm -rf third_party/onnxruntime build
 ORT_BUILD=gpu scripts/fetch_deps.sh                  # default = CUDA 12.x build
 # or, if your NVIDIA driver is CUDA 13:
 # ORT_BUILD=gpu ORT_CUDA=13 scripts/fetch_deps.sh
-
-# Configure with the CUDA backend enabled.
-rm -rf build
 cmake -S . -B build -DSIAMIZE_GPU=cuda
 cmake --build build -j
 ```
@@ -145,8 +148,9 @@ time. It's an opt-in build:
 
 ```bash
 # Build with TRT enabled (gpu ORT prebuilt also has the TRT provider plugin).
-cmake -S . -B build -DSIAMIZE_GPU=tensorrt
-cmake --build build -j
+make tensorrt
+# equivalent explicit form:
+# cmake -S . -B build -DSIAMIZE_GPU=tensorrt && cmake --build build -j
 
 # Install the matching TensorRT Python wheel (ships libnvinfer + per-SM
 # builder resources). Pin it to your CUDA runtime version.
@@ -227,12 +231,14 @@ share the `siamize_core` C++ sources).
 
 ```bash
 # Octave (Linux/macOS):
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_OCTAVE_MEX=ON
-cmake --build build -j               # -> build/siamex.mex
+make mex-octave              # -> build/siamex.mex
 
 # MATLAB (Linux/macOS/Windows):
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_MATLAB_MEX=ON
-cmake --build build -j               # -> build/siamex.mexa64 / .mexmaca64 / .mexw64
+make mex-matlab              # -> build/siamex.mexa64 / .mexmaca64 / .mexw64
+
+# Equivalent explicit forms:
+# cmake -S . -B build -DSIAMIZE_BUILD_OCTAVE_MEX=ON  && cmake --build build -j
+# cmake -S . -B build -DSIAMIZE_BUILD_MATLAB_MEX=ON  && cmake --build build -j
 ```
 
 The bundled jsonlab submodule (`matlab/jsonlab/`) provides
@@ -282,7 +288,8 @@ MEX and the CLI binary. Full reference: [`matlab/README.md`](matlab/README.md).
 ### Tests
 
 ```bash
-octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"
+make mex-test
+# equivalent: octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"
 ```
 
 30 unit tests that stub the underlying MEX so they run in under a
