@@ -472,4 +472,108 @@ void save_nifti_labels(const std::string& path,
     }
 }
 
+
+void save_nifti_tpm(const std::string& path,
+                    const NiftiImage& src,
+                    const float* tpm_canon_czyx,
+                    int64_t num_classes) {
+    Nifti1Header h{};
+    h.sizeof_hdr = 348;
+    h.dim[0] = 4;
+    h.dim[1] = static_cast<int16_t>(src.shape_orig[0]);
+    h.dim[2] = static_cast<int16_t>(src.shape_orig[1]);
+    h.dim[3] = static_cast<int16_t>(src.shape_orig[2]);
+    h.dim[4] = static_cast<int16_t>(num_classes);
+    h.dim[5] = 1;
+    h.dim[6] = 1;
+    h.dim[7] = 1;
+    h.datatype = DT_FLOAT32;
+    h.bitpix = 32;
+
+    auto col_norm = [&](int c) {
+        const auto& A = src.affine_orig;
+        float v0 = A[0 * 4 + c], v1 = A[1 * 4 + c], v2 = A[2 * 4 + c];
+        return std::sqrt(v0 * v0 + v1 * v1 + v2 * v2);
+    };
+    h.pixdim[0] = -1.0f;
+    h.pixdim[1] = col_norm(0);
+    h.pixdim[2] = col_norm(1);
+    h.pixdim[3] = col_norm(2);
+    h.pixdim[4] = 1.0f;   // unit "step" between channels (semantically meaningless)
+
+    h.vox_offset = static_cast<float>(sizeof(Nifti1Header) + 4);
+    h.scl_slope  = 0.0f;
+    h.scl_inter  = 0.0f;
+
+    // sform from src.affine_orig.
+    h.sform_code = 2;
+    h.qform_code = 0;
+    const auto& A = src.affine_orig;
+
+    for (int c = 0; c < 4; ++c) {
+        h.srow_x[c] = A[0 * 4 + c];
+    }
+
+    for (int c = 0; c < 4; ++c) {
+        h.srow_y[c] = A[1 * 4 + c];
+    }
+
+    for (int c = 0; c < 4; ++c) {
+        h.srow_z[c] = A[2 * 4 + c];
+    }
+
+    std::memcpy(h.magic, "n+1\0", 4);
+
+    // De-canonicalize each channel back to (X, Y, Z) input-axis order.
+    // NIfTI 4D layout: dim[1..4] = X, Y, Z, T, with X fastest in memory
+    // and channel T slowest. So we concatenate per-channel 3D blocks
+    // back-to-back.
+    const int64_t X = src.shape_orig[0];
+    const int64_t Y = src.shape_orig[1];
+    const int64_t Z = src.shape_orig[2];
+    const int64_t cZ = src.volume.shape[0];
+    const int64_t cY = src.volume.shape[1];
+    const int64_t cX = src.volume.shape[2];
+    const int64_t per_channel = X * Y * Z;
+    const int64_t canon_per_channel = cZ * cY * cX;
+
+    std::array<int, 3> dst{};
+
+    for (int i = 0; i < 3; ++i) {
+        dst[i] = src.perm_canon_to_orig[i];
+    }
+
+    std::array<int, 3> sgn{};
+
+    for (int i = 0; i < 3; ++i) {
+        sgn[i] = src.flip_canon[dst[i]];
+    }
+
+    std::vector<float> tpm_xyzc(static_cast<size_t>(per_channel * num_classes), 0.0f);
+
+    for (int64_t c = 0; c < num_classes; ++c) {
+        copy_reorient_from_canonical(
+            tpm_canon_czyx + c * canon_per_channel,
+            cZ, cY, cX,
+            X, Y, Z, dst, sgn,
+            tpm_xyzc.data() + c * per_channel);
+    }
+
+    // Assemble the on-disk image: header + 4 bytes padding + data.
+    const size_t data_bytes = static_cast<size_t>(per_channel * num_classes) * sizeof(float);
+    const size_t total_size = static_cast<size_t>(h.vox_offset) + data_bytes;
+    std::vector<uint8_t> nii(total_size, 0);
+    std::memcpy(nii.data(), &h, sizeof(Nifti1Header));
+    std::memcpy(nii.data() + static_cast<size_t>(h.vox_offset),
+                tpm_xyzc.data(),
+                data_bytes);
+
+    if (ends_with(path, ".gz") || ends_with(path, ".GZ")) {
+        auto gz = gzip_compress(nii.data(), nii.size());
+        write_file_bytes(path, gz.data(), gz.size());
+    } else {
+        write_file_bytes(path, nii.data(), nii.size());
+    }
+}
+
 }  // namespace siam

@@ -78,8 +78,8 @@ void copy_reorient_to_canonical(const SrcT* src,
     }
 }
 
-template <typename DstT>
-void copy_reorient_from_canonical(const uint8_t* labels_canon_zyx,
+template <typename SrcT, typename DstT>
+void copy_reorient_from_canonical(const SrcT* canon_zyx,
                                   int64_t canonZ, int64_t canonY, int64_t canonX,
                                   int64_t X, int64_t Y, int64_t Z,
                                   const std::array<int, 3>& dst,
@@ -98,7 +98,7 @@ void copy_reorient_from_canonical(const uint8_t* labels_canon_zyx,
                 }
 
                 int64_t in_idx = cidx[2] * (canonY * canonX) + cidx[1] * canonX + cidx[0];
-                out_xyz[iz * X * Y + iy * X + ix] = static_cast<DstT>(labels_canon_zyx[in_idx]);
+                out_xyz[iz * X * Y + iy * X + ix] = static_cast<DstT>(canon_zyx[in_idx]);
             }
         }
     }
@@ -143,6 +143,7 @@ template void copy_reorient_to_canonical(const uint32_t*,  int64_t, int64_t, int
 template void copy_reorient_to_canonical(const float*,     int64_t, int64_t, int64_t, const std::array<int, 3>&, const std::array<int, 3>&, Volume&);
 template void copy_reorient_to_canonical(const double*,    int64_t, int64_t, int64_t, const std::array<int, 3>&, const std::array<int, 3>&, Volume&);
 
-template void copy_reorient_from_canonical<uint8_t>(const uint8_t*, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const std::array<int, 3>&, const std::array<int, 3>&, uint8_t*);
+template void copy_reorient_from_canonical<uint8_t, uint8_t>(const uint8_t*, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const std::array<int, 3>&, const std::array<int, 3>&, uint8_t*);
+template void copy_reorient_from_canonical<float,   float  >(const float*,   int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const std::array<int, 3>&, const std::array<int, 3>&, float*);
 
 }  // namespace siam

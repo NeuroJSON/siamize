@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -94,6 +95,14 @@ void usage(const char* exe) {
                  "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
                  "                         e.g. 6G). Default 0 = no explicit cap.\n"
                  "      --threads N     ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs)\n"
+                 "      --tpm-out P     also save a 4D float32 tissue probability map (TPM) to P.\n"
+                 "                      Output shape is (X, Y, Z, num_classes) -- softmax over the\n"
+                 "                      18 fold-averaged class logits, reoriented to match the input.\n"
+                 "                      Use .nii.gz to gzip on save. Raw size ~3 GB; gzipped ~250 MB.\n"
+                 "      --tpm-temperature T  softmax temperature for the TPM output (default 1.0).\n"
+                 "                      T > 1 softens the distribution (more graded boundaries,\n"
+                 "                      better-calibrated probabilities); T < 1 sharpens. Affects\n"
+                 "                      only the TPM output, not the argmax label volume.\n"
                  "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans)\n"
                  "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training)\n"
                  "      --classes N     number of output classes, default 18 (SIAM v0.3)\n"
@@ -108,6 +117,8 @@ int main(int argc, char** argv) {
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
+    std::string tpm_out;               // empty => no TPM saved
+    float       tpm_temperature = 1.0f; // softmax temperature (>1 = softer)
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     bool verbose = false;
     std::array<int64_t, 3> patch = {256, 256, 192};
@@ -189,6 +200,17 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr,
                              "--cudnn-algo must be default|heuristic|exhaustive (got '%s')\n",
                              s.c_str());
+                return 2;
+            }
+        } else if (a == "--tpm-out") {
+            tpm_out = need();
+        } else if (a == "--tpm-temperature") {
+            tpm_temperature = std::stof(need());
+
+            if (tpm_temperature <= 0.0f) {
+                std::fprintf(stderr,
+                             "--tpm-temperature must be > 0 (got '%g')\n",
+                             tpm_temperature);
                 return 2;
             }
         } else if (a == "--gpu-mem-limit") {
@@ -398,6 +420,82 @@ int main(int argc, char** argv) {
 
                 labels_crop[i] = static_cast<uint8_t>(best);
             }
+        }
+    }
+
+    // Optional 4D TPM output. Reuses logits_back (still alive at this
+    // point) -- softmax in place, un-crop into canonical shape with
+    // background=1 outside the bbox, then save as 4D float32 NIfTI.
+    if (!tpm_out.empty()) {
+        if (verbose) {
+            if (tpm_temperature != 1.0f) {
+                std::fprintf(stderr,
+                             "  building TPM (softmax, %" PRId64 " classes, T=%.3f)\n",
+                             num_classes, tpm_temperature);
+            } else {
+                std::fprintf(stderr,
+                             "  building TPM (softmax, %" PRId64 " classes)\n",
+                             num_classes);
+            }
+        }
+
+        const float inv_T = 1.0f / tpm_temperature;
+        const int64_t N = cZ * cY * cX;
+
+        for (int64_t i = 0; i < N; ++i) {
+            // numerically stable softmax over the C channel logits
+            float m = logits_back.channel_ptr(0)[i] * inv_T;
+
+            for (int64_t c = 1; c < num_classes; ++c) {
+                float v = logits_back.channel_ptr(c)[i] * inv_T;
+
+                if (v > m) {
+                    m = v;
+                }
+            }
+
+            float s = 0.0f;
+
+            for (int64_t c = 0; c < num_classes; ++c) {
+                float e = std::exp(logits_back.channel_ptr(c)[i] * inv_T - m);
+                logits_back.channel_ptr(c)[i] = e;
+                s += e;
+            }
+
+            float invs = 1.0f / s;
+
+            for (int64_t c = 0; c < num_classes; ++c) {
+                logits_back.channel_ptr(c)[i] *= invs;
+            }
+        }
+
+        // Un-crop to canonical shape. Outside the bbox we want
+        // p(background)=1 and p(other)=0 (i.e. "the network correctly
+        // labelled the void as background"). Pre-fill the bg channel.
+        const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
+        std::vector<float> tpm_canon(static_cast<size_t>(num_classes) * Zc * Yc * Xc, 0.0f);
+        std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);  // background = 1 everywhere
+
+        for (int64_t c = 0; c < num_classes; ++c) {
+            const float* src = logits_back.channel_ptr(c);
+            float* dst_chan = tpm_canon.data() + c * Zc * Yc * Xc;
+
+            for (int64_t z = 0; z < cZ; ++z) {
+                for (int64_t y = 0; y < cY; ++y) {
+                    std::copy_n(
+                        &src[z * cY * cX + y * cX],
+                        cX,
+                        &dst_chan[(z + crop.bbox[0][0]) * Yc * Xc +
+                                                        (y + crop.bbox[1][0]) * Xc +
+                                                        crop.bbox[2][0]]);
+                }
+            }
+        }
+
+        siam::save_nifti_tpm(tpm_out, img, tpm_canon.data(), num_classes);
+
+        if (verbose) {
+            std::fprintf(stderr, "  saved TPM to %s\n", tpm_out.c_str());
         }
     }
 

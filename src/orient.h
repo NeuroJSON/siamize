@@ -37,11 +37,11 @@ void copy_reorient_to_canonical(const SrcT* src,
                                 const std::array<int, 3>& sgn,
                                 Volume& out);
 
-// Inverse of `copy_reorient_to_canonical`. Takes labels already in
+// Inverse of `copy_reorient_to_canonical`. Takes data already in
 // canonical (Z, Y, X) order plus the original input shape and writes
-// them back into input-axis order with X-fastest layout.
-template <typename DstT>
-void copy_reorient_from_canonical(const uint8_t* labels_canon_zyx,
+// it back into input-axis order with X-fastest layout.
+template <typename SrcT, typename DstT>
+void copy_reorient_from_canonical(const SrcT* canon_zyx,
                                   int64_t canonZ, int64_t canonY, int64_t canonX,
                                   int64_t X, int64_t Y, int64_t Z,
                                   const std::array<int, 3>& dst,
