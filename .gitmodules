@@ -1,0 +1,3 @@
+[submodule "mex/jsonlab"]
+	path = mex/jsonlab
+	url = https://github.com/NeuroJSON/jsonlab.git
