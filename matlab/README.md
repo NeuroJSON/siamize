@@ -222,7 +222,10 @@ the standard `mexFunction` entry point.
 
 ### Linux MATLAB: GLIBCXX symbol mismatch
 
-If `siamex` fails to load in MATLAB on Linux with:
+MATLAB R2024a on Linux bundles a `libstdc++.so.6` that supports up to
+`GLIBCXX_3.4.28` (GCC 9 / 10). If you build the MEX with a newer GCC
+(11+), the resulting binary references `GLIBCXX_3.4.29` and MATLAB
+refuses to load it:
 
 ```
 Invalid MEX-file '.../siamex.mexa64':
@@ -230,19 +233,28 @@ Invalid MEX-file '.../siamex.mexa64':
   version `GLIBCXX_3.4.29' not found (required by siamex.mexa64)
 ```
 
-it's because MATLAB ships an older `libstdc++.so.6` than the toolchain
-that built the MEX. The standard MathWorks workaround is to
-`LD_PRELOAD` the system libstdc++ before launching MATLAB so MATLAB
-uses the newer one:
+The right fix is to build with the MathWorks-supported GCC version
+(GCC 10.2.1 for R2024a):
 
 ```bash
-LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab
+sudo apt-get install -y g++-10 gcc-10
+CC=gcc-10 CXX=g++-10 cmake -S . -B build -DSIAMIZE_BUILD_MATLAB_MEX=ON
+cmake --build build -j
 ```
 
-Statically linking libstdc++ into the MEX is **not** a working
-alternative on Linux: a second copy of the C++ runtime inside a MEX
-fights MATLAB's already-loaded libstdc++ over `type_info`, vtables,
-and `std::cout`, and aborts on MEX load.
+The resulting MEX only references GLIBCXX symbols MATLAB's bundled
+libstdc++ already has, so it loads with no environment tweaks. CI
+follows this recipe on the linux-matlab leg.
+
+Two approaches that **don't** work and are worth not wasting time on:
+
+* **Statically linking libstdc++ into the MEX** (`-static-libstdc++`).
+  A second C++ runtime inside a MEX fights MATLAB's already-loaded
+  libstdc++ over `type_info`, vtables, and `std::cout`, and aborts on
+  MEX load with "MATLAB is exiting because of fatal error".
+* **LD_PRELOAD-ing the system libstdc++.** Works for a smoke load but
+  forces every MATLAB launch into a non-default config and breaks any
+  MathWorks toolbox compiled against the bundled libstdc++.
 
 ## Bundled dependencies
 
