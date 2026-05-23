@@ -220,6 +220,30 @@ please open an issue if a host setup breaks. The MEX is portable C++17 +
 MEX C API + OpenMP, with no Octave-specific or MATLAB-specific glue beyond
 the standard `mexFunction` entry point.
 
+### Linux MATLAB: GLIBCXX symbol mismatch
+
+If `siamex` fails to load in MATLAB on Linux with:
+
+```
+Invalid MEX-file '.../siamex.mexa64':
+  /opt/MATLAB/.../sys/os/glnxa64/libstdc++.so.6:
+  version `GLIBCXX_3.4.29' not found (required by siamex.mexa64)
+```
+
+it's because MATLAB ships an older `libstdc++.so.6` than the toolchain
+that built the MEX. The standard MathWorks workaround is to
+`LD_PRELOAD` the system libstdc++ before launching MATLAB so MATLAB
+uses the newer one:
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab
+```
+
+Statically linking libstdc++ into the MEX is **not** a working
+alternative on Linux: a second copy of the C++ runtime inside a MEX
+fights MATLAB's already-loaded libstdc++ over `type_info`, vtables,
+and `std::cout`, and aborts on MEX load.
+
 ## Bundled dependencies
 
 - **[jsonlab](https://github.com/NeuroJSON/jsonlab)** by Qianqian Fang —

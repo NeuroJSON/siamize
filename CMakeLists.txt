@@ -307,23 +307,28 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
         if(OpenMP_CXX_FOUND)
             target_link_libraries(siamize_mex OpenMP::OpenMP_CXX)
         endif()
-        # Statically link the C++ runtime into the MEX. MATLAB ships its
-        # own libstdc++.so.6 that's typically older than the host
-        # toolchain's, so a dynamic MEX raises "GLIBCXX_x.y.z not found"
-        # at MEX-load time. Statically linking libstdc++ + libgcc into
-        # siamex.mexa64 (and using /MT on MSVC) sidesteps the version
-        # negotiation entirely.
-        if(SIAMIZE_STATIC_LINK)
-            if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-                target_link_options(siamize_mex PRIVATE -static-libstdc++ -static-libgcc)
-            elseif(MSVC)
-                target_compile_options(siamize_mex PRIVATE
-                    $<$<CONFIG:Release>:/MT>
-                    $<$<CONFIG:Debug>:/MTd>
-                    $<$<CONFIG:RelWithDebInfo>:/MT>
-                    $<$<CONFIG:MinSizeRel>:/MT>
-                )
-            endif()
+        # C++ runtime handling for the MEX:
+        #   * MSVC: /MT (static CRT). Windows MATLAB ships its own MSVCRT
+        #     copies but the C++ ABI doesn't fight the way glibc++ does
+        #     on Linux, so static-link is safe and avoids the runtime
+        #     redistribute headache.
+        #   * GNU on Linux: link libstdc++ DYNAMICALLY. Statically
+        #     embedding a second libstdc++ inside a MEX fights MATLAB's
+        #     own already-loaded libstdc++ (type_info, vtables,
+        #     std::cout) and aborts at MEX-load. MATLAB R2024a's bundled
+        #     libstdc++.so.6 may be older than the host toolchain's, in
+        #     which case the user / CI must LD_PRELOAD the system
+        #     libstdc++ before launching MATLAB:
+        #         LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab
+        #     The matlab/README.md documents this; CI does it in the
+        #     "Smoke-load MEX (MATLAB)" step.
+        if(SIAMIZE_STATIC_LINK AND MSVC)
+            target_compile_options(siamize_mex PRIVATE
+                $<$<CONFIG:Release>:/MT>
+                $<$<CONFIG:Debug>:/MTd>
+                $<$<CONFIG:RelWithDebInfo>:/MT>
+                $<$<CONFIG:MinSizeRel>:/MT>
+            )
         endif()
         if(MSVC)
             target_compile_definitions(siamize_mex PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
