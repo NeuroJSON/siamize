@@ -62,6 +62,25 @@ jobs:
       - name: Smoke-run --help
         run: ${{ matrix.binary }} --help
 
+      - name: Package
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   PLAT=linux-x86_64 ;;
+            macOS)   PLAT=macos ;;
+            Windows) PLAT=windows-x64 ;;
+          esac
+          scripts/package.sh cpu "siamize-${PLAT}-cpu"
+          echo "BUNDLE=siamize-${PLAT}-cpu" >> "$GITHUB_ENV"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: ${{ env.BUNDLE }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
   cpp-build-cuda:
     # Builds siamize with the CUDA Execution Provider enabled, then runs a
     # single-fold inference on the bundled sample. GitHub-hosted runners
@@ -172,6 +191,24 @@ jobs:
         run: |
           test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
           ls -lh pred_ci.nii.gz
+
+      - name: Package
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   PLAT=linux-x86_64 ;;
+            Windows) PLAT=windows-x64 ;;
+          esac
+          scripts/package.sh cuda "siamize-${PLAT}-cuda"
+          echo "BUNDLE=siamize-${PLAT}-cuda" >> "$GITHUB_ENV"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: ${{ env.BUNDLE }}.zip
+          if-no-files-found: error
+          retention-days: 14
 
   mex-build:
     # Build siamize's MATLAB/Octave MEX wrapper and verify it loads. Heavy
@@ -294,6 +331,18 @@ jobs:
             cd(fullfile('matlab', 'tests'));
             [~, nfail] = run_tests();
             assert(nfail == 0, 'siamize.m unit tests failed (%d)', nfail);
+
+      - name: Package
+        shell: bash
+        run: scripts/package.sh mex "siamex-${{ matrix.label }}"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: siamex-${{ matrix.label }}
+          path: siamex-${{ matrix.label }}.zip
+          if-no-files-found: error
+          retention-days: 14
 
   python-smoke:
     runs-on: ubuntu-22.04
