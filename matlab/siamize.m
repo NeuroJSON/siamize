@@ -19,7 +19,7 @@ function lab = siamize(varargin)
 %         .jnii           - text JNIfTI (read via loadjson)
 %         .bnii           - binary JNIfTI (read via loadbj)
 %       jsonlab must be on the MATLAB/Octave path; if not, siamize
-%       auto-adds the bundled copy at <siamize_dir>/mex/jsonlab
+%       auto-adds the bundled copy at <siamize_dir>/matlab/jsonlab
 %       (`git submodule update --init` populates it).
 %     - a jnifti struct (.NIFTIData + .NIFTIHeader.Affine), as returned
 %       by loadnifti(file) / loadjnifti(file).
@@ -206,7 +206,7 @@ function [img, affine, src, outputfile, models, opts] = siamize_parse_inputs_(va
             error('siamize:nojsonlab', ...
                   ['loadjd() not found. Install jsonlab '...
                    '(https://github.com/NeuroJSON/jsonlab) or run '...
-                   '`git submodule update --init` so mex/jsonlab is populated.']);
+                   '`git submodule update --init` so matlab/jsonlab is populated.']);
         end
         nii = loadjd(in);
         if ~isstruct(nii) || ~isfield(nii, 'NIFTIData')

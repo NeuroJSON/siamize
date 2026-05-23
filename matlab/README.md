@@ -27,7 +27,7 @@
 
 ## Overview
 
-`mex/` ships the MATLAB / GNU Octave interface to siamize:
+`matlab/` ships the MATLAB / GNU Octave interface to siamize:
 
 1. **`siamex.mex*`** — a thin C++ MEX entry point that wraps the same
    preprocess → ORT inference → postprocess pipeline as the standalone CLI
@@ -55,7 +55,7 @@ repo.
 
 ```bash
 scripts/fetch_deps.sh        # downloads ORT prebuilt + clones nifti_clib
-git submodule update --init  # populates mex/jsonlab
+git submodule update --init  # populates matlab/jsonlab
 ```
 
 ### 2. Build the MEX
@@ -194,11 +194,12 @@ Default URL base: `https://neurojson.org/siamize/weights/siam_v03/`.
 ## Layout
 
 ```
-mex/
+matlab/
 ├── README.md            # this file
 ├── siamize.m            # public dispatcher (loadjd, shortcuts, cache, save)
 ├── siamize_mex.cpp      # MEX entry point -> siamex.mex*
-└── jsonlab/             # submodule: NeuroJSON jsonlab (loadjd/savejd/...)
+├── jsonlab/             # submodule: NeuroJSON jsonlab (loadjd/savejd/...)
+└── tests/               # unit tests for siamize.m (Octave + MATLAB)
 ```
 
 The MEX C++ links the same `siamize_core` library as the CLI binary;
@@ -221,7 +222,7 @@ the standard `mexFunction` entry point.
 ## Bundled dependencies
 
 - **[jsonlab](https://github.com/NeuroJSON/jsonlab)** by Qianqian Fang —
-  pulled in as a git submodule under `mex/jsonlab/`. Provides
+  pulled in as a git submodule under `matlab/jsonlab/`. Provides
   `loadjd` / `savejd` (extension-dispatched I/O), `loadnifti`,
   `jnii2nii`, `savejnifti`, `jnifticreate`, `nifticreate`, `niiheader2jnii`,
   `niicodemap`, the `loadjson` / `savejson` / `loadbj` / `savebj`

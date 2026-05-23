@@ -176,6 +176,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Octave (Linux)
         if: matrix.kind == 'octave' && runner.os == 'Linux'
@@ -215,6 +217,14 @@ jobs:
             end" 2>&1 | tee mex.log
           grep -q "MEX loaded" mex.log
 
+      - name: Run siamize.m unit tests (Octave)
+        if: matrix.kind == 'octave' && runner.os == 'Linux'
+        run: |
+          # Pure-MATLAB dispatcher tests. Stubs siamex internally so it
+          # doesn't depend on ORT or weight files; needs the jsonlab
+          # submodule (pulled via submodules: recursive above).
+          octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"
+
       - name: Smoke-load MEX (MATLAB)
         if: matrix.kind == 'matlab'
         uses: matlab-actions/run-command@v2
@@ -233,6 +243,15 @@ jobs:
               end
               fprintf('MEX loaded and reached argument check\n');
             end
+
+      - name: Run siamize.m unit tests (MATLAB)
+        if: matrix.kind == 'matlab'
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            cd(fullfile('matlab', 'tests'));
+            [~, nfail] = run_tests();
+            assert(nfail == 0, 'siamize.m unit tests failed (%d)', nfail);
 
   python-smoke:
     runs-on: ubuntu-22.04

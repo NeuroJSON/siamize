@@ -24,7 +24,7 @@ option(SIAMIZE_STATIC_LINK
 non-system shared lib at runtime is libonnxruntime." ON)
 
 option(SIAMIZE_BUILD_MATLAB_MEX
-    "Build the MATLAB MEX wrapper (mex/siamize_mex.cpp). Auto-skipped if MATLAB \
+    "Build the MATLAB MEX wrapper (matlab/siamize_mex.cpp). Auto-skipped if MATLAB \
 is not found." OFF)
 
 option(SIAMIZE_BUILD_OCTAVE_MEX
@@ -268,7 +268,7 @@ endif()
 
 # ---- MATLAB MEX target ------------------------------------------------------
 set(_siamize_mex_sources
-    mex/siamize_mex.cpp
+    matlab/siamize_mex.cpp
     src/nifti_io.cpp
     src/orient.cpp
     src/preprocess.cpp
@@ -287,7 +287,7 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
     if(Matlab_FOUND)
         message(STATUS "MATLAB found at ${Matlab_ROOT_DIR}; building MEX")
         # The MEX binary is the low-level entry point (`siamex.mex*`);
-        # the user-facing dispatcher is `mex/siamize.m`, which handles the
+        # the user-facing dispatcher is `matlab/siamize.m`, which handles the
         # weight download (urlread + gunzip) and then calls siamex.
         matlab_add_mex(
             NAME siamize_mex
