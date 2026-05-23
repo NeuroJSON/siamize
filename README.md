@@ -14,6 +14,7 @@
 
 - [Overview](#overview)
 - [Quickstart](#quickstart)
+- [MATLAB / GNU Octave bindings](#matlab--gnu-octave-bindings)
 - [Layers, in dependency order](#layers-in-dependency-order)
 - [Footprint](#footprint)
 - [Platforms](#platforms)
@@ -57,19 +58,31 @@ Accuracy vs original SIAM on the bundled `sub-01_T1w.nii.gz`
 
 ```bash
 scripts/fetch_deps.sh        # downloads ORT prebuilt + clones nifti_clib into third_party/
-scripts/fetch_weights.sh     # downloads the 5 fp16 .onnx folds into models/ (~1.35 GB)
+git submodule update --init  # pulls the bundled jsonlab under matlab/jsonlab (only needed for the MATLAB/Octave wrapper; see below)
 ```
 
 The fetch script auto-detects the host (Linux x64, Linux aarch64, macOS
 x86_64, macOS arm64, Windows x64) and pulls the right ORT prebuilt. On
 Windows, run it from Git Bash (or any POSIX shell — Git for Windows ships
-bash, curl, and tar with `.zip` support out of the box).
-
-For native Windows users without a POSIX shell, the equivalent PowerShell
-script is also provided:
+bash, curl, and tar with `.zip` support out of the box). For native
+Windows users without a POSIX shell, the equivalent PowerShell script is
+also provided:
 
 ```powershell
 scripts\fetch_deps.ps1
+```
+
+The fp16 ONNX fold weights are **not** fetched up-front: `siamize` and
+its MATLAB/Octave wrapper auto-download any missing fold from
+`https://neurojson.org/siamize/weights/siam_v03/` (overridable via
+`SIAMIZE_WEIGHTS_BASE_URL`) into a shared cache (`$SIAMIZE_CACHE_DIR`,
+default `$HOME/.cache/siamize/models/` on POSIX or
+`%LOCALAPPDATA%/siamize/models/` on Windows). One download serves both
+the CLI binary and the MEX. If you want all five folds pre-staged
+before going offline, run:
+
+```bash
+scripts/fetch_weights.sh     # downloads the 5 fp16 .onnx folds (~1.35 GB) into models/
 ```
 
 ### 2. Build the C++ binary
@@ -178,14 +191,21 @@ EP**. The TRT path stays available for the lab that needs it.
 ### 3. Run
 
 ```bash
-build/siamize \
-    -i input.nii.gz \
-    -o output.nii.gz \
-    --models models/fold_0_fp16.onnx,models/fold_1_fp16.onnx,models/fold_2_fp16.onnx,models/fold_3_fp16.onnx,models/fold_4_fp16.onnx \
-    --threads 8 -v
+# Full 5-fold ensemble (the digit shortcut expands to fold_<N>_fp16.onnx;
+# any missing weight auto-downloads into the shared cache).
+build/siamize -i input.nii.gz -o output.nii.gz --models 0,1,2,3,4 -v
+
+# Single-fold prediction is also supported:
+build/siamize -i input.nii.gz -o output.nii.gz --models 0 -v
+
+# Explicit paths still work alongside shortcuts:
+build/siamize -i input.nii.gz -o output.nii.gz \
+    --models models/fold_0_fp16.onnx,models/fold_1_fp16.onnx
 ```
 
-Single-fold prediction is also supported (just pass one `.onnx`).
+`--threads` defaults to `0` (all available cores via
+`std::thread::hardware_concurrency()`); set it explicitly only if you
+want to throttle CPU use.
 
 ### 4. Regression test (optional)
 
@@ -195,6 +215,81 @@ tests/run_regression.sh
 
 Runs the bundled sample through `build/siamize` and reports voxel
 agreement vs `tests/pred_ref_allfolds.nii.gz`.
+
+## MATLAB / GNU Octave bindings
+
+The same inference pipeline is callable from MATLAB and Octave through a
+thin MEX (`siamex.mex*`) wrapped by a pure-MATLAB dispatcher
+(`matlab/siamize.m`). MEX and CLI predictions are bit-identical (they
+share the `siamize_core` C++ sources).
+
+### Build
+
+```bash
+# Octave (Linux/macOS):
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+cmake --build build -j               # -> build/siamex.mex
+
+# MATLAB (Linux/macOS/Windows):
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_MATLAB_MEX=ON
+cmake --build build -j               # -> build/siamex.mexa64 / .mexmaca64 / .mexw64
+```
+
+The bundled jsonlab submodule (`matlab/jsonlab/`) provides
+`loadjd` / `savejd` / `loadnifti` / `jnii2nii` / `savejnifti` / etc.;
+`siamize.m` adds it to the path automatically if it isn't already
+visible.
+
+### Calling format
+
+`siamize.m` accepts flexible inputs and (optionally) writes the result
+to disk:
+
+```matlab
+% one-shot file -> file (defaults: single-fold fold_0, auto-downloaded)
+siamize('input.nii.gz', 'labels.nii.gz');
+
+% cross-format: read .nii.gz, write binary JNIfTI, full 5-fold ensemble
+siamize('input.nii.gz', 'labels.bnii', 0:4);
+
+% struct input (jnifti or readnifti-style), in-memory labels
+nii = loadnifti('input.nii.gz');
+lab = siamize(nii);
+
+% bare 3D array, default centered affine inferred
+lab = siamize(my_volume);
+lab = siamize(my_volume, 0);                       % single fold by shortcut
+lab = siamize(my_volume, '0,2,4', struct('verbose', true));
+
+% explicit affine + output file + ensemble + opts
+siamize(my_volume, A, 'labels.nii.gz', 0:4, struct('device', 'cuda'));
+```
+
+| First arg | Interpretation |
+|---|---|
+| `'file.{nii,nii.gz,jnii,bnii}'` | read via `loadjd`; affine taken from header |
+| jnifti struct (`.NIFTIData` + `.NIFTIHeader.Affine`) | passthrough |
+| readnifti struct (`.img` + `.hdr.srow_*`) | passthrough; affine from sform |
+| 3D numeric array | identity rotation + centered translation synthesized when no affine follows |
+
+The `models` argument accepts numeric indices, char shortcuts, full
+paths, or mixes thereof: `0`, `0:4`, `'0,2,4'`, `{'0','fold_3_fp16.onnx'}`.
+Output extension picks the writer (`.nii[.gz]` → `jnii2nii`,
+`.jnii`/`.bnii` → `savejnifti`). The shared weight cache
+(`$SIAMIZE_CACHE_DIR`) is reused so a single download serves both the
+MEX and the CLI binary. Full reference: [`matlab/README.md`](matlab/README.md).
+
+### Tests
+
+```bash
+octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"
+```
+
+30 unit tests that stub the underlying MEX so they run in under a
+second and require no ORT or weight files. Covers argument-form
+dispatch, default-affine math, model-spec parsing, file-in/file-out
+across the four extensions, source-header preservation, and the error
+paths. CI runs the same suite on both Octave and MATLAB legs.
 
 ## Layers, in dependency order
 
@@ -206,6 +301,15 @@ tools/onnx_export/      # PyTorch → fp16 .onnx; uses py/siam_ref to verify
                               │
                               v
 src/  +  CMakeLists.txt # C++ standalone with ONNX Runtime, uses .onnx from (2)
+        │       │
+        │       └───>  build/siamize          # CLI binary
+        │
+        └─────────>    build/siamex.mex*      # MATLAB / Octave MEX
+                              │               (shares siamize_core sources)
+                              v
+                       matlab/siamize.m       # pure-MATLAB dispatcher
+                       matlab/jsonlab/        # bundled NeuroJSON jsonlab (submodule)
+                       matlab/tests/          # Octave + MATLAB unit tests
 ```
 
 ## Footprint
@@ -213,6 +317,8 @@ src/  +  CMakeLists.txt # C++ standalone with ONNX Runtime, uses .onnx from (2)
 | Artifact | Size |
 |---|---|
 | `siamize` binary (static-linked C++/zlib/OpenMP) | 2.2 MB |
+| `siamex.mex*` (Octave MEX, dynamic libstdc++) | 180 KB |
+| `siamex.mexa64` (MATLAB MEX, static libstdc++) | ~3 MB |
 | `libonnxruntime.so.1.26.0` | 23 MB |
 | One fold `.onnx` (fp16) | 270 MB |
 | Five folds | 1.35 GB |
@@ -255,6 +361,13 @@ the binary on all three:
 On every platform the binary ships with `libonnxruntime` (`.so` / `.dylib` /
 `.dll`) sitting next to it; everything else statically linkable is statically
 linked by default. Set `-DSIAMIZE_STATIC_LINK=OFF` to keep things dynamic.
+
+The MATLAB / Octave MEX (`siamex.mex*`) is exercised by CI on
+`linux-octave`, `linux-matlab`, and `windows-matlab` matrix legs; on
+Linux the MATLAB MEX statically embeds libstdc++ (to escape MATLAB's
+older bundled `libstdc++.so.6`) while the Octave MEX stays dynamic
+(static-linking would conflict with Octave's already-loaded C++
+runtime).
 
 Locally tested: Linux x86_64. macOS / Windows are exercised by CI (see
 `.github/workflows/ci.yml`); please open an issue if a host setup breaks.
