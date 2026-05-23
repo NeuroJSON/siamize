@@ -10,6 +10,8 @@
 #include "sliding.h"
 #include "weights.h"
 
+#include <onnxruntime_cxx_api.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -254,10 +256,38 @@ int main(int argc, char** argv) {
     Volume resampled = siam::resample_cubic(crop.cropped, new_shape[0], new_shape[1], new_shape[2]);
     crop.cropped = Volume{};  // free
 
-    // sliding window
-    LogitsVolume logits = siam::sliding_window(
-                              resampled, model_paths, patch, num_classes,
-                              threads, 0.5f, verbose, device, trt_cache_dir);
+    // sliding window. If --device auto chose CUDA/TensorRT and the
+    // session aborts mid-Run with an allocation failure (tight VRAM,
+    // contention with other GPU clients, etc.), fall back to CPU and
+    // retry. --device cuda / --device tensorrt stay strict -- the
+    // exception re-raises so the user sees the explicit failure they
+    // asked for.
+    LogitsVolume logits;
+    try {
+        logits = siam::sliding_window(
+                     resampled, model_paths, patch, num_classes,
+                     threads, 0.5f, verbose, device, trt_cache_dir);
+    } catch (const Ort::Exception& e) {
+        std::string msg = e.what();
+        bool oom = msg.find("allocate") != std::string::npos
+                   || msg.find("Allocate") != std::string::npos
+                   || msg.find("out of memory") != std::string::npos
+                   || msg.find("CUDA_ERROR_OUT_OF_MEMORY") != std::string::npos;
+
+        if (device == "auto" && oom) {
+            std::fprintf(stderr,
+                         "  GPU allocation failed: %s\n"
+                         "  --device auto falling back to CPU. To force CPU from the\n"
+                         "  start, pass `--device cpu`; to debug the GPU side, pass\n"
+                         "  `--device cuda` and free VRAM (close other GPU clients).\n",
+                         e.what());
+            logits = siam::sliding_window(
+                         resampled, model_paths, patch, num_classes,
+                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir);
+        } else {
+            throw;
+        }
+    }
     resampled = Volume{};  // free
 
     // resample logits back to cropped (pre-resample) shape, per channel, with trilinear.
