@@ -15,7 +15,10 @@ function lab = siamize(varargin)
 %       <siamize_dir>/mex/jsonlab (`git submodule update --init` in the
 %       siamize repo populates that directory).
 %     - a jnifti struct with fields .NIFTIData and .NIFTIHeader.Affine,
-%       as returned by jsonlab's loadnifti().
+%       as returned by jsonlab's loadnifti(file).
+%     - a readnifti-style struct with fields .img and .hdr (with raw
+%       NIfTI header fields srow_x/srow_y/srow_z), as returned by
+%       loadnifti(file, 'nii') or nii2jnii(file, 'nii').
 %     - a 3D numeric array of voxel intensities. If the next argument
 %       is not a 3x4 / 4x4 affine matrix (i.e. it is a models spec,
 %       opts struct, or missing), siamize synthesizes an identity-
@@ -193,15 +196,24 @@ function [img, affine, models, opts] = siamize_parse_inputs_(varargin)
         affine = double(nii.NIFTIHeader.Affine);
         rest = varargin(2:end);
     elseif isstruct(in)
-        if ~isfield(in, 'NIFTIData')
-            error('siamize:struct', ...
-                  'struct input must be a jnifti struct with .NIFTIData');
-        end
-        img = in.NIFTIData;
-        if isfield(in, 'NIFTIHeader') && isfield(in.NIFTIHeader, 'Affine')
-            affine = double(in.NIFTIHeader.Affine);
+        if isfield(in, 'NIFTIData')
+            % jnifti-style struct (loadnifti(file))
+            img = in.NIFTIData;
+            if isfield(in, 'NIFTIHeader') && isfield(in.NIFTIHeader, 'Affine')
+                affine = double(in.NIFTIHeader.Affine);
+            else
+                affine = siamize_default_affine_(size(img));
+            end
+        elseif isfield(in, 'img') && isfield(in, 'hdr')
+            % readnifti-style struct (loadnifti(file, 'nii'))
+            img = in.img;
+            affine = siamize_affine_from_niihdr_(in);
         else
-            affine = siamize_default_affine_(size(img));
+            error('siamize:struct', ...
+                  ['struct input must be a jnifti struct (.NIFTIData) '...
+                   'or a readnifti-style struct (.img + .hdr); '...
+                   'got fields: %s'], ...
+                  strjoin(fieldnames(in), ','));
         end
         rest = varargin(2:end);
     elseif isnumeric(in)
@@ -234,6 +246,27 @@ end
 function tf = siamize_is_affine_arg_(x)
 %SIAMIZE_IS_AFFINE_ARG_  Numeric 3x4 or 4x4 -> treat as an affine.
     tf = isnumeric(x) && (isequal(size(x), [3, 4]) || isequal(size(x), [4, 4]));
+end
+
+
+function A = siamize_affine_from_niihdr_(nii)
+%SIAMIZE_AFFINE_FROM_NIIHDR_  Extract a 3x4 RAS affine from a readnifti-style struct.
+%   Stacks hdr.srow_x/srow_y/srow_z (the NIfTI sform), matching
+%   jsonlab/niiheader2jnii. If those fields are missing or all-zero
+%   (sform not populated by the writer) we fall back to a centered
+%   identity; SIAM only consumes rotation + voxel spacing so a missing
+%   sform mostly affects the cosmetic origin.
+    hdr = nii.hdr;
+    has_sform = isfield(hdr, 'srow_x') && isfield(hdr, 'srow_y') ...
+                && isfield(hdr, 'srow_z');
+    if has_sform
+        rows = double([hdr.srow_x(:)'; hdr.srow_y(:)'; hdr.srow_z(:)']);
+        if any(rows(:) ~= 0)
+            A = rows;
+            return;
+        end
+    end
+    A = siamize_default_affine_(size(nii.img));
 end
 
 
