@@ -307,6 +307,24 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
         if(OpenMP_CXX_FOUND)
             target_link_libraries(siamize_mex OpenMP::OpenMP_CXX)
         endif()
+        # Statically link the C++ runtime into the MEX. MATLAB ships its
+        # own libstdc++.so.6 that's typically older than the host
+        # toolchain's, so a dynamic MEX raises "GLIBCXX_x.y.z not found"
+        # at MEX-load time. Statically linking libstdc++ + libgcc into
+        # siamex.mexa64 (and using /MT on MSVC) sidesteps the version
+        # negotiation entirely.
+        if(SIAMIZE_STATIC_LINK)
+            if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                target_link_options(siamize_mex PRIVATE -static-libstdc++ -static-libgcc)
+            elseif(MSVC)
+                target_compile_options(siamize_mex PRIVATE
+                    $<$<CONFIG:Release>:/MT>
+                    $<$<CONFIG:Debug>:/MTd>
+                    $<$<CONFIG:RelWithDebInfo>:/MT>
+                    $<$<CONFIG:MinSizeRel>:/MT>
+                )
+            endif()
+        endif()
         if(MSVC)
             target_compile_definitions(siamize_mex PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
             target_compile_options(siamize_mex PRIVATE /wd4068 /wd4244 /wd4267)
@@ -365,6 +383,15 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         # mkoctfile honors LDFLAGS env for link-stage flags; -L/-l args
         # on the command line get dropped silently.
         set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR}")
+        # Octave loads its MEX into a process that already has a
+        # dynamically-loaded libstdc++. Statically embedding a second
+        # copy of libstdc++ inside the MEX causes ABI conflicts at
+        # load time (std::cout, type_info, exception handling) and
+        # SIGABRT during siamex() entry. So we always link libstdc++
+        # dynamically for the Octave MEX even with SIAMIZE_STATIC_LINK=ON.
+        # (The MATLAB MEX is different -- MATLAB ships an older bundled
+        #  libstdc++.so.6 that lacks recent GLIBCXX_x.y.z symbols, so
+        #  there static-linking is the only thing that loads.)
         add_custom_command(
             OUTPUT ${_oct_out}
             COMMAND ${CMAKE_COMMAND} -E env
