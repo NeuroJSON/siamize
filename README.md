@@ -140,6 +140,54 @@ With a system CUDA install (`/usr/local/cuda`), the standard
 GPUs (e.g., Volta sm_70) may need a cuDNN build that explicitly includes
 those kernels.
 
+##### What the prebuilt CUDA bundle ships vs. what you must supply
+
+The `siamize-*-cuda.zip` artifact produced by CI / `make package-cuda`
+contains only what's redistributable: the `siamize` binary, ORT 1.26
+core, and ORT's CUDA EP plugin DLLs. CUDA/cuDNN themselves are *not*
+bundled — they're large (~1 GB combined for cuDNN 9 + cuBLAS + cuFFT),
+and cuDNN's license forbids third-party redistribution.
+
+| Component | In the zip | You install |
+|---|---|---|
+| `siamize` / `siamize.exe` | ✅ | — |
+| `libonnxruntime.so.1` / `onnxruntime.dll` | ✅ | — |
+| `libonnxruntime_providers_shared.so` / `.dll` | ✅ | — |
+| `libonnxruntime_providers_cuda.so` / `.dll` | ✅ | — |
+| `libcudart` (CUDA runtime) | ❌ | CUDA Toolkit, or `pip install nvidia-cuda-runtime-cu12` |
+| `libcublas` + `libcublasLt` | ❌ | CUDA Toolkit, or `pip install nvidia-cublas-cu12` |
+| `libcudnn` (cuDNN 9 for ORT 1.26) | ❌ | NVIDIA cuDNN 9 installer, or `pip install "nvidia-cudnn-cu12==9.*"` |
+| `libcufft`, `libcurand`, `cuda_nvrtc`, `nvjitlink` | ❌ | CUDA Toolkit, or matching `nvidia-*-cu12` pip wheels |
+
+##### Windows: pointing siamize.exe at the CUDA runtime DLLs
+
+On Windows the loader uses `PATH` (not `LD_LIBRARY_PATH`) to find DLLs.
+If the CUDA Toolkit installer set things up, its `bin` directory is
+already on `PATH` and you can just unzip `siamize-windows-x64-cuda.zip`
+and run. For a lighter-weight install via pip wheels (mirror of the
+Linux recipe above):
+
+```powershell
+pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 `
+            "nvidia-cudnn-cu12==9.*"   `
+            nvidia-cufft-cu12 nvidia-curand-cu12 `
+            nvidia-cuda-nvrtc-cu12 nvidia-nvjitlink-cu12
+
+# Prepend the wheel DLL dirs to PATH (Windows equivalent of the
+# LD_LIBRARY_PATH one-liner shown above for Linux).
+$NV = (python -c "import os, nvidia; print(os.path.dirname(nvidia.__file__))")
+$env:PATH = "$NV\cublas\bin;$NV\cuda_runtime\bin;$NV\cudnn\bin;" `
+          + "$NV\cufft\bin;$NV\curand\bin;$NV\cuda_nvrtc\bin;" `
+          + "$NV\nvjitlink\bin;" + $env:PATH
+
+.\siamize.exe -i input.nii.gz -o pred.nii.gz --models 0 --device cuda
+```
+
+Note: the pip wheels put their DLLs under `bin\` on Windows (vs. `lib\`
+on Linux). Hardware-compatibility caveat is the same as Linux — the pip
+cuDNN/cuBLAS wheels target sm_75+; older GPUs need the official NVIDIA
+installer.
+
 #### Optional: TensorRT EP (advanced, batch-processing workloads only)
 
 For workloads that process hundreds of volumes with the same model/GPU
