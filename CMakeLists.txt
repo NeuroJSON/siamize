@@ -387,7 +387,19 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         # C++17 typedef-noexcept support. Inject -std=c++17 via env.
         # mkoctfile honors LDFLAGS env for link-stage flags; -L/-l args
         # on the command line get dropped silently.
-        set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR}")
+        # Two -rpath entries: the absolute build-tree path (lets the MEX
+        # find libonnxruntime when running from the source checkout) plus
+        # the literal $ORIGIN token (lets the MEX find a libonnxruntime
+        # that lives next to it in a package bundle). $ORIGIN is expanded
+        # at runtime by the ELF loader, not by cmake/make.
+        #
+        # The "\\\$" escape is load-bearing: mkoctfile is a Perl script
+        # that runs the link command via `system($cmd)`, which goes
+        # through /bin/sh. A bare $ORIGIN in LDFLAGS gets shell-expanded
+        # to the empty string before ld ever sees it. The triple-escape
+        # makes the CMake string `\$ORIGIN`, which the shell reads as a
+        # literal `$ORIGIN` and forwards intact to the linker.
+        set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR} -Wl,-rpath,\\\$ORIGIN")
         # Octave loads its MEX into a process that already has a
         # dynamically-loaded libstdc++. Statically embedding a second
         # copy of libstdc++ inside the MEX causes ABI conflicts at
