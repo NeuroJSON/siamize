@@ -1,5 +1,5 @@
 function lab = siamize(varargin)
-%SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on a NIfTI volume.
+% SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on a NIfTI volume.
 %
 %   labels = siamize(input)
 %   labels = siamize(input, outputfile)
@@ -110,338 +110,328 @@ function lab = siamize(varargin)
 % siamize project: https://github.com/NeuroJSON/siamize
 % SIAM paper:      https://arxiv.org/abs/2605.02737
 
-    siamize_ensure_jsonlab_();
-    [img, affine, src, outputfile, models, opts] = siamize_parse_inputs_(varargin{:});
+siamize_ensure_jsonlab_();
+[img, affine, src, outputfile, models, opts] = siamize_parse_inputs_(varargin{:});
 
-    if isempty(models)
-        models = {'fold_0_fp16.onnx'};
-    elseif isnumeric(models)
-        nums = models(:);
-        models = cell(numel(nums), 1);
-        for k = 1:numel(nums)
-            n = double(nums(k));
-            if n < 0 || n > 9 || n ~= round(n)
-                error('siamize:models', ...
-                      'numeric model index must be an integer 0..9, got %g', n);
-            end
-            models{k} = sprintf('fold_%d_fp16.onnx', n);
+if isempty(models)
+    models = {'fold_0_fp16.onnx'};
+elseif isnumeric(models)
+    nums = models(:);
+    models = cell(numel(nums), 1);
+    for k = 1:numel(nums)
+        n = double(nums(k));
+        if n < 0 || n > 9 || n ~= round(n)
+            error('siamize:models', ...
+                  'numeric model index must be an integer 0..9, got %g', n);
         end
-    elseif ischar(models)
-        parts = strsplit(strtrim(models), ',');
-        models = cell(numel(parts), 1);
-        for k = 1:numel(parts)
-            models{k} = siamize_expand_fold_(strtrim(parts{k}));
-        end
-    elseif iscell(models)
-        for k = 1:numel(models)
-            if ~ischar(models{k})
-                error('siamize:models', ...
-                      'cell entry %d must be a char string', k);
-            end
-            models{k} = siamize_expand_fold_(strtrim(models{k}));
-        end
-    else
-        error('siamize:models', ...
-              'models must be [] | numeric | char | cellstr');
+        models{k} = sprintf('fold_%d_fp16.onnx', n);
     end
-    if ~iscellstr(models)
-        error('siamize:models', 'models must resolve to a cellstr');
+elseif ischar(models)
+    parts = strsplit(strtrim(models), ',');
+    models = cell(numel(parts), 1);
+    for k = 1:numel(parts)
+        models{k} = siamize_expand_fold_(strtrim(parts{k}));
     end
-
-    resolved = cell(size(models));
+elseif iscell(models)
     for k = 1:numel(models)
-        resolved{k} = siamize_resolve_model_(models{k}, opts);
-    end
-
-    here = fileparts(mfilename('fullpath'));
-    if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
-        if ~ismember(here, regexp(path, pathsep, 'split'))
-            addpath(here);
+        if ~ischar(models{k})
+            error('siamize:models', ...
+                  'cell entry %d must be a char string', k);
         end
+        models{k} = siamize_expand_fold_(strtrim(models{k}));
     end
+else
+    error('siamize:models', ...
+          'models must be [] | numeric | char | cellstr');
+end
+if ~iscellstr(models)
+    error('siamize:models', 'models must resolve to a cellstr');
+end
 
-    lab = siamex(img, affine, resolved, opts);
+resolved = cell(size(models));
+for k = 1:numel(models)
+    resolved{k} = siamize_resolve_model_(models{k}, opts);
+end
 
-    if ~isempty(outputfile)
-        siamize_write_output_(lab, affine, src, outputfile);
+here = fileparts(mfilename('fullpath'));
+if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
+    if ~ismember(here, regexp(path, pathsep, 'split'))
+        addpath(here);
     end
 end
 
+lab = siamex(img, affine, resolved, opts);
+
+if ~isempty(outputfile)
+    siamize_write_output_(lab, affine, src, outputfile);
+end
+end
 
 function siamize_ensure_jsonlab_()
-%SIAMIZE_ENSURE_JSONLAB_  Add bundled jsonlab to path if loadjd is missing.
-    if exist('loadjd', 'file') == 2
-        return;
-    end
-    here = fileparts(mfilename('fullpath'));
-    jl = fullfile(here, 'jsonlab');
-    if exist(jl, 'dir') == 7
-        addpath(jl);
-    end
+% SIAMIZE_ENSURE_JSONLAB_  Add bundled jsonlab to path if loadjd is missing.
+if exist('loadjd', 'file') == 2
+    return
 end
-
+here = fileparts(mfilename('fullpath'));
+jl = fullfile(here, 'jsonlab');
+if exist(jl, 'dir') == 7
+    addpath(jl);
+end
+end
 
 function [img, affine, src, outputfile, models, opts] = siamize_parse_inputs_(varargin)
-%SIAMIZE_PARSE_INPUTS_  Normalize flexible inputs into (img, affine, src, outputfile, models, opts).
+% SIAMIZE_PARSE_INPUTS_  Normalize flexible inputs into (img, affine, src, outputfile, models, opts).
 %   src is the jnifti source struct used as a header template when
 %   writing to outputfile; struct() if not available (bare-array input).
-    if nargin < 1
-        error('siamize:nargin', ...
-              ['usage: siamize(input [, outputfile, models, opts]) or '...
-               'siamize(img, affine [, outputfile, models, opts])']);
-    end
-
-    in = varargin{1};
-    if isa(in, 'string') && isscalar(in)
-        in = char(in);
-    end
-
-    outputfile = '';
-    models = [];
-    opts = [];
-    src = struct();
-
-    if ischar(in)
-        if exist('loadjd', 'file') ~= 2
-            error('siamize:nojsonlab', ...
-                  ['loadjd() not found. Install jsonlab '...
-                   '(https://github.com/NeuroJSON/jsonlab) or run '...
-                   '`git submodule update --init` so matlab/jsonlab is populated.']);
-        end
-        nii = loadjd(in);
-        if ~isstruct(nii) || ~isfield(nii, 'NIFTIData')
-            error('siamize:badload', ...
-                  'loadjd(%s) did not return a jnifti struct (got %s)', ...
-                  in, class(nii));
-        end
-        img = nii.NIFTIData;
-        if isfield(nii, 'NIFTIHeader') && isfield(nii.NIFTIHeader, 'Affine')
-            affine = double(nii.NIFTIHeader.Affine);
-        else
-            affine = siamize_default_affine_(size(img));
-        end
-        src = nii;
-        rest = varargin(2:end);
-    elseif isstruct(in)
-        if isfield(in, 'NIFTIData')
-            img = in.NIFTIData;
-            if isfield(in, 'NIFTIHeader') && isfield(in.NIFTIHeader, 'Affine')
-                affine = double(in.NIFTIHeader.Affine);
-            else
-                affine = siamize_default_affine_(size(img));
-            end
-            src = in;
-        elseif isfield(in, 'img') && isfield(in, 'hdr')
-            img = in.img;
-            affine = siamize_affine_from_niihdr_(in);
-            try
-                src = niiheader2jnii(in);
-                src.NIFTIData = img;
-            catch
-                src = struct();
-            end
-        else
-            error('siamize:struct', ...
-                  ['struct input must be a jnifti struct (.NIFTIData) '...
-                   'or a readnifti-style struct (.img + .hdr); '...
-                   'got fields: %s'], ...
-                  strjoin(fieldnames(in), ','));
-        end
-        rest = varargin(2:end);
-    elseif isnumeric(in)
-        img = in;
-        if nargin >= 2 && siamize_is_affine_arg_(varargin{2})
-            affine = double(varargin{2});
-            rest = varargin(3:end);
-        else
-            affine = siamize_default_affine_(size(img));
-            rest = varargin(2:end);
-        end
-    else
-        error('siamize:input', ...
-              ['first input must be a file path (char), a jnifti '...
-               'struct (.NIFTIData / .NIFTIHeader), a readnifti-style '...
-               'struct (.img / .hdr), or a numeric 3D array']);
-    end
-
-    % Optional output filename: char matching a known image extension.
-    if numel(rest) >= 1 && siamize_is_image_filename_(rest{1})
-        outputfile = rest{1};
-        rest = rest(2:end);
-    end
-
-    if numel(rest) >= 1
-        models = rest{1};
-    end
-    if numel(rest) >= 2
-        opts = rest{2};
-    end
-    if isempty(opts) || ~isstruct(opts)
-        opts = struct();
-    end
+if nargin < 1
+    error('siamize:nargin', ...
+          ['usage: siamize(input [, outputfile, models, opts]) or '...
+           'siamize(img, affine [, outputfile, models, opts])']);
 end
 
+in = varargin{1};
+if isa(in, 'string') && isscalar(in)
+    in = char(in);
+end
+
+outputfile = '';
+models = [];
+opts = [];
+src = struct();
+
+if ischar(in)
+    if exist('loadjd', 'file') ~= 2
+        error('siamize:nojsonlab', ...
+              ['loadjd() not found. Install jsonlab '...
+               '(https://github.com/NeuroJSON/jsonlab) or run '...
+               '`git submodule update --init` so matlab/jsonlab is populated.']);
+    end
+    nii = loadjd(in);
+    if ~isstruct(nii) || ~isfield(nii, 'NIFTIData')
+        error('siamize:badload', ...
+              'loadjd(%s) did not return a jnifti struct (got %s)', ...
+              in, class(nii));
+    end
+    img = nii.NIFTIData;
+    if isfield(nii, 'NIFTIHeader') && isfield(nii.NIFTIHeader, 'Affine')
+        affine = double(nii.NIFTIHeader.Affine);
+    else
+        affine = siamize_default_affine_(size(img));
+    end
+    src = nii;
+    rest = varargin(2:end);
+elseif isstruct(in)
+    if isfield(in, 'NIFTIData')
+        img = in.NIFTIData;
+        if isfield(in, 'NIFTIHeader') && isfield(in.NIFTIHeader, 'Affine')
+            affine = double(in.NIFTIHeader.Affine);
+        else
+            affine = siamize_default_affine_(size(img));
+        end
+        src = in;
+    elseif isfield(in, 'img') && isfield(in, 'hdr')
+        img = in.img;
+        affine = siamize_affine_from_niihdr_(in);
+        try
+            src = niiheader2jnii(in);
+            src.NIFTIData = img;
+        catch
+            src = struct();
+        end
+    else
+        error('siamize:struct', ...
+              ['struct input must be a jnifti struct (.NIFTIData) '...
+               'or a readnifti-style struct (.img + .hdr); '...
+               'got fields: %s'], ...
+              strjoin(fieldnames(in), ','));
+    end
+    rest = varargin(2:end);
+elseif isnumeric(in)
+    img = in;
+    if nargin >= 2 && siamize_is_affine_arg_(varargin{2})
+        affine = double(varargin{2});
+        rest = varargin(3:end);
+    else
+        affine = siamize_default_affine_(size(img));
+        rest = varargin(2:end);
+    end
+else
+    error('siamize:input', ...
+          ['first input must be a file path (char), a jnifti '...
+           'struct (.NIFTIData / .NIFTIHeader), a readnifti-style '...
+           'struct (.img / .hdr), or a numeric 3D array']);
+end
+
+% Optional output filename: char matching a known image extension.
+if numel(rest) >= 1 && siamize_is_image_filename_(rest{1})
+    outputfile = rest{1};
+    rest = rest(2:end);
+end
+
+if numel(rest) >= 1
+    models = rest{1};
+end
+if numel(rest) >= 2
+    opts = rest{2};
+end
+if isempty(opts) || ~isstruct(opts)
+    opts = struct();
+end
+end
 
 function siamize_write_output_(lab, affine, src, outputfile)
-%SIAMIZE_WRITE_OUTPUT_  Save the label volume to a .nii(.gz) / .jnii / .bnii file.
+% SIAMIZE_WRITE_OUTPUT_  Save the label volume to a .nii(.gz) / .jnii / .bnii file.
 %   Preserves the source jnifti header when available; otherwise builds
 %   a minimal header via jnifticreate and writes the affine into it.
-    if isstruct(src) && isfield(src, 'NIFTIHeader')
-        jnii_out = src;
-        jnii_out.NIFTIData = lab;
-        if isfield(jnii_out.NIFTIHeader, 'Affine')
-            jnii_out.NIFTIHeader.Affine = affine;
-        end
-    else
-        jnii_out = jnifticreate(lab);
+if isstruct(src) && isfield(src, 'NIFTIHeader')
+    jnii_out = src;
+    jnii_out.NIFTIData = lab;
+    if isfield(jnii_out.NIFTIHeader, 'Affine')
         jnii_out.NIFTIHeader.Affine = affine;
     end
-
-    if ~isempty(regexpi(outputfile, '\.nii(\.gz)?$', 'once'))
-        jnii2nii(jnii_out, outputfile);
-    elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
-        savejnifti(jnii_out, outputfile);
-    else
-        error('siamize:outext', ...
-              ['unsupported output extension: %s (expected '...
-               '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
-    end
+else
+    jnii_out = jnifticreate(lab);
+    jnii_out.NIFTIHeader.Affine = affine;
 end
 
+if ~isempty(regexpi(outputfile, '\.nii(\.gz)?$', 'once'))
+    jnii2nii(jnii_out, outputfile);
+elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
+    savejnifti(jnii_out, outputfile);
+else
+    error('siamize:outext', ...
+          ['unsupported output extension: %s (expected '...
+           '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
+end
+end
 
 function tf = siamize_is_image_filename_(s)
-%SIAMIZE_IS_IMAGE_FILENAME_  True if s names a NIfTI / JNIfTI file by extension.
-    tf = ischar(s) && ~isempty(regexpi(s, '\.(nii(\.gz)?|jnii|bnii)$', 'once'));
+% SIAMIZE_IS_IMAGE_FILENAME_  True if s names a NIfTI / JNIfTI file by extension.
+tf = ischar(s) && ~isempty(regexpi(s, '\.(nii(\.gz)?|jnii|bnii)$', 'once'));
 end
-
 
 function tf = siamize_is_affine_arg_(x)
-%SIAMIZE_IS_AFFINE_ARG_  Numeric 3x4 or 4x4 -> treat as an affine.
-    tf = isnumeric(x) && (isequal(size(x), [3, 4]) || isequal(size(x), [4, 4]));
+% SIAMIZE_IS_AFFINE_ARG_  Numeric 3x4 or 4x4 -> treat as an affine.
+tf = isnumeric(x) && (isequal(size(x), [3, 4]) || isequal(size(x), [4, 4]));
 end
-
 
 function A = siamize_affine_from_niihdr_(nii)
-%SIAMIZE_AFFINE_FROM_NIIHDR_  Extract a 3x4 RAS affine from a readnifti-style struct.
-    hdr = nii.hdr;
-    has_sform = isfield(hdr, 'srow_x') && isfield(hdr, 'srow_y') ...
-                && isfield(hdr, 'srow_z');
-    if has_sform
-        rows = double([hdr.srow_x(:)'; hdr.srow_y(:)'; hdr.srow_z(:)']);
-        if any(rows(:) ~= 0)
-            A = rows;
-            return;
-        end
+% SIAMIZE_AFFINE_FROM_NIIHDR_  Extract a 3x4 RAS affine from a readnifti-style struct.
+hdr = nii.hdr;
+has_sform = isfield(hdr, 'srow_x') && isfield(hdr, 'srow_y') && isfield(hdr, 'srow_z');
+if has_sform
+    rows = double([hdr.srow_x(:)'; hdr.srow_y(:)'; hdr.srow_z(:)']);
+    if any(rows(:) ~= 0)
+        A = rows;
+        return
     end
-    A = siamize_default_affine_(size(nii.img));
 end
-
+A = siamize_default_affine_(size(nii.img));
+end
 
 function A = siamize_default_affine_(sz)
-%SIAMIZE_DEFAULT_AFFINE_  Identity rotation, translation centers the volume.
-    if numel(sz) < 3
-        error('siamize:shape', 'input volume must be 3D');
-    end
-    Nx = double(sz(1));
-    Ny = double(sz(2));
-    Nz = double(sz(3));
-    A = single([1, 0, 0, -(Nx - 1) / 2;
-                0, 1, 0, -(Ny - 1) / 2;
-                0, 0, 1, -(Nz - 1) / 2]);
+% SIAMIZE_DEFAULT_AFFINE_  Identity rotation, translation centers the volume.
+if numel(sz) < 3
+    error('siamize:shape', 'input volume must be 3D');
 end
-
+Nx = double(sz(1));
+Ny = double(sz(2));
+Nz = double(sz(3));
+A = single([1, 0, 0, -(Nx - 1) / 2
+            0, 1, 0, -(Ny - 1) / 2
+            0, 0, 1, -(Nz - 1) / 2]);
+end
 
 function s = siamize_expand_fold_(s)
-%SIAMIZE_EXPAND_FOLD_  '0'..'9' -> 'fold_<N>_fp16.onnx'; pass through otherwise.
-    if numel(s) == 1 && s >= '0' && s <= '9'
-        s = sprintf('fold_%s_fp16.onnx', s);
+% SIAMIZE_EXPAND_FOLD_  '0'..'9' -> 'fold_<N>_fp16.onnx'; pass through otherwise.
+if numel(s) == 1 && s >= '0' && s <= '9'
+    s = sprintf('fold_%s_fp16.onnx', s);
+end
+end
+
+function p = siamize_resolve_model_(spec, opts)
+% SIAMIZE_RESOLVE_MODEL_ Locate or download an .onnx fold file.
+if exist(spec, 'file') == 2
+    p = spec;
+    return
+end
+
+cachedir = getenv('SIAMIZE_CACHE_DIR');
+if isempty(cachedir)
+    if ispc
+        base = getenv('LOCALAPPDATA');
+        if isempty(base)
+            base = getenv('USERPROFILE');
+        end
+        cachedir = fullfile(base, 'siamize', 'models');
+    else
+        cachedir = fullfile(getenv('HOME'), '.cache', 'siamize', 'models');
     end
 end
 
+[~, name, ext] = fileparts(spec);
+basename = [name, ext];
+p = fullfile(cachedir, basename);
+if exist(p, 'file') == 2
+    return
+end
 
-function p = siamize_resolve_model_(spec, opts)
-%SIAMIZE_RESOLVE_MODEL_ Locate or download an .onnx fold file.
-    if exist(spec, 'file') == 2
-        p = spec;
-        return;
-    end
+if ~exist(cachedir, 'dir')
+    mkdir(cachedir);
+end
 
-    cachedir = getenv('SIAMIZE_CACHE_DIR');
-    if isempty(cachedir)
-        if ispc
-            base = getenv('LOCALAPPDATA');
-            if isempty(base)
-                base = getenv('USERPROFILE');
-            end
-            cachedir = fullfile(base, 'siamize', 'models');
-        else
-            cachedir = fullfile(getenv('HOME'), '.cache', 'siamize', 'models');
-        end
-    end
+urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
+if isempty(urlbase)
+    urlbase = 'https://neurojson.org/siamize/weights/siam_v03';
+end
 
-    [~, name, ext] = fileparts(spec);
-    basename = [name, ext];
-    p = fullfile(cachedir, basename);
-    if exist(p, 'file') == 2
-        return;
-    end
+verbose = false;
+if isstruct(opts) && isfield(opts, 'verbose') && ~isempty(opts.verbose)
+    verbose = logical(opts.verbose);
+end
 
-    if ~exist(cachedir, 'dir')
-        mkdir(cachedir);
-    end
-
-    urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
-    if isempty(urlbase)
-        urlbase = 'https://neurojson.org/siamize/weights/siam_v03';
-    end
-
-    verbose = false;
-    if isstruct(opts) && isfield(opts, 'verbose') && ~isempty(opts.verbose)
-        verbose = logical(opts.verbose);
-    end
-
-    url_gz = [urlbase, '/', basename, '.gz'];
-    tmp_gz = [p, '.gz'];
-    fetched_gz = false;
-    try
-        if verbose
-            fprintf('siamize: fetching %s\n', url_gz);
-        end
-        urlwrite(url_gz, tmp_gz);
-        % Verify gzip magic bytes (0x1F 0x8B) so we don't pass an HTML
-        % error page through gunzip.
-        fid = fopen(tmp_gz, 'rb');
-        magic = fread(fid, 2, 'uint8');
-        fclose(fid);
-        if numel(magic) ~= 2 || magic(1) ~= 31 || magic(2) ~= 139
-            error('siamize:notgzip', ...
-                  'response from %s is not a gzip file (got %d bytes starting %02x %02x)', ...
-                  url_gz, numel(magic), magic(1), magic(2));
-        end
-        gunzip(tmp_gz, cachedir);
-        fetched_gz = true;
-    catch err
-        if verbose
-            fprintf('siamize: .gz path failed (%s); trying raw .onnx\n', err.message);
-        end
-    end
-    if exist(tmp_gz, 'file')
-        delete(tmp_gz);
-    end
-
-    if fetched_gz && exist(p, 'file') == 2
-        return;
-    end
-
-    % Fall back to the raw uncompressed URL.
-    url_raw = [urlbase, '/', basename];
+url_gz = [urlbase, '/', basename, '.gz'];
+tmp_gz = [p, '.gz'];
+fetched_gz = false;
+try
     if verbose
-        fprintf('siamize: fetching %s\n', url_raw);
+        fprintf('siamize: fetching %s\n', url_gz);
     end
-    urlwrite(url_raw, p);
-    if exist(p, 'file') ~= 2
-        error('siamize:fetch', ...
-              'could not locate or download %s\n  tried %s\n        %s', ...
-              basename, url_gz, url_raw);
+    urlwrite(url_gz, tmp_gz);
+    % Verify gzip magic bytes (0x1F 0x8B) so we don't pass an HTML
+    % error page through gunzip.
+    fid = fopen(tmp_gz, 'rb');
+    magic = fread(fid, 2, 'uint8');
+    fclose(fid);
+    if numel(magic) ~= 2 || magic(1) ~= 31 || magic(2) ~= 139
+        error('siamize:notgzip', ...
+              'response from %s is not a gzip file (got %d bytes starting %02x %02x)', ...
+              url_gz, numel(magic), magic(1), magic(2));
     end
+    gunzip(tmp_gz, cachedir);
+    fetched_gz = true;
+catch err
+    if verbose
+        fprintf('siamize: .gz path failed (%s); trying raw .onnx\n', err.message);
+    end
+end
+if exist(tmp_gz, 'file')
+    delete(tmp_gz);
+end
+
+if fetched_gz && exist(p, 'file') == 2
+    return
+end
+
+% Fall back to the raw uncompressed URL.
+url_raw = [urlbase, '/', basename];
+if verbose
+    fprintf('siamize: fetching %s\n', url_raw);
+end
+urlwrite(url_raw, p);
+if exist(p, 'file') ~= 2
+    error('siamize:fetch', ...
+          'could not locate or download %s\n  tried %s\n        %s', ...
+          basename, url_gz, url_raw);
+end
 end
