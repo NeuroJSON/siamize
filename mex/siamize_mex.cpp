@@ -38,6 +38,7 @@
 #include "orient.h"
 #include "preprocess.h"
 #include "sliding.h"
+#include "weights.h"
 
 #include <algorithm>
 #include <array>
@@ -131,6 +132,10 @@ std::array<float, 16> read_affine(const mxArray* a) {
 
 std::vector<std::string> read_models(const mxArray* a) {
     std::vector<std::string> out;
+    if (mxIsEmpty(a)) {
+        // empty -> caller wants the default single-fold
+        return out;
+    }
     if (mxIsChar(a)) {
         out.push_back(mx_to_string(a));
     } else if (mxIsCell(a)) {
@@ -141,10 +146,7 @@ std::vector<std::string> read_models(const mxArray* a) {
             out.push_back(mx_to_string(c));
         }
     } else {
-        die("siamize:models", "models must be a char array or cellstr");
-    }
-    if (out.empty()) {
-        die("siamize:models", "at least one model path required");
+        die("siamize:models", "models must be a char array, cellstr, or [] for default");
     }
     return out;
 }
@@ -228,6 +230,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         Opts opts;
         if (nrhs >= 4) {
             read_opts(prhs[3], opts);
+        }
+
+        // Default to single-fold fold_0 if caller passed []/'' for models,
+        // matching the CLI behavior. resolve_model_path then either uses
+        // an existing local file, hits the shared cache, or curls the
+        // weight in from the default URL.
+        if (models.empty()) {
+            models.push_back("fold_0_fp16.onnx");
+        }
+        for (auto& m : models) {
+            m = siam::resolve_model_path(m, opts.verbose);
         }
         if (opts.threads <= 0) {
             unsigned hc = std::thread::hardware_concurrency();

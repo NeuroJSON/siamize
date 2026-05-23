@@ -1,5 +1,7 @@
-% SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on an in-memory volume.
+function lab = siamize(img, affine, models, opts)
+%SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on an in-memory volume.
 %
+%   labels = siamize(img, affine)
 %   labels = siamize(img, affine, models)
 %   labels = siamize(img, affine, models, opts)
 %
@@ -7,15 +9,26 @@
 %            Interpreted as a NIfTI voxel grid with axes [X, Y, Z] in
 %            MATLAB's natural column-major layout.
 %
-%   affine   3x4 or 4x4 double matrix mapping voxel axes to RAS world
-%            coordinates. Same convention as jsonlab's loadnifti():
+%   affine   3x4 or 4x4 matrix mapping voxel axes to RAS world
+%            coordinates (single or double). Same convention as
+%            jsonlab's loadnifti():
 %               nii = loadnifti('input.nii.gz');
 %               img = nii.NIFTIData;
 %               affine = nii.NIFTIHeader.Affine;
 %
-%   models   char array (single .onnx path) OR cellstr of .onnx fold
-%            paths. Logits are averaged across folds (5-fold ensemble
-%            is the upstream-SIAM default).
+%   models   [] | char | cellstr -- one .onnx fold per entry; logits are
+%            averaged across the list. Defaults to {'fold_0_fp16.onnx'}
+%            (single fold) when omitted or empty. Each entry can be
+%            either an existing path or a bare basename; missing files
+%            are looked up in the shared siamize cache
+%                $SIAMIZE_CACHE_DIR
+%                  (default $HOME/.cache/siamize/models on POSIX,
+%                   %LOCALAPPDATA%/siamize/models on Windows)
+%            and auto-downloaded from
+%                $SIAMIZE_WEIGHTS_BASE_URL
+%                  (default https://neurojson.org/siamize/weights/siam_v03)
+%            via MATLAB/Octave's urlwrite + gunzip. The cache is shared
+%            with the siamize CLI binary so a single download serves both.
 %
 %   opts     optional struct with any of:
 %               .device     'auto' (default), 'cpu', 'cuda', 'tensorrt'
@@ -26,25 +39,144 @@
 %               .trt_cache  char (default ~/.cache/siamize/trt)
 %               .verbose    logical (default false)
 %
-%   labels   uint8 3D array with the same [X, Y, Z] shape as `img`. Label
-%            integers 0..(classes-1). See SIAM's dataset.json for the
-%            mapping (0=background, 1=GM, 2=WM, 3=CSF, ... 17=Anomalies).
+%   labels   uint8 3D array with the same [X, Y, Z] shape as `img`.
+%            Label integers 0..17 per SIAM v0.3 (0=background, 1=GM,
+%            2=WM, 3=CSF, ..., 17=Anomalies).
 %
-% Example  (round-trip via jsonlab):
+%   The actual numerical pipeline lives in the companion MEX binary
+%   `siamex.mex*` next to this file; `siamize.m` only resolves model
+%   files and forwards the call.
+%
+% Example (with jsonlab):
 %   nii  = loadnifti('input.nii.gz');
-%   lab  = siamize(nii.NIFTIData, ...
-%                  nii.NIFTIHeader.Affine, ...
-%                  {'models/fold_0_fp16.onnx', ...
-%                   'models/fold_1_fp16.onnx', ...
-%                   'models/fold_2_fp16.onnx', ...
-%                   'models/fold_3_fp16.onnx', ...
-%                   'models/fold_4_fp16.onnx'});
-%   nii_out          = nii;
-%   nii_out.NIFTIData = lab;
-%   savenifti(nii_out, 'output.nii.gz');
+%   lab  = siamize(nii.NIFTIData, nii.NIFTIHeader.Affine);
+%   out  = nii;  out.NIFTIData = lab;
+%   savenifti(out, 'output.nii.gz');
 %
-% See also: loadnifti, savenifti (https://github.com/NeuroJSON/jsonlab)
+% See also: siamex, loadnifti, savenifti (https://github.com/NeuroJSON/jsonlab).
 %
 % siamize project: https://github.com/NeuroJSON/siamize
 % SIAM paper:      https://arxiv.org/abs/2605.02737
-error('siamize is a MEX function; the .mexa64/.mexw64/.mexmaci64 binary must be on the MATLAB path.');
+
+    if nargin < 2
+        error('siamize:nargin', ...
+              'usage: labels = siamize(img, affine [, models, opts])');
+    end
+    if nargin < 3 || isempty(models)
+        models = {'fold_0_fp16.onnx'};
+    end
+    if ischar(models)
+        models = {models};
+    end
+    if ~iscellstr(models)
+        error('siamize:models', 'models must be [] | char | cellstr');
+    end
+    if nargin < 4
+        opts = struct();
+    end
+
+    % Resolve / auto-download each model into the shared cache.
+    resolved = cell(size(models));
+    for k = 1:numel(models)
+        resolved{k} = siamize_resolve_model_(models{k}, opts);
+    end
+
+    % Ensure siamex.mex* is on the path (the .mex* binary sits next to
+    % this .m file when installed normally).
+    here = fileparts(mfilename('fullpath'));
+    if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
+        if ~ismember(here, regexp(path, pathsep, 'split'))
+            addpath(here);
+        end
+    end
+
+    lab = siamex(img, affine, resolved, opts);
+end
+
+
+function p = siamize_resolve_model_(spec, opts)
+%SIAMIZE_RESOLVE_MODEL_ Locate or download an .onnx fold file.
+    if exist(spec, 'file') == 2
+        p = spec;
+        return;
+    end
+
+    cachedir = getenv('SIAMIZE_CACHE_DIR');
+    if isempty(cachedir)
+        if ispc
+            base = getenv('LOCALAPPDATA');
+            if isempty(base)
+                base = getenv('USERPROFILE');
+            end
+            cachedir = fullfile(base, 'siamize', 'models');
+        else
+            cachedir = fullfile(getenv('HOME'), '.cache', 'siamize', 'models');
+        end
+    end
+
+    [~, name, ext] = fileparts(spec);
+    basename = [name, ext];
+    p = fullfile(cachedir, basename);
+    if exist(p, 'file') == 2
+        return;
+    end
+
+    if ~exist(cachedir, 'dir')
+        mkdir(cachedir);
+    end
+
+    urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
+    if isempty(urlbase)
+        urlbase = 'https://neurojson.org/siamize/weights/siam_v03';
+    end
+
+    verbose = false;
+    if isstruct(opts) && isfield(opts, 'verbose') && ~isempty(opts.verbose)
+        verbose = logical(opts.verbose);
+    end
+
+    url_gz = [urlbase, '/', basename, '.gz'];
+    tmp_gz = [p, '.gz'];
+    fetched_gz = false;
+    try
+        if verbose
+            fprintf('siamize: fetching %s\n', url_gz);
+        end
+        urlwrite(url_gz, tmp_gz);
+        % Verify gzip magic bytes (0x1F 0x8B) so we don't pass an HTML
+        % error page through gunzip.
+        fid = fopen(tmp_gz, 'rb');
+        magic = fread(fid, 2, 'uint8');
+        fclose(fid);
+        if numel(magic) ~= 2 || magic(1) ~= 31 || magic(2) ~= 139
+            error('siamize:notgzip', ...
+                  'response from %s is not a gzip file (got %d bytes starting %02x %02x)', ...
+                  url_gz, numel(magic), magic(1), magic(2));
+        end
+        gunzip(tmp_gz, cachedir);
+        fetched_gz = true;
+    catch err
+        if verbose
+            fprintf('siamize: .gz path failed (%s); trying raw .onnx\n', err.message);
+        end
+    end
+    if exist(tmp_gz, 'file')
+        delete(tmp_gz);
+    end
+
+    if fetched_gz && exist(p, 'file') == 2
+        return;
+    end
+
+    % Fall back to the raw uncompressed URL.
+    url_raw = [urlbase, '/', basename];
+    if verbose
+        fprintf('siamize: fetching %s\n', url_raw);
+    end
+    urlwrite(url_raw, p);
+    if exist(p, 'file') ~= 2
+        error('siamize:fetch', ...
+              'could not locate or download %s\n  tried %s\n        %s', ...
+              basename, url_gz, url_raw);
+    end
+end

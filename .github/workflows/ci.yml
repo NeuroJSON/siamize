@@ -162,17 +162,17 @@ jobs:
             os: ubuntu-22.04
             kind: octave
             cmake_flag: -DSIAMIZE_BUILD_OCTAVE_MEX=ON
-            mex_file: build/siamize.mex
+            mex_file: build/siamex.mex
           - label: linux-matlab
             os: ubuntu-22.04
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
-            mex_file: build/siamize.mexa64
+            mex_file: build/siamex.mexa64
           - label: windows-matlab
             os: windows-latest
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
-            mex_file: build/Release/siamize.mexw64
+            mex_file: build/Release/siamex.mexw64
 
     steps:
       - uses: actions/checkout@v4
@@ -206,10 +206,10 @@ jobs:
       - name: Smoke-load MEX (Octave)
         if: matrix.kind == 'octave' && runner.os == 'Linux'
         run: |
-          # Calling with zero args triggers our "Usage:" error -- proves
-          # the .mex loads + reaches mexFunction.
+          # Call siamex (the low-level MEX) with zero args to trigger the
+          # C++ "Usage:" error. Proves the .mex loaded + reached mexFunction.
           octave-cli --no-gui --eval "addpath('build'); \
-            try; siamize(); catch err; \
+            try; siamex(); catch err; \
               if isempty(strfind(err.message, 'Usage:')); error('unexpected: %s', err.message); end; \
               fprintf('MEX loaded and reached argument check\\n'); \
             end" 2>&1 | tee mex.log
@@ -225,8 +225,8 @@ jobs:
             % onnxruntime.dll via the EXE search rule.
             if ispc; cd(fullfile('build', 'Release')); end
             try
-              siamize();
-              error('siamize() with no args should have thrown');
+              siamex();
+              error('siamex() with no args should have thrown');
             catch err
               if isempty(strfind(err.message, 'Usage:'))
                 error('unexpected: %s', err.message);

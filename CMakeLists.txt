@@ -273,6 +273,7 @@ set(_siamize_mex_sources
     src/orient.cpp
     src/preprocess.cpp
     src/sliding.cpp
+    src/weights.cpp
 )
 set(_siamize_mex_includes
     src
@@ -285,10 +286,13 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
 
     if(Matlab_FOUND)
         message(STATUS "MATLAB found at ${Matlab_ROOT_DIR}; building MEX")
+        # The MEX binary is the low-level entry point (`siamex.mex*`);
+        # the user-facing dispatcher is `mex/siamize.m`, which handles the
+        # weight download (urlread + gunzip) and then calls siamex.
         matlab_add_mex(
             NAME siamize_mex
             SRC ${_siamize_mex_sources}
-            OUTPUT_NAME siamize
+            OUTPUT_NAME siamex
         )
         target_include_directories(siamize_mex PRIVATE ${_siamize_mex_includes})
         target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
@@ -340,7 +344,7 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
     find_program(MKOCTFILE NAMES mkoctfile)
     if(MKOCTFILE)
         message(STATUS "Octave mkoctfile found: ${MKOCTFILE}")
-        set(_oct_out ${CMAKE_BINARY_DIR}/siamize.mex)
+        set(_oct_out ${CMAKE_BINARY_DIR}/siamex.mex)
         set(_oct_sources "")
         foreach(s IN LISTS _siamize_mex_sources)
             list(APPEND _oct_sources ${CMAKE_SOURCE_DIR}/${s})
