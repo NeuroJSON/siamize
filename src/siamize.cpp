@@ -83,6 +83,16 @@ void usage(const char* exe) {
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
                  "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
                  "                         Engines are GPU- and TRT-version-specific; cached on first run.\n"
+                 "      --cudnn-max-workspace 0|1  CUDA EP: 0 picks small-workspace cuDNN algos.\n"
+                 "                         Use 0 on tight-VRAM GPUs (e.g. 8 GB laptop cards) that\n"
+                 "                         OOM at the default workspace ceiling. Default 1 (ORT default).\n"
+                 "      --arena-extend power|same  CUDA EP arena_extend_strategy. `same` is\n"
+                 "                         kSameAsRequested (grows the BFC arena by exactly what's\n"
+                 "                         needed, less wasteful); default is kNextPowerOfTwo.\n"
+                 "      --cudnn-algo default|heuristic|exhaustive  cuDNN algorithm search mode.\n"
+                 "                         `heuristic` is the smallest-workspace option.\n"
+                 "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
+                 "                         e.g. 6G). Default 0 = no explicit cap.\n"
                  "      --threads N     ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs)\n"
                  "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans)\n"
                  "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training)\n"
@@ -103,6 +113,7 @@ int main(int argc, char** argv) {
     std::array<int64_t, 3> patch = {256, 256, 192};
     float target_spacing = 0.75f;
     int64_t num_classes = 18;
+    siam::CudaTuning cuda_tuning;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -149,6 +160,56 @@ int main(int argc, char** argv) {
             char x;
             std::stringstream ss(p);
             ss >> patch[0] >> x >> patch[1] >> x >> patch[2];
+        } else if (a == "--cudnn-max-workspace") {
+            cuda_tuning.cudnn_max_workspace = std::stoi(need());
+        } else if (a == "--arena-extend") {
+            std::string s = need();
+
+            if      (s == "same"  || s == "kSameAsRequested") {
+                cuda_tuning.arena_same_as_req = 1;
+            } else if (s == "power" || s == "kNextPowerOfTwo") {
+                cuda_tuning.arena_same_as_req = 0;
+            } else                                            {
+                std::fprintf(stderr,
+                             "--arena-extend must be power|same (got '%s')\n",
+                             s.c_str());
+                return 2;
+            }
+        } else if (a == "--cudnn-algo") {
+            std::string s = need();
+
+            // Accept lowercase shortcuts; canonicalize to ORT's string form.
+            if      (s == "default"    || s == "DEFAULT")    {
+                cuda_tuning.algo_search = "DEFAULT";
+            } else if (s == "heuristic"  || s == "HEURISTIC")  {
+                cuda_tuning.algo_search = "HEURISTIC";
+            } else if (s == "exhaustive" || s == "EXHAUSTIVE") {
+                cuda_tuning.algo_search = "EXHAUSTIVE";
+            } else {
+                std::fprintf(stderr,
+                             "--cudnn-algo must be default|heuristic|exhaustive (got '%s')\n",
+                             s.c_str());
+                return 2;
+            }
+        } else if (a == "--gpu-mem-limit") {
+            // Accept either a raw byte count or a suffix (K/M/G).
+            std::string s = need();
+            size_t mult = 1;
+            char back = s.empty() ? '\0' : s.back();
+
+            if (back == 'K' || back == 'k') {
+                mult = 1024ull;
+                s.pop_back();
+            } else if (back == 'M' || back == 'm') {
+                mult = 1024ull * 1024;
+                s.pop_back();
+            } else if (back == 'G' || back == 'g') {
+                mult = 1024ull * 1024 * 1024;
+                s.pop_back();
+            }
+
+            cuda_tuning.gpu_mem_limit_bytes =
+                static_cast<size_t>(std::stoull(s)) * mult;
         } else if (a == "-v" || a == "--verbose") {
             verbose = true;
         } else if (a == "-h" || a == "--help")   {
@@ -267,7 +328,7 @@ int main(int argc, char** argv) {
     try {
         logits = siam::sliding_window(
                      resampled, model_paths, patch, num_classes,
-                     threads, 0.5f, verbose, device, trt_cache_dir);
+                     threads, 0.5f, verbose, device, trt_cache_dir, cuda_tuning);
     } catch (const Ort::Exception& e) {
         std::string msg = e.what();
         bool oom = msg.find("allocate") != std::string::npos
@@ -279,12 +340,13 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "  GPU allocation failed: %s\n"
                          "  --device auto falling back to CPU. To force CPU from the\n"
-                         "  start, pass `--device cpu`; to debug the GPU side, pass\n"
-                         "  `--device cuda` and free VRAM (close other GPU clients).\n",
+                         "  start, pass `--device cpu`; for tight-VRAM GPUs try also\n"
+                         "  `--cudnn-max-workspace 0 --arena-extend same` before\n"
+                         "  giving up on GPU.\n",
                          e.what());
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
-                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir);
+                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, cuda_tuning);
         } else {
             throw;
         }

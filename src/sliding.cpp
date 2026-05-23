@@ -149,7 +149,8 @@ LogitsVolume sliding_window(const Volume& data,
                             float step_ratio,
                             bool verbose,
                             const std::string& device,
-                            const std::string& trt_cache_dir) {
+                            const std::string& trt_cache_dir,
+                            const CudaTuning& cuda_tuning) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
@@ -339,6 +340,57 @@ LogitsVolume sliding_window(const Volume& data,
             try {
                 OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
                 Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
+
+                // Apply CUDA EP tuning overrides. These keys all default
+                // to ORT's standard values; we only override the ones the
+                // caller asked for. Empty/zero fields are skipped so the
+                // common case (no flags) stays bit-identical to before.
+                std::vector<std::string> kbuf, vbuf;
+                auto add = [&](const char* k, const std::string & v) {
+                    kbuf.emplace_back(k);
+                    vbuf.emplace_back(v);
+                };
+
+                if (cuda_tuning.cudnn_max_workspace == 0) {
+                    add("cudnn_conv_use_max_workspace", "0");
+                }
+
+                if (cuda_tuning.arena_same_as_req == 1) {
+                    add("arena_extend_strategy", "kSameAsRequested");
+                }
+
+                if (!cuda_tuning.algo_search.empty()) {
+                    add("cudnn_conv_algo_search", cuda_tuning.algo_search);
+                }
+
+                if (cuda_tuning.gpu_mem_limit_bytes > 0) {
+                    add("gpu_mem_limit", std::to_string(cuda_tuning.gpu_mem_limit_bytes));
+                }
+
+                if (!kbuf.empty()) {
+                    std::vector<const char*> kp, vp;
+
+                    for (auto& s : kbuf) {
+                        kp.push_back(s.c_str());
+                    }
+
+                    for (auto& s : vbuf) {
+                        vp.push_back(s.c_str());
+                    }
+
+                    Ort::ThrowOnError(Ort::GetApi().UpdateCUDAProviderOptions(
+                                          cuda_opts, kp.data(), vp.data(), kp.size()));
+
+                    if (verbose) {
+                        std::fprintf(stderr, "  CUDA EP tuning:\n");
+
+                        for (size_t i = 0; i < kbuf.size(); ++i) {
+                            std::fprintf(stderr, "    %s = %s\n",
+                                         kbuf[i].c_str(), vbuf[i].c_str());
+                        }
+                    }
+                }
+
                 opts.AppendExecutionProvider_CUDA_V2(*cuda_opts);
                 Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts);
 
