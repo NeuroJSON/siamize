@@ -47,13 +47,27 @@ a 3D op. Bump `--opset` or check `pip show onnx onnxruntime`.
 
 The exported ONNX has **dynamic batch + spatial axes** (`x` and `logits`
 are both `[batch, channel, D, H, W]` with `batch`/`D`/`H`/`W` symbolic).
-Concrete shape requirements:
+Concrete shape requirements come from the SIAM v0.3 plans.json stride
+pattern `[[1,1,1], [2,2,2]×5, [2,2,1]]`:
 
 - Channel dim is fixed at 1 (single-modality T1w in SIAM v0.3).
-- Spatial dims must each be a multiple of 32 (the network's total
-  downsampling factor — five stride-2 stages). Common useful sizes:
-    - `256x256x192` — training plan, default in `siamize`.
-    - `192x192x128` — fits in 6 GB free VRAM (8 GB consumer laptop GPU).
-    - `128x128x96`  — fits in ~2 GB.
-- Smaller spatial dims trade tile count for per-tile memory: siamize's
-  sliding-window covers the volume regardless.
+- **Z and Y** must each be a multiple of **64** (six stride-2 stages).
+- **X** must be a multiple of **32** (the final stage's X-stride is 1).
+- Mixing different multiples across axes works — only the per-axis
+  divisor matters.
+
+Common useful sizes (`Z x Y x X` — these are the ones siamize accepts):
+
+| `--patch` | Notes |
+|---|---|
+| `256x256x192` | Training plan; identical to the original SIAM. Default. |
+| `192x192x192` | -23% VRAM, virtually no accuracy cost. |
+| `192x192x160` | -32% VRAM. |
+| `192x192x128` | -44% VRAM. Fits ~7 GB free on a laptop 4070. |
+| `128x128x128` | -75% VRAM. Tight-fit configurations. |
+| `128x128x96`  | -78% VRAM. The smallest validated in our parity test. |
+
+Sizes that look reasonable but **don't** work because they break the
+divisibility constraint and the network's residual Adds disagree on
+spatial dims by 1: `224x224x160` (Z/Y not /64), `160x160x128`
+(Z/Y not /64), anything with Z or Y in {64+32, 192+32, 224, ...}.
