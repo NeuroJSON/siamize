@@ -74,8 +74,9 @@ scripts\fetch_deps.ps1
 
 The fp16 ONNX fold weights are **not** fetched up-front: `siamize` and
 its MATLAB/Octave wrapper auto-download any missing fold from
-`https://neurojson.org/siamize/weights/siam_v03/` (overridable via
-`SIAMIZE_WEIGHTS_BASE_URL`) into a shared cache (`$SIAMIZE_CACHE_DIR`,
+NeuroJSON (URL prefix
+`https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=`,
+overridable via `SIAMIZE_WEIGHTS_BASE_URL`) into a shared cache (`$SIAMIZE_CACHE_DIR`,
 default `$HOME/.cache/siamize/models/` on POSIX or
 `%LOCALAPPDATA%/siamize/models/` on Windows). One download serves both
 the CLI binary and the MEX. If you want all five folds pre-staged

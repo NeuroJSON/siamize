@@ -88,14 +88,15 @@ jobs:
     # fail to dlopen the CUDA runtime libraries, and silently fall back to
     # the CPU EP. This validates the build path AND the runtime fallback.
     #
-    # The fp16 ONNX weight file (~270 MB raw, ~87 MB 7z-compressed) is too
+    # The fp16 ONNX weight file (~270 MB raw, ~91 MB gzipped) is too
     # big for git, so CI grabs it from a public URL configured in the
     # repository's GitHub Actions variables: Settings -> Secrets and
     # variables -> Actions -> Variables -> SIAMIZE_WEIGHTS_URL is the
-    # FULL URL of the fold_0 weight. The URL may end in .gz (preferred,
-    # we decompress with gunzip), .onnx (used raw), or .7z (legacy --
-    # the script extracts with 7z if available). The job is skipped if
-    # the variable is not configured.
+    # FULL URL of the fold_0 weight (e.g.
+    #   https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz
+    # ). The URL may end in .gz (preferred, decompressed with gunzip),
+    # .onnx (used raw), or .7z (legacy -- extracted with 7z if
+    # available). The job is skipped if the variable is not configured.
     name: build+run cuda (${{ matrix.os }})
     if: vars.SIAMIZE_WEIGHTS_URL != ''
     runs-on: ${{ matrix.os }}

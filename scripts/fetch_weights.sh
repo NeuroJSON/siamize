@@ -11,36 +11,20 @@
 # $HOME/siam_params/v0.3/pred_DS108_LcsfP_Ano (the default `siam-pred` cache).
 set -euo pipefail
 
-# SIAMIZE_RELEASE_BASE: base URL hosting the fp16 ONNX folds.
-#   Each fold is expected at  <base>/fold_<N>_fp16.onnx
+# SIAMIZE_RELEASE_BASE: URL prefix hosting the fp16 ONNX folds. The
+# script appends `fold_<N>_fp16.onnx[.gz]` directly to the prefix
+# without a `/` separator, so the prefix is expected to end with the
+# parameter that takes the filename (e.g. NeuroJSON's `...&file=`).
+# Defaults to the NeuroJSON URL hosting the dynamic-shape SIAM v0.3
+# folds; override to point at a self-hosted mirror.
 # SIAMIZE_FOLDS: comma-separated list of folds to fetch (default 0,1,2,3,4).
 #   Set SIAMIZE_FOLDS=0 to grab just fold 0 (CI smoke tests).
-RELEASE_BASE="${SIAMIZE_RELEASE_BASE:-}"
+RELEASE_BASE="${SIAMIZE_RELEASE_BASE:-https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=}"
 FOLDS="${SIAMIZE_FOLDS:-0,1,2,3,4}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS="$HERE/models"
 mkdir -p "$MODELS"
-
-if [[ -z "$RELEASE_BASE" ]]; then
-    cat <<EOF
-[fetch_weights] No release URL configured yet.
-
-To re-export the .onnx files locally from the upstream SIAM weights, run:
-
-    bash tools/onnx_export/export_all_folds.sh
-
-That requires PyTorch + dynamic_network_architectures + the SIAM model dir
-(\$HOME/siam_params/v0.3/pred_DS108_LcsfP_Ano by default).
-
-Once a release is published, re-run this script with:
-
-    SIAMIZE_RELEASE_BASE=https://github.com/.../releases/download/v0.X.Y \\
-        bash scripts/fetch_weights.sh
-
-EOF
-    exit 1
-fi
 
 # Try compressed (.onnx.gz) first since it's ~3x smaller; fall back to raw.
 # gzip is universally available on Linux/macOS/Windows (Git Bash); no extra
@@ -53,8 +37,8 @@ for f in "${FOLD_LIST[@]}"; do
         continue
     fi
 
-    url_gz="${RELEASE_BASE}/fold_${f}_fp16.onnx.gz"
-    url_raw="${RELEASE_BASE}/fold_${f}_fp16.onnx"
+    url_gz="${RELEASE_BASE}fold_${f}_fp16.onnx.gz"
+    url_raw="${RELEASE_BASE}fold_${f}_fp16.onnx"
 
     if curl -fsI -o /dev/null "$url_gz" 2>/dev/null; then
         echo "[fetch_weights] downloading $url_gz (gzip)"

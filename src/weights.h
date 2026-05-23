@@ -17,11 +17,16 @@ namespace siam {
 // Created on demand by the resolver below; the function itself is pure.
 std::string default_cache_dir();
 
-// Base URL that auto-fetched weight files live under. Individual fold
-// files are expected at  <base>/<basename>.7z  (7z-compressed) or
-// <base>/<basename>  (raw fallback).
-//   Default  : https://neurojson.org/siamize/weights/siam_v03
+// URL prefix that auto-fetched weight files live under. The prefix is
+// expected to end with the NeuroJSON query parameter that takes the
+// filename (e.g. `...&file=`); the resolver appends `<basename>.gz`
+// (preferred) or `<basename>` (raw fallback) directly, with no `/`
+// separator.
+//   Default  : https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=
 //   Override : env SIAMIZE_WEIGHTS_BASE_URL
+// The `size=` query parameter on the default URL is informational only;
+// the NeuroJSON server does not validate it against the actual file
+// size, so the same constant is used for every fold.
 std::string default_weights_url();
 
 // Resolve a model spec to an existing local file path:

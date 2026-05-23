@@ -229,8 +229,8 @@ int main(int argc, char** argv) {
 
     // Default to single-fold fold_0 when --models isn't given. resolve_model_path
     // below will look in $HOME/.cache/siamize/models/ and, on a miss, curl the
-    // weight from https://neurojson.org/siamize/weights/siam_v03/ (overridable
-    // via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
+    // weight from the NeuroJSON URL (see weights.h for the default,
+    // overridable via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
     if (models_csv.empty()) {
         models_csv = "fold_0_fp16.onnx";
 

@@ -72,8 +72,9 @@ function lab = siamize(varargin)
 %            cache $SIAMIZE_CACHE_DIR (default $HOME/.cache/siamize/
 %            models on POSIX, %LOCALAPPDATA%/siamize/models on Windows)
 %            and auto-downloaded from $SIAMIZE_WEIGHTS_BASE_URL (default
-%            https://neurojson.org/siamize/weights/siam_v03) via
-%            MATLAB/Octave's urlwrite + gunzip.
+%            https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=)
+%            via MATLAB/Octave's urlwrite + gunzip. The URL prefix is
+%            concatenated with `<basename>.gz` directly (no `/` between).
 %
 %   opts     optional struct with any of:
 %               .device     'auto' (default), 'cpu', 'cuda', 'tensorrt'
@@ -380,9 +381,14 @@ if ~exist(cachedir, 'dir')
     mkdir(cachedir);
 end
 
+% NeuroJSON URL prefix; the filename is appended directly (no `/`
+% separator) since the prefix ends with `&file=`. The size= query
+% parameter is informational and not validated by the server, so a
+% single constant covers every fold.
 urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
 if isempty(urlbase)
-    urlbase = 'https://neurojson.org/siamize/weights/siam_v03';
+    urlbase = ['https://neurojson.org/io/stat.cgi?action=get&db=siam_v03', ...
+               '&doc=dynshape&size=95360591&file='];
 end
 
 verbose = false;
@@ -390,7 +396,7 @@ if isstruct(opts) && isfield(opts, 'verbose') && ~isempty(opts.verbose)
     verbose = logical(opts.verbose);
 end
 
-url_gz = [urlbase, '/', basename, '.gz'];
+url_gz = [urlbase, basename, '.gz'];
 tmp_gz = [p, '.gz'];
 fetched_gz = false;
 try
@@ -424,7 +430,7 @@ if fetched_gz && exist(p, 'file') == 2
 end
 
 % Fall back to the raw uncompressed URL.
-url_raw = [urlbase, '/', basename];
+url_raw = [urlbase, basename];
 if verbose
     fprintf('siamize: fetching %s\n', url_raw);
 end

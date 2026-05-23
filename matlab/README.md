@@ -101,9 +101,9 @@ lab = siamize(nii);
 lab = siamize(my_volume);
 ```
 
-The wrapper auto-downloads each missing fold from
-`https://neurojson.org/siamize/weights/siam_v03/` (overridable, see
-[Weight cache](#weight-cache)).
+The wrapper auto-downloads each missing fold from the NeuroJSON URL
+listed under [Weight cache](#weight-cache) (overridable via
+`SIAMIZE_WEIGHTS_BASE_URL`).
 
 ## Calling forms
 
@@ -184,12 +184,22 @@ both. The wrapper looks up each missing fold in this order:
 2. **Default cache path** if the env var is unset:
    - POSIX: `$HOME/.cache/siamize/models/`
    - Windows: `%LOCALAPPDATA%/siamize/models/`
-3. **`$SIAMIZE_WEIGHTS_BASE_URL/<basename>.gz`** via MATLAB/Octave's
-   `urlwrite`, with a gzip-magic-bytes sanity check before `gunzip`.
-4. **`$SIAMIZE_WEIGHTS_BASE_URL/<basename>`** (raw .onnx) as a fallback if
-   the .gz form 404s.
+3. **`$SIAMIZE_WEIGHTS_BASE_URL` + `<basename>.gz`** (the basename is
+   appended directly with no `/` separator since the prefix is expected
+   to end with the parameter that takes the filename, e.g. NeuroJSON's
+   `&file=`). Fetched via MATLAB/Octave's `urlwrite`, with a
+   gzip-magic-bytes sanity check before `gunzip`.
+4. **`$SIAMIZE_WEIGHTS_BASE_URL` + `<basename>`** (raw .onnx) as a
+   fallback if the .gz form 404s.
 
-Default URL base: `https://neurojson.org/siamize/weights/siam_v03/`.
+Default URL prefix:
+
+```
+https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=
+```
+
+(`size=` is informational and not validated by the server, so the same
+constant is reused for every fold.)
 
 ## Layout
 

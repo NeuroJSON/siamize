@@ -145,7 +145,8 @@ std::string default_weights_url() {
         return env;
     }
 
-    return "https://neurojson.org/siamize/weights/siam_v03";
+    return "https://neurojson.org/io/stat.cgi?action=get&db=siam_v03"
+           "&doc=dynshape&size=95360591&file=";
 }
 
 std::string resolve_model_path(const std::string& spec, bool verbose) {
@@ -182,7 +183,9 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
     std::string url_base = default_weights_url();
     std::string verbose_curl = verbose ? "-#" : "-s";
 
-    std::string url_gz = url_base + "/" + base.string() + ".gz";
+    // url_base is expected to end with the parameter that takes the
+    // filename (e.g. `...&file=`); concatenate the basename directly.
+    std::string url_gz = url_base + base.string() + ".gz";
     std::string archive_gz = (cache / (base.string() + ".gz")).string();
 
     if (verbose) {
@@ -218,7 +221,7 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
     }
 
     // Try raw uncompressed URL as a last resort.
-    std::string url_raw = url_base + "/" + base.string();
+    std::string url_raw = url_base + base.string();
 
     if (verbose) {
         std::fprintf(stderr, "  fetching %s -> %s\n", url_raw.c_str(), cached.string().c_str());
