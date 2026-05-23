@@ -33,10 +33,27 @@ python tools/onnx_export/compare.py \
 ## Parity check
 
 `export.py` (without `--no-verify`) runs a single PyTorch forward and a
-single ORT forward on (a) random noise and (b) a centered brain patch from
-`tests/sub-01_T1w.nii.gz`, then reports max/mean abs-diff and argmax
-agreement. Real-brain argmax agreement should be > 99% for fp32 and > 98.5%
-for fp16.
+single ORT forward on (a) random noise at the default patch size,
+(b) a centered brain patch from `tests/sub-01_T1w.nii.gz`, and (c) a
+half-size random patch (to exercise the dynamic spatial axes baked
+into the export), then reports max/mean abs-diff and argmax agreement
+per case. Real-brain argmax agreement should be > 99% for fp32 and >
+98.5% for fp16.
 
 If argmax agreement is low: the most likely cause is an opset mismatch on
 a 3D op. Bump `--opset` or check `pip show onnx onnxruntime`.
+
+## Input shape contract
+
+The exported ONNX has **dynamic batch + spatial axes** (`x` and `logits`
+are both `[batch, channel, D, H, W]` with `batch`/`D`/`H`/`W` symbolic).
+Concrete shape requirements:
+
+- Channel dim is fixed at 1 (single-modality T1w in SIAM v0.3).
+- Spatial dims must each be a multiple of 32 (the network's total
+  downsampling factor — five stride-2 stages). Common useful sizes:
+    - `256x256x192` — training plan, default in `siamize`.
+    - `192x192x128` — fits in 6 GB free VRAM (8 GB consumer laptop GPU).
+    - `128x128x96`  — fits in ~2 GB.
+- Smaller spatial dims trade tile count for per-tile memory: siamize's
+  sliding-window covers the volume regardless.

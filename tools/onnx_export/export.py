@@ -6,8 +6,16 @@ Usage:
 
 Validation flow:
 1. Build the PyTorch network (deep_supervision=False) with the chosen fold's weights.
-2. Trace via torch.onnx.export on a fixed-shape patch (1, 1, 256, 256, 192).
-3. Optionally cast to fp16 via onnxconverter-common.
+2. Trace via torch.onnx.export on a (1, 1, 256, 256, 192) dummy input, but
+   with `dynamic_axes` marking batch and spatial dims (D, H, W) as
+   symbolic. The exported model accepts any input shape the network's
+   stride pattern can chew (in practice anything divisible by the
+   network's total downsampling factor -- 32 for SIAM v0.3 -- in each
+   spatial axis). Letting D/H/W vary at inference time matters for
+   tight-VRAM GPUs: an 8 GB laptop can't always fit the default
+   256x256x192 patch, but it can fit 192x192x128.
+3. Optionally cast to fp16 via onnxconverter-common (preserves the
+   dynamic-axis tensor shapes; the cast only touches dtype).
 4. Compare PyTorch output vs onnxruntime output on a random patch.
 """
 
@@ -51,6 +59,14 @@ def export_fp32(model_dir: str, fold: int, out_path: str, opset: int = 17) -> tu
             output_names=["logits"],
             opset_version=opset,
             do_constant_folding=True,
+            # Mark batch and spatial axes as symbolic so callers can vary
+            # the patch shape at inference time. Channel (axis 1) stays
+            # fixed at 1 because the SIAM v0.3 model is single-modality.
+            # Output channel (num_classes) is also fixed.
+            dynamic_axes={
+                "x": {0: "batch", 2: "D", 3: "H", 4: "W"},
+                "logits": {0: "batch", 2: "D", 3: "H", 4: "W"},
+            },
         )
     print(
         f"  ONNX written in {time.time() - t0:.1f}s, size {os.path.getsize(out_path) / 1e6:.1f} MB"
@@ -146,6 +162,20 @@ def verify_parity(
     real = _make_real_brain_patch(patch_size, in_ch)
     if real is not None:
         cases.append(("real brain patch", real))
+
+    # Smoke-test the dynamic spatial axes by also running on a smaller
+    # patch. SIAM v0.3's total downsampling factor is 32 (5 stride-2
+    # stages), so any dim divisible by 32 works. Cap at 128 to keep the
+    # parity check fast.
+    small_patch = tuple(max(64, (p // 32) * 32 // 2) for p in patch_size)
+
+    if all(s != p for s, p in zip(small_patch, patch_size)):
+        cases.append(
+            (
+                f"dynamic shape {small_patch}",
+                _make_random_patch(small_patch, in_ch, seed=1),
+            )
+        )
 
     # NOTE: run PyTorch BEFORE ORT in each pair. With fp16 ORT sessions held
     # in memory, a subsequent PyTorch fwd on the same big patch can stall for
