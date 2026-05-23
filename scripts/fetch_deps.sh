@@ -105,6 +105,4 @@ else
     echo "[fetch_deps] ORT installed at $TP/onnxruntime"
 fi
 
-echo "[fetch_deps] done."
-echo "  ORT:    $TP/onnxruntime"
-echo "  zmat:   src/zmat/zmat.h (bundled, dual-licensed Apache-2.0)"
+echo "[fetch_deps] done. ORT at $TP/onnxruntime"

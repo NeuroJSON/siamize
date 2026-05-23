@@ -33,6 +33,4 @@ if (Test-Path $OrtDir) {
     Write-Host "[fetch_deps] ORT installed at $OrtDir"
 }
 
-Write-Host "[fetch_deps] done."
-Write-Host "  ORT:  $OrtDir"
-Write-Host "  zmat: src\zmat\zmat.h (bundled, dual-licensed Apache-2.0)"
+Write-Host "[fetch_deps] done. ORT at $OrtDir"
