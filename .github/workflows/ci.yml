@@ -72,10 +72,11 @@ jobs:
     # The fp16 ONNX weight file (~270 MB raw, ~87 MB 7z-compressed) is too
     # big for git, so CI grabs it from a public URL configured in the
     # repository's GitHub Actions variables: Settings -> Secrets and
-    # variables -> Actions -> Variables -> SIAMIZE_WEIGHTS_URL must point
-    # at the FULL URL of the compressed fold_0 archive, e.g.
-    #   https://neurojson.org/siamize/weights/siam_v03/fold_0_fp16.onnx.7z
-    # The job is skipped if the variable is not configured.
+    # variables -> Actions -> Variables -> SIAMIZE_WEIGHTS_URL is the
+    # FULL URL of the fold_0 weight. The URL may end in .gz (preferred,
+    # we decompress with gunzip), .onnx (used raw), or .7z (legacy --
+    # the script extracts with 7z if available). The job is skipped if
+    # the variable is not configured.
     name: build+run cuda (${{ matrix.os }})
     if: vars.SIAMIZE_WEIGHTS_URL != ''
     runs-on: ${{ matrix.os }}
@@ -109,8 +110,32 @@ jobs:
         run: |
           mkdir -p models
           echo "Downloading $URL"
-          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
-          gunzip -f models/fold_0_fp16.onnx.gz
+          # Dispatch by the actual URL extension so the repo variable can
+          # point at .gz (preferred), .onnx (uncompressed), or .7z (legacy)
+          # without us guessing.
+          case "$URL" in
+            *.gz)
+              curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
+              gunzip -f models/fold_0_fp16.onnx.gz
+              ;;
+            *.7z)
+              if ! command -v 7z >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y --no-install-recommends p7zip-full
+              fi
+              curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
+              7z e -y -omodels models/fold_0_fp16.onnx.7z >/dev/null
+              rm -f models/fold_0_fp16.onnx.7z
+              ;;
+            *.onnx)
+              curl -fsSL "$URL" -o models/fold_0_fp16.onnx
+              ;;
+            *)
+              echo "unsupported extension for SIAMIZE_WEIGHTS_URL: $URL"
+              echo "expected one of: .gz, .onnx, .7z"
+              exit 1
+              ;;
+          esac
           ls -la models/
 
       - name: Configure (CUDA EP)
