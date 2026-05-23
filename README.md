@@ -134,11 +134,22 @@ export LD_LIBRARY_PATH="$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/cudnn/lib:$NV/cu
 build/siamize -i ... --device cuda ...
 ```
 
-With a system CUDA install (`/usr/local/cuda`), the standard
-`LD_LIBRARY_PATH=/usr/local/cuda/lib64` is enough. ORT 1.26 requires
-**cuDNN 9** with a kernel image for your GPU's compute capability — older
-GPUs (e.g., Volta sm_70) may need a cuDNN build that explicitly includes
-those kernels.
+With a system CUDA install, point at it via the standard `CUDA_HOME` env
+var (set by the NVIDIA installer on most distros, otherwise default
+`/usr/local/cuda`):
+
+```bash
+export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+build/siamize -i ... --device cuda ...
+```
+
+ORT 1.26 requires **cuDNN 9** with a kernel image for your GPU's compute
+capability — older GPUs (e.g., Volta sm_70) may need a cuDNN build that
+explicitly includes those kernels. If cuDNN was installed separately (the
+typical NVIDIA flow), make sure its `lib64/` is on `LD_LIBRARY_PATH` too;
+the official installer drops it next to `$CUDA_HOME/lib64/` so the line
+above usually covers it.
 
 ##### What the prebuilt CUDA bundle ships vs. what you must supply
 
@@ -162,10 +173,26 @@ and cuDNN's license forbids third-party redistribution.
 ##### Windows: pointing siamize.exe at the CUDA runtime DLLs
 
 On Windows the loader uses `PATH` (not `LD_LIBRARY_PATH`) to find DLLs.
-If the CUDA Toolkit installer set things up, its `bin` directory is
-already on `PATH` and you can just unzip `siamize-windows-x64-cuda.zip`
-and run. For a lighter-weight install via pip wheels (mirror of the
-Linux recipe above):
+The CUDA Toolkit installer sets the `CUDA_PATH` env var (e.g.
+`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x`) and usually
+prepends `%CUDA_PATH%\bin` to `PATH` itself. If `siamize.exe` reports
+"cannot find cudart64_12.dll" after unzipping the bundle, force-add it:
+
+```powershell
+# PowerShell
+$env:PATH = "$env:CUDA_PATH\bin;" + $env:PATH
+
+# cmd.exe equivalent:
+# set PATH=%CUDA_PATH%\bin;%PATH%
+
+.\siamize.exe -i input.nii.gz -o pred.nii.gz --models 0 --device cuda
+```
+
+cuDNN's Windows installer copies its DLLs into `%CUDA_PATH%\bin` (the
+default checkbox in the cuDNN MSI), so the same one-liner usually
+covers cuDNN too.
+
+For a lighter-weight install via pip wheels (no CUDA Toolkit needed):
 
 ```powershell
 pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 `
