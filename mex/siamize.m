@@ -16,11 +16,17 @@ function lab = siamize(img, affine, models, opts)
 %               img = nii.NIFTIData;
 %               affine = nii.NIFTIHeader.Affine;
 %
-%   models   [] | char | cellstr -- one .onnx fold per entry; logits are
-%            averaged across the list. Defaults to {'fold_0_fp16.onnx'}
-%            (single fold) when omitted or empty. Each entry can be
-%            either an existing path or a bare basename; missing files
-%            are looked up in the shared siamize cache
+%   models   [] | numeric | char | cellstr -- one .onnx fold per entry;
+%            logits are averaged across the list. Defaults to
+%            {'fold_0_fp16.onnx'} (single fold) when omitted or empty.
+%            Each entry can be a full path, a bare basename, or a
+%            single-digit shortcut (numeric 0..9 or char '0'..'9')
+%            which expands to 'fold_<N>_fp16.onnx'. Examples:
+%                siamize(img, A, 0)          % single-fold fold_0
+%                siamize(img, A, 0:4)        % full 5-fold ensemble
+%                siamize(img, A, '0,2,4')    % comma string shortcut
+%                siamize(img, A, {'0','2'})  % cellstr shortcut
+%            Bare basenames / shortcuts are looked up in the shared cache
 %                $SIAMIZE_CACHE_DIR
 %                  (default $HOME/.cache/siamize/models on POSIX,
 %                   %LOCALAPPDATA%/siamize/models on Windows)
@@ -64,12 +70,39 @@ function lab = siamize(img, affine, models, opts)
     end
     if nargin < 3 || isempty(models)
         models = {'fold_0_fp16.onnx'};
-    end
-    if ischar(models)
-        models = {models};
+    elseif isnumeric(models)
+        % siamize(img, A, 0) or siamize(img, A, [0 1 2 3 4])
+        nums = models(:);
+        models = cell(numel(nums), 1);
+        for k = 1:numel(nums)
+            n = double(nums(k));
+            if n < 0 || n > 9 || n ~= round(n)
+                error('siamize:models', ...
+                      'numeric model index must be an integer 0..9, got %g', n);
+            end
+            models{k} = sprintf('fold_%d_fp16.onnx', n);
+        end
+    elseif ischar(models)
+        % '0', '0,1,2,3,4', or a literal path; split on comma either way.
+        parts = strsplit(strtrim(models), ',');
+        models = cell(numel(parts), 1);
+        for k = 1:numel(parts)
+            models{k} = siamize_expand_fold_(strtrim(parts{k}));
+        end
+    elseif iscell(models)
+        for k = 1:numel(models)
+            if ~ischar(models{k})
+                error('siamize:models', ...
+                      'cell entry %d must be a char string', k);
+            end
+            models{k} = siamize_expand_fold_(strtrim(models{k}));
+        end
+    else
+        error('siamize:models', ...
+              'models must be [] | numeric | char | cellstr');
     end
     if ~iscellstr(models)
-        error('siamize:models', 'models must be [] | char | cellstr');
+        error('siamize:models', 'models must resolve to a cellstr');
     end
     if nargin < 4
         opts = struct();
@@ -91,6 +124,14 @@ function lab = siamize(img, affine, models, opts)
     end
 
     lab = siamex(img, affine, resolved, opts);
+end
+
+
+function s = siamize_expand_fold_(s)
+%SIAMIZE_EXPAND_FOLD_ '0'..'9' -> 'fold_<N>_fp16.onnx'; pass through otherwise.
+    if numel(s) == 1 && s >= '0' && s <= '9'
+        s = sprintf('fold_%s_fp16.onnx', s);
+    end
 end
 
 

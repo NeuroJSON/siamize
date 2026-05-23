@@ -53,6 +53,15 @@ std::vector<std::string> split_csv(const std::string& s) {
     return out;
 }
 
+// "0".."9" expands to "fold_<d>_fp16.onnx"; anything else passes through.
+std::string expand_fold_shortcut(const std::string& tok) {
+    if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= '9') {
+        return "fold_" + tok + "_fp16.onnx";
+    }
+
+    return tok;
+}
+
 void usage(const char* exe) {
     std::fprintf(stderr,
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz --models fold_0.onnx[,fold_1.onnx,...]\n"
@@ -62,9 +71,11 @@ void usage(const char* exe) {
                  "  -o, --output        output label NIfTI (.nii.gz)\n"
                  "      --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
-                 "                      a full path or a basename that is looked up under\n"
-                 "                      $SIAMIZE_CACHE_DIR (default $HOME/.cache/siamize/models/) and\n"
-                 "                      auto-downloaded from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
+                 "                      a full path, a basename, or a single digit shortcut (e.g.\n"
+                 "                      --models 0,1,2,3,4 expands to fold_<N>_fp16.onnx). Bare\n"
+                 "                      basenames are looked up under $SIAMIZE_CACHE_DIR\n"
+                 "                      (default $HOME/.cache/siamize/models/) and auto-downloaded\n"
+                 "                      from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
                  "      --device D      execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA (if compiled in) then falls back to CPU.\n"
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
@@ -171,6 +182,8 @@ int main(int argc, char** argv) {
 
     // Resolve every model spec: existing path, cache lookup, or auto-fetch.
     for (auto& m : model_paths) {
+        m = expand_fold_shortcut(m);
+
         try {
             m = siam::resolve_model_path(m, verbose);
         } catch (const std::exception& e) {
