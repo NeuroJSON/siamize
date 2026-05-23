@@ -1,8 +1,7 @@
 cff-version: 1.2.0
 message: >-
-  Please cite the SIAM paper (preferred-citation, immediately below).
-  A secondary software citation for siamize is provided after that for
-  tools that require one — it is optional.
+  Please cite the SIAM paper and the software citation if this work is
+  used in your publications.
 
 # ---- PRIMARY CITATION ------------------------------------------------------
 # This is what GitHub's "Cite this repository" button surfaces, and what
