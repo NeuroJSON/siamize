@@ -42,18 +42,9 @@ EOF
     exit 1
 fi
 
-# Try compressed (.onnx.7z) first since it's ~3x smaller; fall back to raw.
-extract_7z() {
-    if command -v 7z >/dev/null 2>&1; then
-        7z x -y "$1" -o"$2" >/dev/null
-    elif command -v 7zz >/dev/null 2>&1; then  # newer 7-Zip name on some distros
-        7zz x -y "$1" -o"$2" >/dev/null
-    else
-        echo "ERROR: 7z not found. Install with: apt install p7zip-full / brew install p7zip" >&2
-        return 1
-    fi
-}
-
+# Try compressed (.onnx.gz) first since it's ~3x smaller; fall back to raw.
+# gzip is universally available on Linux/macOS/Windows (Git Bash); no extra
+# install step needed.
 IFS=',' read -ra FOLD_LIST <<< "$FOLDS"
 for f in "${FOLD_LIST[@]}"; do
     out="$MODELS/fold_${f}_fp16.onnx"
@@ -62,15 +53,14 @@ for f in "${FOLD_LIST[@]}"; do
         continue
     fi
 
-    url_7z="${RELEASE_BASE}/fold_${f}_fp16.onnx.7z"
+    url_gz="${RELEASE_BASE}/fold_${f}_fp16.onnx.gz"
     url_raw="${RELEASE_BASE}/fold_${f}_fp16.onnx"
 
-    if curl -fsI -o /dev/null "$url_7z" 2>/dev/null; then
-        echo "[fetch_weights] downloading $url_7z (compressed)"
-        tmp7z="$MODELS/.fold_${f}.7z.tmp"
-        curl -fsSL "$url_7z" -o "$tmp7z"
-        extract_7z "$tmp7z" "$MODELS"
-        rm -f "$tmp7z"
+    if curl -fsI -o /dev/null "$url_gz" 2>/dev/null; then
+        echo "[fetch_weights] downloading $url_gz (gzip)"
+        tmp_gz="$MODELS/fold_${f}_fp16.onnx.gz"
+        curl -fsSL "$url_gz" -o "$tmp_gz"
+        gunzip -f "$tmp_gz"
     else
         echo "[fetch_weights] downloading $url_raw (uncompressed)"
         curl -fsSL "$url_raw" -o "$out"

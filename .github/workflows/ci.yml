@@ -95,16 +95,12 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
-      - name: Install 7-Zip (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends p7zip-full
-
       - name: Cache fold_0 weight
         id: cache-fold0
         uses: actions/cache@v4
         with:
           path: models/fold_0_fp16.onnx
-          key: siam-fold0-fp16-v1
+          key: siam-fold0-fp16-v2
 
       - name: Fetch + extract fold_0 weight (cache miss)
         if: steps.cache-fold0.outputs.cache-hit != 'true'
@@ -113,9 +109,8 @@ jobs:
         run: |
           mkdir -p models
           echo "Downloading $URL"
-          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
-          7z x -y models/fold_0_fp16.onnx.7z -omodels/
-          rm -f models/fold_0_fp16.onnx.7z
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
+          gunzip -f models/fold_0_fp16.onnx.gz
           ls -la models/
 
       - name: Configure (CUDA EP)
