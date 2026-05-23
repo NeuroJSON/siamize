@@ -8,6 +8,7 @@
 #include "nifti_io.h"
 #include "preprocess.h"
 #include "sliding.h"
+#include "weights.h"
 
 #include <algorithm>
 #include <array>
@@ -59,7 +60,11 @@ void usage(const char* exe) {
                  "\n"
                  "  -i, --input         input NIfTI (.nii or .nii.gz, 3D)\n"
                  "  -o, --output        output label NIfTI (.nii.gz)\n"
-                 "      --models        comma-separated .onnx files (one per fold), logits are averaged\n"
+                 "      --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
+                 "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
+                 "                      a full path or a basename that is looked up under\n"
+                 "                      $SIAMIZE_CACHE_DIR (default $HOME/.cache/siamize/models/) and\n"
+                 "                      auto-downloaded from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
                  "      --device D      execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA (if compiled in) then falls back to CPU.\n"
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
@@ -143,12 +148,36 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (input_path.empty() || output_path.empty() || models_csv.empty()) {
+    if (input_path.empty() || output_path.empty()) {
         usage(argv[0]);
         return 2;
     }
 
+    // Default to single-fold fold_0 when --models isn't given. resolve_model_path
+    // below will look in $HOME/.cache/siamize/models/ and, on a miss, curl the
+    // weight from https://neurojson.org/siamize/weights/siam_v03/ (overridable
+    // via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
+    if (models_csv.empty()) {
+        models_csv = "fold_0_fp16.onnx";
+
+        if (verbose) {
+            std::fprintf(stderr,
+                         "--models not given; defaulting to single-fold "
+                         "fold_0_fp16.onnx (auto-downloaded if missing).\n");
+        }
+    }
+
     auto model_paths = split_csv(models_csv);
+
+    // Resolve every model spec: existing path, cache lookup, or auto-fetch.
+    for (auto& m : model_paths) {
+        try {
+            m = siam::resolve_model_path(m, verbose);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "siamize: %s\n", e.what());
+            return 3;
+        }
+    }
 
     if (threads <= 0) {
         unsigned hc = std::thread::hardware_concurrency();

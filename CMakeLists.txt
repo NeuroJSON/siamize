@@ -115,6 +115,7 @@ add_executable(siamize
     src/orient.cpp
     src/preprocess.cpp
     src/sliding.cpp
+    src/weights.cpp
 )
 target_include_directories(siamize PRIVATE
     src
