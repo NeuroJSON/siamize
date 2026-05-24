@@ -70,7 +70,9 @@ void usage(const char* exe) {
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
                  "\n"
                  "  -i, --input         input NIfTI (.nii or .nii.gz, 3D)\n"
-                 "  -o, --output        output label NIfTI (.nii.gz)\n"
+                 "  -o, --output        output NIfTI. By default this is a 3D uint8 labelmap;\n"
+                 "                      pass `--tpm` to write a 4D float32 tissue probability map\n"
+                 "                      to the same path instead.\n"
                  "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
@@ -98,17 +100,19 @@ void usage(const char* exe) {
                  "                         use `nvidia-smi --query-gpu=index,name --format=csv,noheader`\n"
                  "                         to see what physical GPU each index maps to.\n"
                  "  -t, --thread N      ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs).\n"
-                 "      --tpm P         also save a 4D float32 tissue probability map (TPM) to P.\n"
-                 "                      Output shape is (X, Y, Z, num_classes) -- softmax over the\n"
-                 "                      18 fold-averaged class logits, reoriented to match the input.\n"
+                 "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
+                 "                      file at `-o` is a 4D float32 tissue probability map of\n"
+                 "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
+                 "                      averaged class logits -- INSTEAD of the discrete labelmap.\n"
                  "                      Use .nii.gz to gzip on save. Raw size ~3 GB; gzipped ~250 MB.\n"
+                 "                      `--tpm` alone is equivalent to `--tpm 1`.\n"
                  "      --tpm-t T       softmax temperature for the TPM output (default 1.0).\n"
                  "                      T > 1 softens the distribution (more graded boundaries,\n"
-                 "                      better-calibrated probabilities); T < 1 sharpens. Affects\n"
-                 "                      only the TPM output, not the argmax label volume.\n"
-                 "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
-                 "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
-                 "      --classes N     number of output classes, default 18 (SIAM v0.3).\n"
+                 "                      better-calibrated probabilities); T < 1 sharpens. Only\n"
+                 "                      meaningful when --tpm is on.\n"
+                 "  -P, --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
+                 "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
+                 "  -C, --classes N     number of output classes, default 18 (SIAM v0.3).\n"
                  "  -v, --verbose       print progress\n"
                  "  -h, --help\n",
                  exe);
@@ -120,8 +124,8 @@ int main(int argc, char** argv) {
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
-    std::string tpm_out;               // empty => no TPM saved
-    float       tpm_temperature = 1.0f; // softmax temperature (>1 = softer)
+    bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
+    float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     bool verbose = false;
     std::array<int64_t, 3> patch = {256, 256, 192};
@@ -165,11 +169,11 @@ int main(int argc, char** argv) {
             trt_cache_dir = need();
         } else if (a == "-t" || a == "--thread") {
             threads = std::stoi(need());
-        } else if (a == "--spacing") {
+        } else if (a == "-u" || a == "--spacing") {
             target_spacing = std::stof(need());
-        } else if (a == "--classes") {
+        } else if (a == "-C" || a == "--classes") {
             num_classes = std::stoll(need());
-        } else if (a == "--patch") {
+        } else if (a == "-P" || a == "--patch") {
             std::string p = need();
             char x;
             std::stringstream ss(p);
@@ -208,7 +212,22 @@ int main(int argc, char** argv) {
         } else if (a == "-G" || a == "--gpu") {
             cuda_tuning.gpuid = std::stoi(need());
         } else if (a == "--tpm") {
-            tpm_out = need();
+            // Bare flag OR optional 0|1|true|false. If the next arg
+            // looks like a bool value, consume it; otherwise default to
+            // true so `--tpm` alone toggles TPM mode on.
+            tpm_mode = true;
+
+            if (i + 1 < argc) {
+                std::string nxt = argv[i + 1];
+
+                if (nxt == "0" || nxt == "false") {
+                    ++i;
+                    tpm_mode = false;
+                } else if (nxt == "1" || nxt == "true") {
+                    ++i;
+                    tpm_mode = true;
+                }
+            }
         } else if (a == "--tpm-t") {
             tpm_temperature = std::stof(need());
 
@@ -403,35 +422,13 @@ int main(int argc, char** argv) {
     }
     logits = LogitsVolume{};  // free
 
-    // argmax → uint8 labels at cropped shape
-    int64_t cZ = logits_back.spat[0], cY = logits_back.spat[1], cX = logits_back.spat[2];
-    std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
+    const int64_t cZ = logits_back.spat[0];
+    const int64_t cY = logits_back.spat[1];
+    const int64_t cX = logits_back.spat[2];
+    const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
 
-    for (int64_t z = 0; z < cZ; ++z) {
-        for (int64_t y = 0; y < cY; ++y) {
-            for (int64_t x = 0; x < cX; ++x) {
-                int64_t i = z * cY * cX + y * cX + x;
-                int best = 0;
-                float bestv = logits_back.channel_ptr(0)[i];
-
-                for (int64_t c = 1; c < num_classes; ++c) {
-                    float v = logits_back.channel_ptr(c)[i];
-
-                    if (v > bestv) {
-                        bestv = v;
-                        best = static_cast<int>(c);
-                    }
-                }
-
-                labels_crop[i] = static_cast<uint8_t>(best);
-            }
-        }
-    }
-
-    // Optional 4D TPM output. Reuses logits_back (still alive at this
-    // point) -- softmax in place, un-crop into canonical shape with
-    // background=1 outside the bbox, then save as 4D float32 NIfTI.
-    if (!tpm_out.empty()) {
+    if (tpm_mode) {
+        // ---- TPM branch: softmax logits -> un-crop -> save 4D float32 ----
         if (verbose) {
             if (tpm_temperature != 1.0f) {
                 std::fprintf(stderr,
@@ -475,9 +472,7 @@ int main(int argc, char** argv) {
         }
 
         // Un-crop to canonical shape. Outside the bbox we want
-        // p(background)=1 and p(other)=0 (i.e. "the network correctly
-        // labelled the void as background"). Pre-fill the bg channel.
-        const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
+        // p(background)=1 and p(other)=0.
         std::vector<float> tpm_canon(static_cast<size_t>(num_classes) * Zc * Yc * Xc, 0.0f);
         std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);  // background = 1 everywhere
 
@@ -497,30 +492,49 @@ int main(int argc, char** argv) {
             }
         }
 
-        siam::save_nifti_tpm(tpm_out, img, tpm_canon.data(), num_classes);
+        logits_back = LogitsVolume{};
+        siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes);
+    } else {
+        // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------
+        std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
 
-        if (verbose) {
-            std::fprintf(stderr, "  saved TPM to %s\n", tpm_out.c_str());
+        for (int64_t z = 0; z < cZ; ++z) {
+            for (int64_t y = 0; y < cY; ++y) {
+                for (int64_t x = 0; x < cX; ++x) {
+                    int64_t i = z * cY * cX + y * cX + x;
+                    int best = 0;
+                    float bestv = logits_back.channel_ptr(0)[i];
+
+                    for (int64_t c = 1; c < num_classes; ++c) {
+                        float v = logits_back.channel_ptr(c)[i];
+
+                        if (v > bestv) {
+                            bestv = v;
+                            best = static_cast<int>(c);
+                        }
+                    }
+
+                    labels_crop[i] = static_cast<uint8_t>(best);
+                }
+            }
         }
-    }
 
-    logits_back = LogitsVolume{};
+        logits_back = LogitsVolume{};
 
-    // Un-crop: paste into canonical shape with zero outside the bbox.
-    std::vector<uint8_t> labels_canon(static_cast<size_t>(shape_canon[0]) * shape_canon[1] * shape_canon[2], 0);
+        std::vector<uint8_t> labels_canon(static_cast<size_t>(Zc) * Yc * Xc, 0);
 
-    for (int64_t z = 0; z < cZ; ++z) {
-        for (int64_t y = 0; y < cY; ++y) {
-            std::copy_n(&labels_crop[z * cY * cX + y * cX],
-                        cX,
-                        &labels_canon[(z + crop.bbox[0][0]) * shape_canon[1] * shape_canon[2] +
-                                                            (y + crop.bbox[1][0]) * shape_canon[2] +
-                                                            crop.bbox[2][0]]);
+        for (int64_t z = 0; z < cZ; ++z) {
+            for (int64_t y = 0; y < cY; ++y) {
+                std::copy_n(&labels_crop[z * cY * cX + y * cX],
+                            cX,
+                            &labels_canon[(z + crop.bbox[0][0]) * Yc * Xc +
+                                                                (y + crop.bbox[1][0]) * Xc +
+                                                                crop.bbox[2][0]]);
+            }
         }
-    }
 
-    // Save: nifti_io reorients back to original axis order.
-    siam::save_nifti_labels(output_path, img, labels_canon.data());
+        siam::save_nifti_labels(output_path, img, labels_canon.data());
+    }
 
     auto t_end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(t_end - t_start).count();

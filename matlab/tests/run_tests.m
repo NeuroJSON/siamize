@@ -68,7 +68,8 @@ tests = {
          @test_opts_struct_plus_overrides_, ...
          @test_opts_cuda_tuning_passthrough_, ...
          @test_opts_gpu_passthrough_, ...
-         @test_opts_tpm_t_passthrough_ ...
+         @test_opts_tpm_t_passthrough_, ...
+         @test_opts_tpm_bool_passthrough_ ...
         };
 
 do_exit = any(strcmp(varargin, '--exit'));
@@ -180,8 +181,10 @@ end
 
 function test_bare_array_defaults_(fx)
 global SIAMEX_LAST
-lab = siamize(fx.img);
-assert(isequal(size(lab), size(fx.img)), 'label shape mismatch');
+nii = siamize(fx.img);
+assert(isstruct(nii) && isfield(nii, 'NIFTIData') && isfield(nii, 'NIFTIHeader'), ...
+       'return must be a jnifti struct');
+assert(isequal(size(nii.NIFTIData), size(fx.img)), 'label shape mismatch');
 A = SIAMEX_LAST.affine;
 assert_centered_affine_(A, size(fx.img));
 end
@@ -494,6 +497,17 @@ function test_opts_tpm_t_passthrough_(fx)
 global SIAMEX_LAST
 siamize(fx.img, fx.A, 0, 'tpm_t', 1.5);
 assert(abs(SIAMEX_LAST.opts.tpm_t - 1.5) < 1e-9);
+end
+
+function test_opts_tpm_bool_passthrough_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, 'tpm', true);
+assert(logical(SIAMEX_LAST.opts.tpm), 'opts.tpm should be true');
+siamize(fx.img, fx.A, 0);  % default = no tpm field, or false
+% After this call SIAMEX_LAST.opts may not have 'tpm'; require either
+% absent-or-falsey behavior.
+assert(~isfield(SIAMEX_LAST.opts, 'tpm') || ~logical(SIAMEX_LAST.opts.tpm), ...
+       'opts.tpm should be false/absent by default');
 end
 
 % =============================================================================

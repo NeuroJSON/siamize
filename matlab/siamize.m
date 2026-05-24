@@ -1,4 +1,4 @@
-function [lab, tpm] = siamize(varargin)
+function nii = siamize(varargin)
 % SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on a NIfTI volume.
 %
 %   labels = siamize(input)
@@ -107,28 +107,35 @@ function [lab, tpm] = siamize(varargin)
 %                                      the environment. Use `nvidia-smi`
 %                                      to see what each index maps to.
 %
-%            TPM output (4D float32 tissue probability map, softmax
-%            over the 18 fold-averaged class logits):
+%            TPM output mode (4D float32 tissue probability map,
+%            softmax over the 18 fold-averaged class logits):
 %
-%               'tpm'                 char output path (.nii(.gz) /
-%                                      .jnii / .bnii). When set, the
-%                                      TPM is saved to disk in
-%                                      addition to (or instead of)
-%                                      returning it.
+%               'tpm'                 logical (default false). When true,
+%                                      siamize returns the 4D TPM as
+%                                      nii.NIFTIData INSTEAD of the
+%                                      discrete labels. The labels are
+%                                      not computed in this mode.
 %               'tpm_t'               double (default 1.0). T>1 softens
 %                                      the softmax (more graded
 %                                      boundaries, better calibration).
+%                                      Only meaningful when 'tpm' is true.
 %
-%   labels   uint8 3D array with the same [X, Y, Z] shape as the input
-%            volume. Label integers 0..17 per SIAM v0.3 (0=background,
-%            1=GM, 2=WM, 3=CSF, ..., 17=Anomalies). Always returned;
-%            also written to outputfile if one was provided.
-%
-%   tpm      (optional second output) 4D single (float32) of shape
-%            [X, Y, Z, 18] holding the softmax probabilities per voxel
-%            and class. Computed and returned only when the caller
-%            requests two outputs OR when opts.tpm is set. Sums
-%            to 1 per voxel; argmax(tpm, 4)-1 reproduces `labels`.
+%   nii      jnifti struct with two fields:
+%             .NIFTIHeader   cloned from the input's NIFTIHeader when
+%                            the input was a file path or struct;
+%                            otherwise synthesized via jnifticreate.
+%                            The working affine is written into
+%                            .NIFTIHeader.Affine for round-tripping.
+%             .NIFTIData     the segmentation result, either
+%                              uint8 [X, Y, Z]        when opts.tpm=false
+%                              single [X, Y, Z, 18]   when opts.tpm=true
+%            Labels: integers 0..17 per SIAM v0.3 (0=background, 1=GM,
+%            2=WM, 3=CSF, ..., 17=Anomalies).
+%            TPM: per-class softmax probabilities; sums to 1 per
+%            voxel, and argmax over the 4th axis (minus 1) reproduces
+%            the label volume you'd get with opts.tpm=false.
+%            Always returned; also written to outputfile if one was
+%            provided.
 %
 % Examples
 %   % one-shot file -> file:
@@ -149,15 +156,19 @@ function [lab, tpm] = siamize(varargin)
 %   % pick GPU 1 of 3 on a multi-GPU box:
 %   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'gpu', 1);
 %
-%   % save 4D TPM to disk alongside the labelmap:
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'tpm', 'tpm.nii.gz');
+%   % default behavior: discrete labels (3D uint8) wrapped in jnifti struct:
+%   nii_lab = siamize('in.nii.gz', 0:4);
 %
-%   % return TPM in-memory (second nargout); no file written:
-%   [lab, tpm] = siamize('in.nii.gz', 0:4, 'tpm_t', 1.5);
+%   % TPM mode: jnifti struct whose NIFTIData is 4D single (float32):
+%   nii_tpm = siamize('in.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
+%   % size(nii_tpm.NIFTIData) -> [X Y Z 18]
+%
+%   % Write TPM to disk (outputfile + 'tpm', true; same writer dispatch):
+%   siamize('in.nii.gz', 'tpm.nii.gz', 0:4, 'tpm', true);
 %
 %   % opts struct still works; can mix with name/value overrides:
 %   defs = struct('compute', 'cuda', 'verbose', true);
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, defs, 'tpm', 'tpm.bnii');
+%   siamize('in.nii.gz', 'lab.bnii', 0:4, defs, 'tpm_t', 1.2);
 %
 %   % pure array, default affine inferred:
 %   lab = siamize(my_volume);
@@ -219,24 +230,29 @@ if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
     end
 end
 
-% Decide whether to request the optional 4D TPM. Compute it iff the
-% caller asked for it via the second nargout or via opts.tpm_out (in
-% which case we save it to disk after).
-tpm_out = jsonopt('tpm', '', opts);
-want_tpm = (nargout >= 2) || ~isempty(tpm_out);
+% siamex returns a single ndarray whose dtype/rank depends on opts.tpm:
+%   opts.tpm = false (default) -> 3D uint8 labels
+%   opts.tpm = true            -> 4D float32 tissue probability map
+data = siamex(img, affine, resolved, opts);
 
-if want_tpm
-    [lab, tpm] = siamex(img, affine, resolved, opts);
+% Wrap as a jnifti struct so the caller gets a header alongside the
+% data. The header is cloned from the input's NIFTIHeader when
+% available (file/jnifti/readnifti input); otherwise jnifticreate
+% synthesizes a minimal one. The working affine is written in for
+% consistency.
+if isstruct(src) && isfield(src, 'NIFTIHeader')
+    nii = src;
+    nii.NIFTIData = data;
+    if isfield(nii.NIFTIHeader, 'Affine')
+        nii.NIFTIHeader.Affine = affine;
+    end
 else
-    lab = siamex(img, affine, resolved, opts);
+    nii = jnifticreate(data);
+    nii.NIFTIHeader.Affine = affine;
 end
 
 if ~isempty(outputfile)
-    siamize_write_output_(lab, affine, src, outputfile);
-end
-
-if ~isempty(tpm_out)
-    siamize_write_tpm_(tpm, affine, src, tpm_out);
+    siamize_write_output_(nii, outputfile);
 end
 end
 
@@ -355,57 +371,18 @@ opts_args = rest(2:end);
 opts = varargin2struct(opts_args{:});
 end
 
-function siamize_write_output_(lab, affine, src, outputfile)
-% SIAMIZE_WRITE_OUTPUT_  Save the label volume to a .nii(.gz) / .jnii / .bnii file.
-%   Preserves the source jnifti header when available; otherwise builds
-%   a minimal header via jnifticreate and writes the affine into it.
-if isstruct(src) && isfield(src, 'NIFTIHeader')
-    jnii_out = src;
-    jnii_out.NIFTIData = lab;
-    if isfield(jnii_out.NIFTIHeader, 'Affine')
-        jnii_out.NIFTIHeader.Affine = affine;
-    end
-else
-    jnii_out = jnifticreate(lab);
-    jnii_out.NIFTIHeader.Affine = affine;
-end
-
+function siamize_write_output_(nii, outputfile)
+% SIAMIZE_WRITE_OUTPUT_  Save a jnifti struct to a .nii(.gz) / .jnii / .bnii file.
+%   The struct already carries the (possibly inherited) NIFTIHeader and
+%   NIFTIData; this just dispatches to the right writer based on
+%   extension. Handles both 3D (uint8 labels) and 4D (float32 TPM) data.
 if ~isempty(regexpi(outputfile, '\.nii(\.gz)?$', 'once'))
-    jnii2nii(jnii_out, outputfile);
+    jnii2nii(nii, outputfile);
 elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
-    savejnifti(jnii_out, outputfile);
+    savejnifti(nii, outputfile);
 else
     error('siamize:outext', ...
           ['unsupported output extension: %s (expected '...
-           '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
-end
-end
-
-
-function siamize_write_tpm_(tpm, affine, src, outputfile)
-% SIAMIZE_WRITE_TPM_  Save a 4D float32 TPM volume to disk.
-%   Same writer dispatch as for labels (.nii(.gz) via jnii2nii;
-%   .jnii / .bnii via savejnifti). Header inherited from the source
-%   jnifti struct when available; otherwise synthesized via
-%   jnifticreate so the affine round-trips.
-if isstruct(src) && isfield(src, 'NIFTIHeader')
-    jnii_out = src;
-    jnii_out.NIFTIData = tpm;
-    if isfield(jnii_out.NIFTIHeader, 'Affine')
-        jnii_out.NIFTIHeader.Affine = affine;
-    end
-else
-    jnii_out = jnifticreate(tpm);
-    jnii_out.NIFTIHeader.Affine = affine;
-end
-
-if ~isempty(regexpi(outputfile, '\.nii(\.gz)?$', 'once'))
-    jnii2nii(jnii_out, outputfile);
-elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
-    savejnifti(jnii_out, outputfile);
-else
-    error('siamize:tpmext', ...
-          ['unsupported tpm_out extension: %s (expected '...
            '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
 end
 end

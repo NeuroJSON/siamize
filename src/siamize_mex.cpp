@@ -176,6 +176,7 @@ struct Opts {
     std::string trt_cache;
     bool verbose = false;
     siam::CudaTuning cuda_tuning;
+    bool  tpm = false;               // true -> output 4D float32 TPM instead of 3D labels
     float tpm_temperature = 1.0f;    // softmax temperature for the TPM
 };
 
@@ -270,6 +271,11 @@ void read_opts(const mxArray* a, Opts& o) {
 
     if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
         o.cuda_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+    }
+
+    if ((f = mxGetField(a, 0, "tpm")) && !mxIsEmpty(f)) {
+        // Accept numeric (0/1) or logical scalar; nonzero -> true.
+        o.tpm = (mxGetScalar(f) != 0.0);
     }
 
     if ((f = mxGetField(a, 0, "tpm_t")) && !mxIsEmpty(f)) {
@@ -432,65 +438,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         }
         logits = siam::LogitsVolume{};
 
-        // Argmax -> uint8 in canonical (Z, Y, X) inside the bbox.
-        std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
+        const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
 
-        for (int64_t z = 0; z < cZ; ++z) {
-            for (int64_t y = 0; y < cY; ++y) {
-                for (int64_t x = 0; x < cX; ++x) {
-                    int64_t i = z * cY * cX + y * cX + x;
-                    int best = 0;
-                    float bestv = logits_back.channel_ptr(0)[i];
-
-                    for (int64_t c = 1; c < opts.classes; ++c) {
-                        float v = logits_back.channel_ptr(c)[i];
-
-                        if (v > bestv) {
-                            bestv = v;
-                            best = static_cast<int>(c);
-                        }
-                    }
-
-                    labels_crop[i] = static_cast<uint8_t>(best);
-                }
-            }
-        }
-
-        // Un-crop into full canonical (Z, Y, X) volume.
-        std::vector<uint8_t> labels_canon(
-            static_cast<size_t>(shape_canon[0]) * shape_canon[1] * shape_canon[2], 0);
-
-        for (int64_t z = 0; z < cZ; ++z) {
-            for (int64_t y = 0; y < cY; ++y) {
-                std::copy_n(&labels_crop[z * cY * cX + y * cX],
-                            cX,
-                            &labels_canon[(z + crop.bbox[0][0]) * shape_canon[1] * shape_canon[2]
-                                                                + (y + crop.bbox[1][0]) * shape_canon[2]
-                                                                + crop.bbox[2][0]]);
-            }
-        }
-
-        // ---- build the MATLAB output (uint8, [X, Y, Z] column-major) -----
-        const mwSize odims[3] = {
-            static_cast<mwSize>(X),
-            static_cast<mwSize>(Y),
-            static_cast<mwSize>(Z),
-        };
-        plhs[0] = mxCreateNumericArray(3, odims, mxUINT8_CLASS, mxREAL);
-        uint8_t* out_ptr = static_cast<uint8_t*>(mxGetData(plhs[0]));
-
-        siam::copy_reorient_from_canonical<uint8_t>(
-            labels_canon.data(),
-            shape_canon[0], shape_canon[1], shape_canon[2],
-            X, Y, Z,
-            dst, sgn,
-            out_ptr);
-
-        // ---- optional 4D TPM output -------------------------------------
-        // Compute only if the caller actually asked for it (nargout >= 2).
-        // Skipping when not requested saves the softmax + the ~1 GB
-        // single-precision output buffer.
-        if (nlhs >= 2) {
+        if (opts.tpm) {
+            // ---- TPM mode: softmax -> un-crop -> reorient -> 4D float32 ---
             const float inv_T = 1.0f / opts.tpm_temperature;
             const int64_t N = cZ * cY * cX;
 
@@ -520,9 +471,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 }
             }
 
-            // Un-crop to canonical (C, Zc, Yc, Xc); outside the bbox is
-            // [1, 0, 0, ...] (background = 1).
-            const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
+            // Un-crop into canonical (C, Zc, Yc, Xc); outside bbox = [1,0,...]
             std::vector<float> tpm_canon(
                 static_cast<size_t>(opts.classes) * Zc * Yc * Xc, 0.0f);
             std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);
@@ -543,16 +492,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 }
             }
 
-            // Allocate the MATLAB 4D output as single (float32) and
-            // reorient each channel to (X, Y, Z) input-axis order.
+            // Allocate the MATLAB 4D output (single, [X, Y, Z, C]) and
+            // reorient each channel to input-axis order.
             const mwSize tdims[4] = {
                 static_cast<mwSize>(X),
                 static_cast<mwSize>(Y),
                 static_cast<mwSize>(Z),
                 static_cast<mwSize>(opts.classes),
             };
-            plhs[1] = mxCreateNumericArray(4, tdims, mxSINGLE_CLASS, mxREAL);
-            float* tpm_ptr = static_cast<float*>(mxGetData(plhs[1]));
+            plhs[0] = mxCreateNumericArray(4, tdims, mxSINGLE_CLASS, mxREAL);
+            float* tpm_ptr = static_cast<float*>(mxGetData(plhs[0]));
             const int64_t per_chan_out = X * Y * Z;
             const int64_t per_chan_in  = Zc * Yc * Xc;
 
@@ -563,6 +512,58 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     X, Y, Z, dst, sgn,
                     tpm_ptr + c * per_chan_out);
             }
+        } else {
+            // ---- Labels mode: argmax -> un-crop -> reorient -> 3D uint8 ---
+            std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
+
+            for (int64_t z = 0; z < cZ; ++z) {
+                for (int64_t y = 0; y < cY; ++y) {
+                    for (int64_t x = 0; x < cX; ++x) {
+                        int64_t i = z * cY * cX + y * cX + x;
+                        int best = 0;
+                        float bestv = logits_back.channel_ptr(0)[i];
+
+                        for (int64_t c = 1; c < opts.classes; ++c) {
+                            float v = logits_back.channel_ptr(c)[i];
+
+                            if (v > bestv) {
+                                bestv = v;
+                                best = static_cast<int>(c);
+                            }
+                        }
+
+                        labels_crop[i] = static_cast<uint8_t>(best);
+                    }
+                }
+            }
+
+            std::vector<uint8_t> labels_canon(
+                static_cast<size_t>(Zc) * Yc * Xc, 0);
+
+            for (int64_t z = 0; z < cZ; ++z) {
+                for (int64_t y = 0; y < cY; ++y) {
+                    std::copy_n(&labels_crop[z * cY * cX + y * cX],
+                                cX,
+                                &labels_canon[(z + crop.bbox[0][0]) * Yc * Xc
+                                                                    + (y + crop.bbox[1][0]) * Xc
+                                                                    + crop.bbox[2][0]]);
+                }
+            }
+
+            const mwSize odims[3] = {
+                static_cast<mwSize>(X),
+                static_cast<mwSize>(Y),
+                static_cast<mwSize>(Z),
+            };
+            plhs[0] = mxCreateNumericArray(3, odims, mxUINT8_CLASS, mxREAL);
+            uint8_t* out_ptr = static_cast<uint8_t*>(mxGetData(plhs[0]));
+
+            siam::copy_reorient_from_canonical<uint8_t>(
+                labels_canon.data(),
+                Zc, Yc, Xc,
+                X, Y, Z,
+                dst, sgn,
+                out_ptr);
         }
 
     } catch (const std::exception& e) {
