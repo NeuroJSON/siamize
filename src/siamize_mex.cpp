@@ -55,7 +55,7 @@ Inputs:
              force the safe-defaults preset (smaller patch + no
              arena + smaller thread cap + tight VRAM knobs) on
              otherwise-large hosts. The same preset auto-applies
-             when available RAM is < 12 GB or VRAM < 12 GB.
+             when available RAM is < 14 GB or VRAM < 12 GB.
 
 Output:
 
@@ -592,7 +592,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         }
 
         bool ram_tight  = opts.lowmem
-                          || (avail_ram_mb_l  > 0 && avail_ram_mb_l  < 12 * 1024);
+                          || (avail_ram_mb_l  > 0 && avail_ram_mb_l  < 14 * 1024);
         bool vram_tight = (opts.lowmem && gpu_active)
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 

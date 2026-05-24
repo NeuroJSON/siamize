@@ -323,7 +323,7 @@ void usage(const char* exe) {
                  "                      in only when your weights support it. Without\n"
                  "                      --lowmem, auto-detect applies the SAFE SUBSET\n"
                  "                      (everything except -P) whenever available host\n"
-                 "                      RAM is < 12 GB or free GPU VRAM is < 12 GB, so\n"
+                 "                      RAM is < 14 GB or free GPU VRAM is < 12 GB, so\n"
                  "                      out-of-the-box behavior never breaks inference.\n"
                  "                      Flags passed alongside --lowmem are NOT overridden.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
@@ -641,7 +641,7 @@ int main(int argc, char** argv) {
     // against stomping on intent.
     //
     // Thresholds (auto-detect):
-    //   RAM  < 12 GB available  -> CPU-side lowmem defaults
+    //   RAM  < 14 GB available  -> CPU-side lowmem defaults
     //   VRAM < 12 GB available  -> GPU-side lowmem defaults
     //
     // CPU lowmem set:
@@ -657,7 +657,7 @@ int main(int argc, char** argv) {
                                 device == "tensorrt");
     const long avail_vram_mb = gpu_active ? available_vram_mb() : 0;
     const bool ram_tight     = lowmem_mode
-                               || (avail_ram_mb  > 0 && avail_ram_mb  < 12 * 1024);
+                               || (avail_ram_mb  > 0 && avail_ram_mb  < 14 * 1024);
     const bool vram_tight    = (lowmem_mode && gpu_active)
                                || (avail_vram_mb > 0 && avail_vram_mb < 12 * 1024);
 
