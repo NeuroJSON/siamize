@@ -64,6 +64,7 @@ single-binary with no Python runtime.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -109,6 +110,41 @@ std::vector<std::string> split_csv(const std::string& s) {
     }
 
     return out;
+}
+
+/*******************************************************************************/
+/*! \fn    long available_ram_mb()
+    \brief Best-effort host-available-RAM probe (Linux only; 0 elsewhere)
+
+    Reads `MemAvailable` from /proc/meminfo (the kernel's own estimate
+    of memory available to start new applications without swapping).
+    Used to drive the [hint] pre-flight memory-pressure warning. On
+    non-Linux platforms returns 0 (caller skips the hint).
+
+    \return  available RAM in MiB, or 0 if unknown
+*/
+long available_ram_mb() {
+#ifdef __linux__
+    std::ifstream f("/proc/meminfo");
+
+    if (!f) {
+        return 0;
+    }
+
+    std::string line;
+
+    while (std::getline(f, line)) {
+        if (line.rfind("MemAvailable:", 0) == 0) {
+            long kb = 0;
+
+            if (std::sscanf(line.c_str(), "MemAvailable: %ld kB", &kb) == 1) {
+                return kb / 1024;
+            }
+        }
+    }
+
+#endif
+    return 0;
 }
 
 /*******************************************************************************/
@@ -218,7 +254,12 @@ void usage(const char* exe) {
                  "                      result is un-cropped to the full canonical extent\n"
                  "                      (regions outside the nonzero head bbox are\n"
                  "                      background-filled). Works with --tpm and all -F formats.\n"
-                 "  -P, --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
+                 "  -P, --patch ZxYxX   sliding-window patch size, default 256x256x192 (matches\n"
+                 "                      SIAM v0.3 plans). siamize tiles the resampled-to-target-\n"
+                 "                      spacing volume with overlapping windows of this size;\n"
+                 "                      each tile is exactly one network forward pass. Peak\n"
+                 "                      working memory scales with this size cubed -- on tight\n"
+                 "                      RAM (e.g. 32 GB hosts) try 192x192x128 or 128x128x96.\n"
                  "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
                  "  -C, --classes N     number of output classes, default 18 (SIAM v0.3).\n"
                  "  -v, --verbose       print progress (default ON; flag kept for backward\n"
@@ -504,6 +545,26 @@ int main(int argc, char** argv) {
                   tpm_mode ? "  --tpm" : "",
                   upsample_mode ? "  --upsample" : "",
                   engine_tuning.cpu_arena ? "" : "  --no-arena");
+
+    // Pre-flight memory check: warn if available RAM is below the
+    // expected peak for the current config. We can't trap SIGKILL
+    // from the kernel OOM killer, so the only way to be useful is to
+    // tell the user UP FRONT what flags would shrink the working
+    // set. The 20 GB / 8 GB thresholds are empirical for the default
+    // 256x256x192 patch with arena ON / OFF respectively.
+    {
+        long avail_mb = available_ram_mb();
+        bool memory_saver = !engine_tuning.cpu_arena
+                            || threads < 16
+                            || patch[0] < 256 || patch[1] < 256 || patch[2] < 192;
+
+        if (avail_mb > 0 && avail_mb < 20 * 1024 && !memory_saver) {
+            siam::log_hint("only %ld MB RAM available; default config may OOM. Consider:",
+                           avail_mb);
+            siam::log_hint("  --no-arena -t 8 -P 192x192x128   (peak ~6-8 GB)");
+            siam::log_hint("  --no-arena -t 4 -P 128x128x96    (peak ~3-4 GB)");
+        }
+    }
 
     if (models_csv.empty()) {
         models_csv = "fold_0_fp16.onnx";

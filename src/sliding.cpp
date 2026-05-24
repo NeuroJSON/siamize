@@ -674,10 +674,13 @@ LogitsVolume sliding_window(const Volume& data,
 
                     ++tile_idx;
 
-                    if (tile_idx % 4 == 0 || tile_idx == n_tiles) {
-                        siam::log_tag("tile", "%" PRId64 "/%" PRId64,
-                                      tile_idx, n_tiles);
-                    }
+                    // One log line per tile so the user has a continuous
+                    // progress signal during the long inference phase.
+                    // For default 8 tiles x 1 fold this is 8 lines;
+                    // for a 5-fold ensemble it's 40 lines spread over
+                    // several minutes -- one line every ~30 s.
+                    siam::log_tag("tile", "%" PRId64 "/%" PRId64,
+                                  tile_idx, n_tiles);
                 }
             }
         }

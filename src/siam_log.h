@@ -116,6 +116,19 @@ __attribute__((format(printf, 1, 2)));
 void log_warn(const char* fmt, ...)
 __attribute__((format(printf, 1, 2)));
 
+/**
+ * @brief Unconditional hint (ignores the verbose flag)
+ *
+ * Like log_warn but with a softer `[hint]` tag. Intended for
+ * suggestions the user might act on -- e.g. memory-saving flag
+ * suggestions when available RAM is tight, alternative configs
+ * when a probed EP is unavailable, etc.
+ *
+ * @param  fmt  printf-style format
+ */
+void log_hint(const char* fmt, ...)
+__attribute__((format(printf, 1, 2)));
+
 }  // namespace siam
 
 #endif  // SIAMIZE_SIAM_LOG_H

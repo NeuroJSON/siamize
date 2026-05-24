@@ -159,4 +159,18 @@ void log_warn(const char* fmt, ...) {
     va_end(ap);
 }
 
+/*******************************************************************************/
+/*! \fn    void log_hint(const char* fmt, ...)
+    \brief Emit an unconditional hint line (ignores the verbose flag)
+*/
+void log_hint(const char* fmt, ...) {
+    char head[16];
+    std::snprintf(head, sizeof(head), "%-*s ", LOG_TAG_COL, "[hint]");
+
+    va_list ap;
+    va_start(ap, fmt);
+    emit_formatted(head, fmt, ap);
+    va_end(ap);
+}
+
 }  // namespace siam
