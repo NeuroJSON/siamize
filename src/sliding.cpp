@@ -67,6 +67,54 @@ namespace siam {
 
 namespace {
 
+/*******************************************************************************/
+/*! \fn    void ORT_API_CALL siam_ort_logging_func(...)
+    \brief Custom ORT log sink that filters/relays ORT's internal messages
+
+    By default ORT writes its own errors and warnings straight to stderr
+    in a "[E:onnxruntime:siam, provider_bridge_ort.cc:NNNN] ..." format
+    that terminals colour red. Two of those are routine and not actually
+    failure conditions:
+
+      - "Failed to load library .../libonnxruntime_providers_cuda.so"
+      - "cannot open shared object file" (cuDNN / cuBLAS missing)
+
+    They fire whenever -c auto probes the CUDA EP on a host without
+    CUDA drivers installed. siamize handles this case explicitly with
+    a user-friendly [cuda] unavailable (...); using CPU line. The
+    extra ORT error message just confuses users into thinking the
+    run failed.
+
+    This sink suppresses those known-routine messages and routes
+    everything else through siam::log_warn so they remain visible
+    but not visually alarming.
+*/
+void ORT_API_CALL siam_ort_logging_func(void* /*param*/,
+                                        OrtLoggingLevel severity,
+                                        const char* /*category*/,
+                                        const char* /*logid*/,
+                                        const char* /*code_location*/,
+                                        const char* message) {
+    if (!message) {
+        return;
+    }
+
+    // Drop the expected EP-probe failures entirely; the catch
+    // blocks below already emit a tidy [cuda] / [trt] log line.
+    const std::string m = message;
+    if (m.find("Failed to load library") != std::string::npos ||
+            m.find("cannot open shared object file") != std::string::npos) {
+        return;
+    }
+
+    // Anything else at ERROR severity gets surfaced as a [warn] line.
+    // INFO/WARNING/VERBOSE are dropped (we don't need ORT's chatter
+    // unless something actually breaks).
+    if (severity >= ORT_LOGGING_LEVEL_ERROR) {
+        siam::log_warn("ORT: %s", message);
+    }
+}
+
 #ifdef _WIN32
 /*******************************************************************************/
 /*! \fn    std::wstring widen_path(const std::string& s)
@@ -365,7 +413,11 @@ LogitsVolume sliding_window(const Volume& data,
     logits.resize(num_classes, spatZ, spatY, spatX);
     std::vector<float> weights(static_cast<size_t>(spatZ) * spatY * spatX, 0.0f);
 
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "siam");
+    // Custom log sink to suppress ORT's loud red EP-probe failure
+    // messages on -c auto when CUDA/cuDNN aren't installed. See
+    // siam_ort_logging_func above for the rationale.
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "siam",
+                 siam_ort_logging_func, /*logging_param=*/nullptr);
 
     const int64_t patchN = patch_size[0] * patch_size[1] * patch_size[2];
     std::vector<float> input_buf(patchN);
@@ -413,6 +465,10 @@ LogitsVolume sliding_window(const Volume& data,
         // TRT EP first so it gets to claim subgraphs it can fuse; CUDA EP
         // (registered below) picks up whatever TRT declines.
         if (trt_try && (!ep_probed || use_trt)) {
+            if (!ep_probed) {
+                siam::log_tag("trt", "probing TensorRT EP...");
+            }
+
             try {
                 OrtTensorRTProviderOptionsV2* trt_opts = nullptr;
                 Ort::ThrowOnError(Ort::GetApi().CreateTensorRTProviderOptions(&trt_opts));
@@ -453,6 +509,10 @@ LogitsVolume sliding_window(const Volume& data,
 #ifdef SIAMIZE_HAS_CUDA
 
         if (cuda_try && (!ep_probed || use_cuda || use_trt)) {
+            if (!ep_probed) {
+                siam::log_tag("cuda", "probing CUDA EP...");
+            }
+
             try {
                 OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
                 Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
