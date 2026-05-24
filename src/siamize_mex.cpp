@@ -46,11 +46,16 @@ Inputs:
              "fold_<d>_fp16.onnx".
   - opts:    optional struct with any of `.device`, `.threads`,
              `.patch`, `.spacing`, `.classes`, `.tpm`, `.tpm_t`,
-             `.trt_cache`, `.gpu`, `.arena`, `.verbose`. See
-             read_opts() in this file for parsing details. The
-             `.arena` toggle mirrors the CLI's `--no-arena` flag:
+             `.trt_cache`, `.gpu`, `.arena`, `.lowmem`, `.verbose`.
+             See read_opts() in this file for parsing details.
+             The `.arena` toggle mirrors the CLI's `--no-arena` flag:
              pass `'arena', false` to keep peak RSS small at the
-             cost of ~1.5x wall time.
+             cost of ~1.5x wall time. The `.lowmem` toggle mirrors
+             the CLI's `--lowmem` flag: pass `'lowmem', true` to
+             force the safe-defaults preset (smaller patch + no
+             arena + smaller thread cap + tight VRAM knobs) on
+             otherwise-large hosts. The same preset auto-applies
+             when available RAM is < 24 GB or VRAM < 12 GB.
 
 Output:
 
@@ -274,6 +279,18 @@ struct Opts {
     siam::EngineTuning engine_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
     bool  tpm = false;                                 /**< true -> emit 4D float32 TPM, false -> 3D labels */
     float tpm_temperature = 1.0f;                      /**< softmax temperature for the TPM */
+    bool  lowmem = false;                              /**< true -> force the lowmem preset
+                                                            (smaller patch, no arena, smaller
+                                                            thread cap, tight VRAM knobs).
+                                                            Mirrors the CLI --lowmem flag. */
+    // *_set trackers: true when the corresponding opts.* field was
+    // explicitly set in the caller's struct. Used by the auto-lowmem
+    // block in mexFunction to avoid stomping on user intent.
+    bool  patch_set                = false;
+    bool  threads_set              = false;
+    bool  cpu_arena_set            = false;
+    bool  cudnn_max_workspace_set  = false;
+    bool  gpu_mem_limit_set        = false;
 };
 
 /*******************************************************************************/
@@ -325,6 +342,7 @@ void read_opts(const mxArray* a, Opts& o) {
 
     if ((f = mxGetField(a, 0, "thread"))   && !mxIsEmpty(f)) {
         o.threads = static_cast<int>(mxGetScalar(f));
+        o.threads_set = true;
     }
 
     if ((f = mxGetField(a, 0, "spacing"))  && !mxIsEmpty(f)) {
@@ -350,12 +368,14 @@ void read_opts(const mxArray* a, Opts& o) {
 
         const double* p = mxGetPr(f);
         o.patch = {(int64_t)p[0], (int64_t)p[1], (int64_t)p[2]};
+        o.patch_set = true;
     }
 
     // CUDA EP tuning knobs. All optional; absent fields keep EngineTuning
     // defaults (which are ORT defaults).
     if ((f = mxGetField(a, 0, "cudnn_max_workspace")) && !mxIsEmpty(f)) {
         o.engine_tuning.cudnn_max_workspace = static_cast<int>(mxGetScalar(f));
+        o.cudnn_max_workspace_set = true;
     }
 
     if ((f = mxGetField(a, 0, "arena_extend")) && !mxIsEmpty(f)) {
@@ -390,6 +410,7 @@ void read_opts(const mxArray* a, Opts& o) {
         // K/M/G suffix interpretation if it wants -- here we just take a number.
         o.engine_tuning.gpu_mem_limit_bytes =
             static_cast<size_t>(mxGetScalar(f));
+        o.gpu_mem_limit_set = true;
     }
 
     if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
@@ -401,6 +422,14 @@ void read_opts(const mxArray* a, Opts& o) {
         // Default true (fast path). Pass false to match the CLI's
         // --no-arena flag when peak RSS matters more than wall time.
         o.engine_tuning.cpu_arena = (mxGetScalar(f) != 0.0);
+        o.cpu_arena_set = true;
+    }
+
+    if ((f = mxGetField(a, 0, "lowmem")) && !mxIsEmpty(f)) {
+        // Force the lowmem preset (mirrors CLI --lowmem). Same preset
+        // is auto-applied when host RAM / GPU VRAM is tight; this
+        // field opts in regardless of detection.
+        o.lowmem = (mxGetScalar(f) != 0.0);
     }
 
     if ((f = mxGetField(a, 0, "tpm")) && !mxIsEmpty(f)) {
@@ -486,27 +515,118 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             m = siam::resolve_model_path(m, opts.verbose);
         }
 
-        // Match the CLI: auto -> min(hardware_concurrency, 16). The
-        // 16-cap matches the CPU EP's wall-time minimum measured on
-        // many-core hosts; beyond that ORT's CPU path plateaus or
-        // regresses due to memory-bandwidth + cross-CCD L3
-        // contention. See README's "CPU thread tuning" section.
+        // ----- Lowmem preset (manual or auto-detected) ---------------------
+        // Mirrors the CLI auto-safe block. opts.lowmem forces the
+        // preset; otherwise we detect tight host RAM via /proc/meminfo
+        // and tight GPU VRAM via nvidia-smi.
+        bool gpu_active = (opts.device == "auto" ||
+                           opts.device == "cuda" ||
+                           opts.device == "tensorrt");
+        long avail_ram_mb_l  = 0;
+        long avail_vram_mb_l = 0;
+#ifdef __linux__
+        {
+            FILE* mf = fopen("/proc/meminfo", "r");
+
+            if (mf) {
+                char ln[128];
+
+                while (fgets(ln, sizeof(ln), mf)) {
+                    if (std::strncmp(ln, "MemAvailable:", 13) == 0) {
+                        long kb = 0;
+
+                        if (sscanf(ln, "MemAvailable: %ld kB", &kb) == 1) {
+                            avail_ram_mb_l = kb / 1024;
+                        }
+
+                        break;
+                    }
+                }
+
+                fclose(mf);
+            }
+        }
+#endif
+
+        if (gpu_active) {
+#ifdef _WIN32
+            FILE* nv = _popen("nvidia-smi --query-gpu=memory.free "
+                              "--format=csv,noheader,nounits 2>NUL", "r");
+#else
+            FILE* nv = popen("nvidia-smi --query-gpu=memory.free "
+                             "--format=csv,noheader,nounits 2>/dev/null", "r");
+#endif
+
+            if (nv) {
+                char ln[64] = {0};
+
+                if (fgets(ln, sizeof(ln), nv)) {
+                    long parsed = 0;
+
+                    if (sscanf(ln, "%ld", &parsed) == 1 && parsed > 0) {
+                        avail_vram_mb_l = parsed;
+                    }
+                }
+
+#ifdef _WIN32
+                _pclose(nv);
+#else
+                pclose(nv);
+#endif
+            }
+        }
+
+        bool ram_tight  = opts.lowmem
+                          || (avail_ram_mb_l  > 0 && avail_ram_mb_l  < 24 * 1024);
+        bool vram_tight = (opts.lowmem && gpu_active)
+                          || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
+
+        if (ram_tight) {
+            if (!opts.patch_set) {
+                opts.patch = {192, 192, 128};
+            }
+
+            if (!opts.cpu_arena_set) {
+                opts.engine_tuning.cpu_arena = false;
+            }
+        }
+
+        if (vram_tight) {
+            if (!opts.cudnn_max_workspace_set) {
+                opts.engine_tuning.cudnn_max_workspace = 0;
+            }
+
+            if (!opts.gpu_mem_limit_set) {
+                opts.engine_tuning.gpu_mem_limit_bytes = 6ull * 1024 * 1024 * 1024;
+            }
+        }
+
+        // Match the CLI: auto -> min(hardware_concurrency, 16). When
+        // ram_tight is in effect (manual --lowmem or detected tight
+        // RAM), the auto-cap drops to 8 to halve thread-local scratch.
         bool threads_auto = (opts.threads <= 0);
 
         if (threads_auto) {
             unsigned hc = std::thread::hardware_concurrency();
             int detected = (hc > 0) ? static_cast<int>(hc) : 4;
-            const int auto_cap = 16;
+            const int auto_cap = ram_tight ? 8 : 16;
             opts.threads = std::min(detected, auto_cap);
         }
 
         if (opts.verbose) {
             siam::log_tag("siamize",
-                          "v0.1.0  device=%s  threads=%d%s%s%s",
+                          "v0.1.0  device=%s  threads=%d%s%s%s%s",
                           opts.device.c_str(), opts.threads,
                           threads_auto ? " (auto)" : "",
                           opts.tpm ? "  tpm" : "",
-                          opts.engine_tuning.cpu_arena ? "" : "  no-arena");
+                          opts.engine_tuning.cpu_arena ? "" : "  no-arena",
+                          opts.lowmem ? "  lowmem" : "");
+
+            if (ram_tight || vram_tight) {
+                const char* source = opts.lowmem ? "opts.lowmem=true"
+                                                 : "memory-tight host detected";
+                siam::log_hint("lowmem preset applied (%s)", source);
+            }
         }
 
         // ---- reorient to canonical (Z, Y, X) -----------------------------

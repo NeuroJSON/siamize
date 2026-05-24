@@ -281,6 +281,14 @@ void usage(const char* exe) {
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
                  "                      wall time; use only on RAM-constrained hosts.\n"
+                 "      --lowmem        force the low-memory preset (--no-arena + -P 192x192x128\n"
+                 "                      + -t auto-cap=8 + --cudnn-max-workspace 0 + \n"
+                 "                      --gpu-mem-limit 6G). The same preset is auto-applied\n"
+                 "                      when available host RAM is < 24 GB or free GPU VRAM\n"
+                 "                      is < 12 GB; pass --lowmem to force it on otherwise-\n"
+                 "                      large hosts (e.g. shared box with limited budget).\n"
+                 "                      Individual flags passed alongside --lowmem are NOT\n"
+                 "                      overridden -- explicit beats the preset.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
                  "                      file at `-o` is a 4D float32 tissue probability map of\n"
                  "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
@@ -385,6 +393,12 @@ int main(int argc, char** argv) {
                                          //         (skip per-channel back-resample),
                                          //         un-cropped to full canonical extent,
                                          //         using canonical RAS orientation.
+    bool        lowmem_mode     = false; // true => force the lowmem default preset
+                                         //         (smaller patch, no arena, smaller
+                                         //         thread cap, tight VRAM knobs). Same
+                                         //         preset that auto-detection applies on
+                                         //         a memory-tight host -- this flag just
+                                         //         opts in regardless of detection.
     std::string out_format      = "nii"; // nii | jnii | bnii
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     // Verbose progress is ON by default in the CLI; a multi-minute job
@@ -492,6 +506,8 @@ int main(int argc, char** argv) {
             cpu_arena_set = true;
         } else if (a == "--upsample") {
             upsample_mode = true;
+        } else if (a == "--lowmem") {
+            lowmem_mode = true;
         } else if (a == "-G" || a == "--gpu") {
             engine_tuning.gpuid = std::stoi(need());
         } else if (a == "-F" || a == "--format") {
@@ -578,22 +594,24 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // ----- Auto-safe defaults for memory-tight hosts --------------------
+    // ----- Lowmem preset (manual or auto-detected) ----------------------
     // Detect available host RAM (via /proc/meminfo) and GPU VRAM (via
     // nvidia-smi when the user picked a CUDA-capable device) and apply
-    // memory-saving flag defaults when either is tight. Flags the user
-    // explicitly passed are NOT overridden -- the `*_set` trackers in
-    // the parse loop guard against stomping on intent.
+    // memory-saving flag defaults when either is tight. The user can
+    // force this preset on otherwise-large hosts by passing --lowmem.
+    // Flags the user explicitly passed alongside --lowmem are NOT
+    // overridden -- the `*_set` trackers in the parse loop guard
+    // against stomping on intent.
     //
-    // Thresholds:
-    //   RAM  < 24 GB available  -> CPU-side safe defaults
-    //   VRAM < 12 GB available  -> GPU-side safe defaults
+    // Thresholds (auto-detect):
+    //   RAM  < 24 GB available  -> CPU-side lowmem defaults
+    //   VRAM < 12 GB available  -> GPU-side lowmem defaults
     //
-    // CPU safe set:
+    // CPU lowmem set:
     //   -P 192x192x128, --no-arena, -t auto-cap = 8
     //   targets ~5-7 GB peak RSS (fits 16 GB host with OS overhead)
     //
-    // GPU safe set:
+    // GPU lowmem set:
     //   --cudnn-max-workspace 0, --gpu-mem-limit 6G
     //   targets ~3-4 GB peak VRAM (fits 8 GB GPU)
     const long avail_ram_mb  = available_ram_mb();
@@ -601,8 +619,10 @@ int main(int argc, char** argv) {
                                 device == "cuda" ||
                                 device == "tensorrt");
     const long avail_vram_mb = gpu_active ? available_vram_mb() : 0;
-    const bool ram_tight     = avail_ram_mb  > 0 && avail_ram_mb  < 24 * 1024;
-    const bool vram_tight    = avail_vram_mb > 0 && avail_vram_mb < 12 * 1024;
+    const bool ram_tight     = lowmem_mode
+                               || (avail_ram_mb  > 0 && avail_ram_mb  < 24 * 1024);
+    const bool vram_tight    = (lowmem_mode && gpu_active)
+                               || (avail_vram_mb > 0 && avail_vram_mb < 12 * 1024);
 
     std::vector<std::string> auto_applied;
 
@@ -654,7 +674,10 @@ int main(int argc, char** argv) {
     }
 
     if (!auto_applied.empty()) {
-        siam::log_hint("auto-safe defaults applied (RAM %ld MB%s%s%s):",
+        const char* source = lowmem_mode ? "--lowmem requested"
+                                         : "memory-tight host detected";
+        siam::log_hint("lowmem preset applied (%s; RAM %ld MB%s%s%s):",
+                       source,
                        avail_ram_mb,
                        gpu_active && avail_vram_mb > 0 ? ", VRAM " : "",
                        gpu_active && avail_vram_mb > 0 ?
@@ -671,13 +694,14 @@ int main(int argc, char** argv) {
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),
                   tpm_mode ? "  --tpm" : "",
                   upsample_mode ? "  --upsample" : "",
-                  engine_tuning.cpu_arena ? "" : "  --no-arena");
+                  engine_tuning.cpu_arena ? "" : "  --no-arena",
+                  lowmem_mode ? "  --lowmem" : "");
 
     // Pre-flight memory check: warn if available RAM is below the
     // expected peak for the current config. We can't trap SIGKILL

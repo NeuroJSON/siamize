@@ -100,6 +100,16 @@ function nii = siamize(varargin)
 %                                      --no-arena flag. Saves ~16 GB peak
 %                                      RSS on the 18-class network at the
 %                                      cost of ~1.5x wall time.
+%               'lowmem'              logical (default false). True forces
+%                                      the lowmem preset (smaller patch,
+%                                      no arena, smaller thread cap, tight
+%                                      VRAM knobs); mirrors the CLI
+%                                      --lowmem flag. The same preset is
+%                                      auto-applied when available RAM is
+%                                      < 24 GB or GPU VRAM is < 12 GB.
+%                                      Pass 'lowmem', true to force on
+%                                      otherwise-large hosts (e.g. shared
+%                                      box with limited memory budget).
 %               'verbose'             logical (default false)
 %
 %            CUDA EP tuning (only used when compute involves CUDA,
