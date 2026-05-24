@@ -608,7 +608,7 @@ int main(int argc, char** argv) {
                      : siam::load_nifti_ras(input_path);
 
     siam::log_cont("canon shape (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
-                   ")  zooms (X,Y,Z) (%.3f,%.3f,%.3f) mm",
+                   ")  voxel size (X,Y,Z) (%.3f,%.3f,%.3f) mm",
                    img.volume.shape[0], img.volume.shape[1], img.volume.shape[2],
                    img.zooms_canon[0], img.zooms_canon[1], img.zooms_canon[2]);
 

@@ -33,6 +33,7 @@ so call sites stay uncluttered.
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 #ifdef MATLAB_MEX_FILE
     #include "mex.h"
@@ -56,6 +57,63 @@ bool g_verbose = false;          ///< verbose-mode flag (see set_verbose)
 /// (LOG_TAG_COL - 2) overflow without padding so the body column
 /// shifts right by the overflow amount on those lines.
 constexpr int LOG_TAG_COL = 10;
+
+/*******************************************************************************/
+/*! \fn    const char* tag_color(const char* tag)
+    \brief Pick an ANSI color escape for a tag name (TTY-only path)
+
+    Three buckets:
+
+      - `[warn]`            -> bold yellow (highest visibility)
+      - `[hint]`            -> bold cyan (suggestion)
+      - everything else     -> bold cyan (default accent)
+
+    The CLI calls log_tag heavily; using a single accent for the
+    default keeps the eye anchored on the column without
+    rainbow-colouring every distinct phase.
+*/
+const char* tag_color(const char* tag) {
+    if (!tag) {
+        return "\033[1;36m";
+    }
+
+    if (std::strcmp(tag, "warn") == 0) {
+        return "\033[1;33m";    // bold yellow
+    }
+
+    if (std::strcmp(tag, "hint") == 0) {
+        return "\033[1;36m";    // bold cyan
+    }
+
+    return "\033[1;36m";        // default: bold cyan
+}
+
+#define SIAM_ANSI_RESET "\033[0m"
+
+/*******************************************************************************/
+/*! \fn    void format_padded_tag(char* out, size_t outsz, const char* tag, bool use_color)
+    \brief Build the column-aligned `[tag]<padding> ` prefix string
+
+    The visible column width is LOG_TAG_COL + 1 (one trailing space).
+    When `use_color` is true the bracketed prefix is wrapped in ANSI
+    color codes, but the padding is computed against the *visible*
+    length so column alignment is preserved on coloured output.
+*/
+void format_padded_tag(char* out, size_t outsz, const char* tag, bool use_color) {
+    const int visible = 2 + static_cast<int>(std::strlen(tag));  // "[%s]"
+    int pad = LOG_TAG_COL - visible;
+
+    if (pad < 0) {
+        pad = 0;
+    }
+
+    if (use_color) {
+        std::snprintf(out, outsz, "%s[%s]%s%*s ",
+                      tag_color(tag), tag, SIAM_ANSI_RESET, pad, "");
+    } else {
+        std::snprintf(out, outsz, "[%s]%*s ", tag, pad, "");
+    }
+}
 
 /*******************************************************************************/
 /*! \fn    void emit(const char* s)
@@ -123,10 +181,12 @@ void log_tag(const char* tag, const char* fmt, ...) {
         return;
     }
 
-    char prefix[64];
-    std::snprintf(prefix, sizeof(prefix), "[%s]", tag);
-    char head[80];
-    std::snprintf(head, sizeof(head), "%-*s ", LOG_TAG_COL, prefix);
+    bool color = false;
+#ifndef MATLAB_MEX_FILE
+    color = SIAM_ISATTY_STDERR();
+#endif
+    char head[96];
+    format_padded_tag(head, sizeof(head), tag, color);
 
     va_list ap;
     va_start(ap, fmt);
@@ -178,10 +238,12 @@ void log_progress(const char* tag, long long current, long long total) {
         return;
     }
 
-    char prefix[64];
-    std::snprintf(prefix, sizeof(prefix), "[%s]", tag);
-    char head[80];
-    std::snprintf(head, sizeof(head), "%-*s ", LOG_TAG_COL, prefix);
+    bool color = false;
+#ifndef MATLAB_MEX_FILE
+    color = SIAM_ISATTY_STDERR();
+#endif
+    char head[96];
+    format_padded_tag(head, sizeof(head), tag, color);
 
     // Fixed-width 20-cell bar, ASCII so it renders on every terminal.
     const int BAR_W = 20;
@@ -245,8 +307,12 @@ void log_progress(const char* tag, long long current, long long total) {
     \brief Emit an unconditional warning line (ignores the verbose flag)
 */
 void log_warn(const char* fmt, ...) {
-    char head[16];
-    std::snprintf(head, sizeof(head), "%-*s ", LOG_TAG_COL, "[warn]");
+    bool color = false;
+#ifndef MATLAB_MEX_FILE
+    color = SIAM_ISATTY_STDERR();
+#endif
+    char head[96];
+    format_padded_tag(head, sizeof(head), "warn", color);
 
     va_list ap;
     va_start(ap, fmt);
@@ -259,8 +325,12 @@ void log_warn(const char* fmt, ...) {
     \brief Emit an unconditional hint line (ignores the verbose flag)
 */
 void log_hint(const char* fmt, ...) {
-    char head[16];
-    std::snprintf(head, sizeof(head), "%-*s ", LOG_TAG_COL, "[hint]");
+    bool color = false;
+#ifndef MATLAB_MEX_FILE
+    color = SIAM_ISATTY_STDERR();
+#endif
+    char head[96];
+    format_padded_tag(head, sizeof(head), "hint", color);
 
     va_list ap;
     va_start(ap, fmt);
