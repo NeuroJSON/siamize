@@ -126,25 +126,17 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
-      - name: Cache fold_0 weight
-        id: cache-fold0
-        uses: actions/cache@v4
-        with:
-          path: models/fold_0_fp16.onnx
-          # Cache key bumped from v2 -> v3 to invalidate a stale
-          # pre-dynamic_axes export. The previous v2 key kept serving
-          # a fixed-shape (256,256,192) ONNX that rejected any other
-          # patch size (e.g. --lowmem's 192x192x128). tools/onnx_export
-          # now emits dynamic spatial axes (D, H, W) -- bump to v3 to
-          # force a re-fetch from $SIAMIZE_WEIGHTS_URL.
-          key: siam-fold0-fp16-v3
-
-      - name: Fetch + extract fold_0 weight (cache miss)
-        if: steps.cache-fold0.outputs.cache-hit != 'true'
+      - name: Fetch + extract fold_0 weight (always fresh, no cache)
+        # The actions/cache layer was removed because a stale-cache
+        # entry can persist a pre-dynamic_axes ONNX across cache-key
+        # bumps once the bump itself happened to fetch a fixed-shape
+        # build. 91 MB download is fast (~5 s on GHA's network);
+        # the cache savings aren't worth the staleness risk.
         env:
           URL: ${{ vars.SIAMIZE_WEIGHTS_URL }}
         run: |
           mkdir -p models
+          rm -f models/fold_0_fp16.onnx*
           echo "Downloading $URL"
           # Dispatch by the actual URL extension so the repo variable can
           # point at .gz (preferred), .onnx (uncompressed), or .7z (legacy)
@@ -173,6 +165,37 @@ jobs:
               ;;
           esac
           ls -la models/
+
+      - name: Verify ONNX has dynamic spatial axes
+        # If the weight at $SIAMIZE_WEIGHTS_URL is still a
+        # pre-dynamic_axes export, --lowmem -P 192x192x128 will fail
+        # with "Got invalid dimensions". Fail fast here with a
+        # clear message instead of crashing inside ORT later.
+        shell: bash
+        run: |
+          python3 -m pip install --quiet onnx
+          python3 - <<'PY'
+          import sys, onnx
+          m = onnx.load("models/fold_0_fp16.onnx")
+          dims = [
+              (d.dim_param or d.dim_value)
+              for d in m.graph.input[0].type.tensor_type.shape.dim
+          ]
+          print("input dims:", dims)
+          # spatial axes (2, 3, 4) must be symbolic for --lowmem to
+          # work; if they are integers, the export is fixed-shape.
+          spatial = dims[2:5]
+          if any(isinstance(d, int) and d > 0 for d in spatial):
+              print()
+              print("ERROR: SIAMIZE_WEIGHTS_URL serves a FIXED-SHAPE ONNX.")
+              print("       The ONNX exported by tools/onnx_export/export.py")
+              print("       uses dynamic_axes={'D','H','W'} for axes 2,3,4.")
+              print("       Update the Actions variable SIAMIZE_WEIGHTS_URL")
+              print("       (Settings -> Secrets and variables -> Actions ->")
+              print("       Variables) to point at a re-exported file.")
+              sys.exit(1)
+          print("OK: spatial axes are symbolic; --lowmem patch shrink will work.")
+          PY
 
       - name: Configure (CUDA EP)
         run: |
