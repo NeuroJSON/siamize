@@ -65,13 +65,23 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          # Tag push -> use tag verbatim (strip leading 'v' for the bundle).
+          # Branch push -> base version + short SHA so successive main builds
+          # are uniquely-named in the artifact list.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
           case "${{ runner.os }}" in
             Linux)   PLAT=linux-x86_64 ;;
             macOS)   PLAT=macos ;;
             Windows) PLAT=windows-x64 ;;
           esac
-          scripts/package.sh cpu "siamize-${PLAT}-cpu"
-          echo "BUNDLE=siamize-${PLAT}-cpu" >> "$GITHUB_ENV"
+          BUNDLE="siamize-${VER}-${PLAT}-cpu"
+          scripts/package.sh cpu "$BUNDLE"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
@@ -196,12 +206,19 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
           case "${{ runner.os }}" in
             Linux)   PLAT=linux-x86_64 ;;
             Windows) PLAT=windows-x64 ;;
           esac
-          scripts/package.sh cuda "siamize-${PLAT}-cuda"
-          echo "BUNDLE=siamize-${PLAT}-cuda" >> "$GITHUB_ENV"
+          BUNDLE="siamize-${VER}-${PLAT}-cuda"
+          scripts/package.sh cuda "$BUNDLE"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
@@ -335,13 +352,22 @@ jobs:
 
       - name: Package
         shell: bash
-        run: scripts/package.sh mex "siamex-${{ matrix.label }}"
+        run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
+          BUNDLE="siamex-${VER}-${{ matrix.label }}"
+          scripts/package.sh mex "$BUNDLE"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: siamex-${{ matrix.label }}
-          path: siamex-${{ matrix.label }}.zip
+          name: ${{ env.BUNDLE }}
+          path: ${{ env.BUNDLE }}.zip
           if-no-files-found: error
           retention-days: 14
 
