@@ -1,8 +1,8 @@
 // siamize: end-to-end SIAM v0.3 brain segmentation in C++.
 //
 // CLI mirrors the Python siam-pred:
-//   siamize -i input.nii.gz -o output.nii.gz --models fold_0.onnx[,fold_1.onnx,...]
-//   Optional: --threads N, -v
+//   siamize -i input.nii.gz -o output.nii.gz [-M fold_0.onnx[,fold_1.onnx,...]]
+//   Optional: -c auto|cpu|cuda|tensorrt, -G N (GPU id), -t N (threads), -v
 
 #include "siam.h"
 #include "nifti_io.h"
@@ -67,19 +67,18 @@ std::string expand_fold_shortcut(const std::string& tok) {
 
 void usage(const char* exe) {
     std::fprintf(stderr,
-                 "Usage: %s -i input.nii(.gz) -o output.nii.gz --models fold_0.onnx[,fold_1.onnx,...]\n"
-                 "          [--threads N] [-v]\n"
+                 "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
                  "\n"
                  "  -i, --input         input NIfTI (.nii or .nii.gz, 3D)\n"
                  "  -o, --output        output label NIfTI (.nii.gz)\n"
-                 "      --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
+                 "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
-                 "                      --models 0,1,2,3,4 expands to fold_<N>_fp16.onnx). Bare\n"
+                 "                      -M 0,1,2,3,4 expands to fold_<N>_fp16.onnx). Bare\n"
                  "                      basenames are looked up under $SIAMIZE_CACHE_DIR\n"
                  "                      (default $HOME/.cache/siamize/models/) and auto-downloaded\n"
                  "                      from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
-                 "      --device D      execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
+                 "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA (if compiled in) then falls back to CPU.\n"
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
                  "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
@@ -94,22 +93,22 @@ void usage(const char* exe) {
                  "                         `heuristic` is the smallest-workspace option.\n"
                  "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
                  "                         e.g. 6G). Default 0 = no explicit cap.\n"
-                 "      --gpuid N       CUDA EP device_id (0-based index, default 0 = first visible GPU).\n"
+                 "  -G, --gpu N         CUDA EP device_id (0-based index, default 0 = first visible GPU).\n"
                  "                         Honors any CUDA_VISIBLE_DEVICES filter set in the environment;\n"
                  "                         use `nvidia-smi --query-gpu=index,name --format=csv,noheader`\n"
                  "                         to see what physical GPU each index maps to.\n"
-                 "      --threads N     ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs)\n"
-                 "      --tpm-out P     also save a 4D float32 tissue probability map (TPM) to P.\n"
+                 "  -t, --thread N      ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs).\n"
+                 "      --tpm P         also save a 4D float32 tissue probability map (TPM) to P.\n"
                  "                      Output shape is (X, Y, Z, num_classes) -- softmax over the\n"
                  "                      18 fold-averaged class logits, reoriented to match the input.\n"
                  "                      Use .nii.gz to gzip on save. Raw size ~3 GB; gzipped ~250 MB.\n"
-                 "      --tpm-temperature T  softmax temperature for the TPM output (default 1.0).\n"
+                 "      --tpm-t T       softmax temperature for the TPM output (default 1.0).\n"
                  "                      T > 1 softens the distribution (more graded boundaries,\n"
                  "                      better-calibrated probabilities); T < 1 sharpens. Affects\n"
                  "                      only the TPM output, not the argmax label volume.\n"
-                 "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans)\n"
-                 "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training)\n"
-                 "      --classes N     number of output classes, default 18 (SIAM v0.3)\n"
+                 "      --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
+                 "      --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
+                 "      --classes N     number of output classes, default 18 (SIAM v0.3).\n"
                  "  -v, --verbose       print progress\n"
                  "  -h, --help\n",
                  exe);
@@ -145,9 +144,9 @@ int main(int argc, char** argv) {
             input_path = need();
         } else if (a == "-o" || a == "--output") {
             output_path = need();
-        } else if (a == "--models") {
+        } else if (a == "-M" || a == "--models") {
             models_csv = need();
-        } else if (a == "--device") {
+        } else if (a == "-c" || a == "--compute") {
             device = need();
 
             // Allow `trt` as an alias for `tensorrt`.
@@ -158,13 +157,13 @@ int main(int argc, char** argv) {
             if (device != "auto" && device != "cpu" && device != "cuda"
                     && device != "tensorrt") {
                 std::fprintf(stderr,
-                             "--device must be auto|cpu|cuda|tensorrt (got '%s')\n",
+                             "-c/--compute must be auto|cpu|cuda|tensorrt (got '%s')\n",
                              device.c_str());
                 return 2;
             }
         } else if (a == "--trt-cache-dir") {
             trt_cache_dir = need();
-        } else if (a == "--threads") {
+        } else if (a == "-t" || a == "--thread") {
             threads = std::stoi(need());
         } else if (a == "--spacing") {
             target_spacing = std::stof(need());
@@ -206,16 +205,16 @@ int main(int argc, char** argv) {
                              s.c_str());
                 return 2;
             }
-        } else if (a == "--gpuid") {
+        } else if (a == "-G" || a == "--gpu") {
             cuda_tuning.gpuid = std::stoi(need());
-        } else if (a == "--tpm-out") {
+        } else if (a == "--tpm") {
             tpm_out = need();
-        } else if (a == "--tpm-temperature") {
+        } else if (a == "--tpm-t") {
             tpm_temperature = std::stof(need());
 
             if (tpm_temperature <= 0.0f) {
                 std::fprintf(stderr,
-                             "--tpm-temperature must be > 0 (got '%g')\n",
+                             "--tpm-t must be > 0 (got '%g')\n",
                              tpm_temperature);
                 return 2;
             }
@@ -255,7 +254,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Default to single-fold fold_0 when --models isn't given. resolve_model_path
+    // Default to single-fold fold_0 when -M/--models isn't given. resolve_model_path
     // below will look in $HOME/.cache/siamize/models/ and, on a miss, curl the
     // weight from the NeuroJSON URL (see weights.h for the default,
     // overridable via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
@@ -264,7 +263,7 @@ int main(int argc, char** argv) {
 
         if (verbose) {
             std::fprintf(stderr,
-                         "--models not given; defaulting to single-fold "
+                         "-M/--models not given; defaulting to single-fold "
                          "fold_0_fp16.onnx (auto-downloaded if missing).\n");
         }
     }
@@ -345,10 +344,10 @@ int main(int argc, char** argv) {
     Volume resampled = siam::resample_cubic(crop.cropped, new_shape[0], new_shape[1], new_shape[2]);
     crop.cropped = Volume{};  // free
 
-    // sliding window. If --device auto chose CUDA/TensorRT and the
+    // sliding window. If -c auto chose CUDA/TensorRT and the
     // session aborts mid-Run with an allocation failure (tight VRAM,
     // contention with other GPU clients, etc.), fall back to CPU and
-    // retry. --device cuda / --device tensorrt stay strict -- the
+    // retry. -c cuda / -c tensorrt stay strict -- the
     // exception re-raises so the user sees the explicit failure they
     // asked for.
     LogitsVolume logits;
@@ -367,8 +366,8 @@ int main(int argc, char** argv) {
         if (device == "auto" && oom) {
             std::fprintf(stderr,
                          "  GPU allocation failed: %s\n"
-                         "  --device auto falling back to CPU. To force CPU from the\n"
-                         "  start, pass `--device cpu`; for tight-VRAM GPUs try also\n"
+                         "  -c auto falling back to CPU. To force CPU from the\n"
+                         "  start, pass `-c cpu`; for tight-VRAM GPUs try also\n"
                          "  `--cudnn-max-workspace 0 --arena-extend same` before\n"
                          "  giving up on GPU.\n",
                          e.what());

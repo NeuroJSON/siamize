@@ -174,8 +174,8 @@ jobs:
           ${{ matrix.binary }} \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
-              --models models/fold_0_fp16.onnx \
-              --device auto \
+              -M models/fold_0_fp16.onnx \
+              -c auto \
               -v 2>&1 | tee siamize.log
 
       - name: Verify CPU fallback happened

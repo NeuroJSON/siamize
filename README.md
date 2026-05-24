@@ -119,11 +119,11 @@ cmake -S . -B build -DSIAMIZE_GPU=cuda
 cmake --build build -j
 ```
 
-The binary then accepts `--device {auto,cpu,cuda}` (default `auto`). On
+The binary then accepts `-c {auto,cpu,cuda}` (default `auto`). On
 `auto` it tries to register the CUDA Execution Provider and falls back to
 CPU if the runtime libraries (`libcudart`, `libcudnn`, `libcublasLt`) can't
-be loaded. Pass `--device cuda` to force GPU and fail loudly if it isn't
-available; pass `--device cpu` to skip GPU even when compiled in.
+be loaded. Pass `-c cuda` to force GPU and fail loudly if it isn't
+available; pass `-c cpu` to skip GPU even when compiled in.
 
 CUDA runtime libraries are loaded via `dlopen`, so you may need to set
 `LD_LIBRARY_PATH` to include their location. With PyTorch-managed CUDA
@@ -132,7 +132,7 @@ CUDA runtime libraries are loaded via `dlopen`, so you may need to set
 ```bash
 NV=$(python3 -c "import os, nvidia; print(os.path.dirname(nvidia.__file__))")
 export LD_LIBRARY_PATH="$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/cudnn/lib:$NV/cufft/lib:$NV/curand/lib:$NV/cuda_nvrtc/lib:$NV/nvjitlink/lib:$LD_LIBRARY_PATH"
-build/siamize -i ... --device cuda ...
+build/siamize -i ... -c cuda ...
 ```
 
 With a system CUDA install, point at it via the standard `CUDA_HOME` env
@@ -142,7 +142,7 @@ var (set by the NVIDIA installer on most distros, otherwise default
 ```bash
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
-build/siamize -i ... --device cuda ...
+build/siamize -i ... -c cuda ...
 ```
 
 ORT 1.26 requires **cuDNN 9** with a kernel image for your GPU's compute
@@ -186,7 +186,7 @@ $env:PATH = "$env:CUDA_PATH\bin;" + $env:PATH
 # cmd.exe equivalent:
 # set PATH=%CUDA_PATH%\bin;%PATH%
 
-.\siamize.exe -i input.nii.gz -o pred.nii.gz --models 0 --device cuda
+.\siamize.exe -i input.nii.gz -o pred.nii.gz -M 0 -c cuda
 ```
 
 cuDNN's Windows installer copies its DLLs into `%CUDA_PATH%\bin` (the
@@ -208,7 +208,7 @@ $env:PATH = "$NV\cublas\bin;$NV\cuda_runtime\bin;$NV\cudnn\bin;" `
           + "$NV\cufft\bin;$NV\curand\bin;$NV\cuda_nvrtc\bin;" `
           + "$NV\nvjitlink\bin;" + $env:PATH
 
-.\siamize.exe -i input.nii.gz -o pred.nii.gz --models 0 --device cuda
+.\siamize.exe -i input.nii.gz -o pred.nii.gz -M 0 -c cuda
 ```
 
 Note: the pip wheels put their DLLs under `bin\` on Windows (vs. `lib\`
@@ -237,8 +237,8 @@ TRT=$(python3 -c "import os, tensorrt_libs; print(os.path.dirname(tensorrt_libs.
 export LD_LIBRARY_PATH="$TRT:$LD_LIBRARY_PATH"
 
 build/siamize -i input.nii.gz -o output.nii.gz \
-    --models models/fold_0_fp16.onnx \
-    --device tensorrt \
+    -M models/fold_0_fp16.onnx \
+    -c tensorrt \
     --trt-cache-dir $HOME/.cache/siamize/trt
 ```
 
@@ -273,17 +273,17 @@ EP**. The TRT path stays available for the lab that needs it.
 ```bash
 # Full 5-fold ensemble (the digit shortcut expands to fold_<N>_fp16.onnx;
 # any missing weight auto-downloads into the shared cache).
-build/siamize -i input.nii.gz -o output.nii.gz --models 0,1,2,3,4 -v
+build/siamize -i input.nii.gz -o output.nii.gz -M 0,1,2,3,4 -v
 
 # Single-fold prediction is also supported:
-build/siamize -i input.nii.gz -o output.nii.gz --models 0 -v
+build/siamize -i input.nii.gz -o output.nii.gz -M 0 -v
 
 # Explicit paths still work alongside shortcuts:
 build/siamize -i input.nii.gz -o output.nii.gz \
-    --models models/fold_0_fp16.onnx,models/fold_1_fp16.onnx
+    -M models/fold_0_fp16.onnx,models/fold_1_fp16.onnx
 ```
 
-`--threads` defaults to `0` (all available cores via
+`-t/--thread` defaults to `0` (all available cores via
 `std::thread::hardware_concurrency()`); set it explicitly only if you
 want to throttle CPU use.
 
@@ -464,7 +464,7 @@ All measurements use the bundled `tests/sub-01_T1w.nii.gz` (160×192×192,
 
 | Run | Time |
 |---|---|
-| C++ 5-fold ensemble (`siamize --device cpu`) | 634 s (10.5 min) |
+| C++ 5-fold ensemble (`siamize -c cpu`) | 634 s (10.5 min) |
 | C++ single fold | 126 s |
 | Python ORT 5-fold | 781 s (13 min) |
 | Original `siam-pred` 5-fold CPU (per upstream README) | ~25 min |
