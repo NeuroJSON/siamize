@@ -1,36 +1,64 @@
-// siamize MEX wrapper for MATLAB / Octave.
-//
-// Signature (MATLAB):
-//   labels = siamize(img, affine, models)
-//   labels = siamize(img, affine, models, opts)
-//
-// Inputs
-//   img      -- 3D numeric array. Any standard MATLAB dtype (uint8/int16/
-//               int32/uint16/uint32/single/double). Interpreted as a NIfTI
-//               voxel grid in MATLAB's natural [X, Y, Z] column-major layout.
-//   affine   -- 3x4 or 4x4 double matrix. Same convention as jsonlab's
-//               loadnifti(): nii.NIFTIHeader.Affine, i.e. rows = (R, A, S)
-//               world axes, columns = voxel axes (last column = origin).
-//   models   -- char (single path) or cellstr (list of .onnx folds). Logits
-//               are averaged across folds.
-//   opts     -- optional struct with any of:
-//                 .device       'auto' (default) | 'cpu' | 'cuda' | 'tensorrt'
-//                 .threads      int (default 0 = all available cores)
-//                 .patch        [pz, py, px] (default [256 256 192])
-//                 .spacing      double (default 0.75 mm)
-//                 .classes      int (default 18)
-//                 .trt_cache    char (default ~/.cache/siamize/trt)
-//                 .verbose      logical (default false)
-//
-// Output
-//   labels   -- uint8 3D array of the SAME shape as `img`, in input axis
-//               order. Suitable for direct round-trip via:
-//                 nii = loadnifti('input.nii.gz');
-//                 nii_out = nii;
-//                 nii_out.NIFTIData = siamize(nii.NIFTIData, ...
-//                                              nii.NIFTIHeader.Affine, ...
-//                                              {'fold_0_fp16.onnx'});
-//                 savenifti(nii_out, 'output.nii.gz');
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    siamize_mex.cpp
+\brief   MATLAB / GNU Octave MEX bridge for the siamize inference pipeline
+
+Bridges the C++ inference core (siam::sliding_window + preprocess +
+orient) to MATLAB / Octave. The pure-MATLAB dispatcher in
+matlab/siamize.m massages user-friendly inputs (file paths, jnifti
+structs, 3D arrays, default affines) into this MEX's strict
+positional ABI, so end-users normally call siamize(), not the MEX
+directly.
+
+MEX signature (low-level ABI):
+
+    labels = siamex(img, affine, models)
+    labels = siamex(img, affine, models, opts)
+
+Inputs:
+
+  - img:     3D numeric array. Any standard MATLAB dtype
+             (uint8 / int16 / int32 / uint16 / uint32 / single /
+             double). Interpreted as a NIfTI voxel grid in MATLAB's
+             natural (X, Y, Z) column-major layout.
+  - affine:  3x4 or 4x4 double matrix in jsonlab's loadnifti
+             convention (rows = world R/A/S, columns = voxel axes
+             with last column = origin).
+  - models:  char (one path) or cellstr / cell array of paths;
+             logits are averaged across folds. Single-digit
+             shortcuts ("0".."9") are expanded to
+             "fold_<d>_fp16.onnx".
+  - opts:    optional struct with any of `.device`, `.threads`,
+             `.patch`, `.spacing`, `.classes`, `.tpm`, `.tpm_t`,
+             `.trt_cache`, `.gpu`, `.verbose`. See read_opts() in
+             this file for parsing details.
+
+Output:
+
+  - labels:  uint8 3D array of the SAME shape as `img`, in input
+             axis order (suitable for round-trip via savenifti),
+             OR float32 4D (X, Y, Z, C) when `opts.tpm` is true.
+
+MEX and CLI share the same `siamize_core` static library, so MEX
+predictions are bit-identical to `siamize -i ... -o ...` when run
+with matching options.
+*******************************************************************************/
 
 #include "mex.h"
 
@@ -53,10 +81,27 @@
 
 namespace {
 
+/*******************************************************************************/
+/*! \fn    void die(const char* id, const std::string& msg)
+    \brief Raise a MATLAB error and never return
+
+    Thin wrapper around `mexErrMsgIdAndTxt` that lets us throw with a
+    std::string message. The MEX runtime longjmps out of the calling
+    function, so callers should not assume control returns.
+
+    \param  id   MATLAB error identifier (`"siamize:..."`)
+    \param  msg  human-readable message
+*/
 void die(const char* id, const std::string& msg) {
     mexErrMsgIdAndTxt(id, "%s", msg.c_str());
 }
 
+/*******************************************************************************/
+/*! \fn    std::string mx_to_string(const mxArray* a)
+    \brief Convert a MATLAB char array to a std::string
+    \param  a  mxArray that must be of class `char` or `string`
+    \return    its contents as a UTF-8 std::string
+*/
 std::string mx_to_string(const mxArray* a) {
     if (!mxIsChar(a)) {
         die("siamize:type", "expected a char array");
@@ -79,6 +124,20 @@ std::string mx_to_string(const mxArray* a) {
 // using affine-driven reorientation. MATLAB column-major (X-fastest) gives
 // us the same memory order as our (Z, Y, X) Volume with X-fastest stride.
 template <typename SrcT>
+/*******************************************************************************/
+/*! \fn    template <typename SrcT>
+           void load_volume(const SrcT* src,
+                            int64_t X, int64_t Y, int64_t Z,
+                            const std::array<int, 3>& dst,
+                            const std::array<int, 3>& sgn,
+                            siam::Volume& canon)
+    \brief Reorient a MATLAB column-major voxel buffer into canonical (Z, Y, X)
+
+    Thin adapter over copy_reorient_to_canonical that exists so the
+    MEX dispatch code can dispatch on the input mxClassID via a
+    template instantiation without dragging the orient.h templates
+    into the dispatch site.
+*/
 void load_volume(const SrcT* src, int64_t X, int64_t Y, int64_t Z,
                  const std::array<float, 16>& affine,
                  siam::Volume& canon_out,
@@ -89,6 +148,19 @@ void load_volume(const SrcT* src, int64_t X, int64_t Y, int64_t Z,
     affine_canon_out = siam::canonicalize_affine(affine, dst, sgn, {X, Y, Z});
 }
 
+/*******************************************************************************/
+/*! \fn    std::array<float, 16> read_affine(const mxArray* a)
+    \brief Read a 3x4 or 4x4 MATLAB affine into siamize's row-major std::array
+
+    MATLAB stores matrices column-major, so this routine transposes
+    on the fly: `M(r, c)` from MATLAB ends up at `affine[r*4 + c]`
+    in the returned array. Accepts both 3x4 (jsonlab loadnifti
+    convention) and 4x4 (jnifti annotated form expanded) input;
+    when 3x4, the missing fourth row is filled with `(0, 0, 0, 1)`.
+
+    \param  a  the mxArray (must be class `double` or `single`)
+    \return    row-major 4x4 affine as a 16-float std::array
+*/
 std::array<float, 16> read_affine(const mxArray* a) {
     if (mxIsComplex(a)) {
         die("siamize:affine", "affine must be real");
@@ -142,6 +214,18 @@ std::array<float, 16> read_affine(const mxArray* a) {
     return aff;
 }
 
+/*******************************************************************************/
+/*! \fn    std::vector<std::string> read_models(const mxArray* a)
+    \brief Parse the `models` argument into a list of resolved fold paths
+
+    Accepts a single char path, a cell array of char paths, or a
+    cell array mixing paths and single-digit fold shortcuts. Each
+    token is run through weights::resolve_model_path so missing
+    weights auto-download from NeuroJSON.
+
+    \param  a  the mxArray (char | cell-of-char | numeric scalar)
+    \return    list of absolute .onnx paths
+*/
 std::vector<std::string> read_models(const mxArray* a) {
     std::vector<std::string> out;
 
@@ -167,24 +251,59 @@ std::vector<std::string> read_models(const mxArray* a) {
     return out;
 }
 
+/**
+ * \struct Opts
+ * \brief  Parsed view of the MEX `opts` struct (defaults + per-field types)
+ *
+ * One C++ field per documented MATLAB option. Default values match
+ * the CLI defaults so MEX and CLI produce identical results when
+ * the user passes no overrides.
+ */
 struct Opts {
-    std::string device = "auto";
-    int threads = 0;
-    std::array<int64_t, 3> patch = {256, 256, 192};
-    float spacing = 0.75f;
-    int64_t classes = 18;
-    std::string trt_cache;
-    bool verbose = false;
-    siam::CudaTuning cuda_tuning;
-    bool  tpm = false;               // true -> output 4D float32 TPM instead of 3D labels
-    float tpm_temperature = 1.0f;    // softmax temperature for the TPM
+    std::string device = "auto";                       /**< "auto" | "cpu" | "cuda" | "tensorrt" */
+    int threads = 0;                                   /**< 0 = std::thread::hardware_concurrency() */
+    std::array<int64_t, 3> patch = {256, 256, 192};    /**< sliding-window patch (Z, Y, X) */
+    float spacing = 0.75f;                             /**< target isotropic voxel size, mm */
+    int64_t classes = 18;                              /**< number of SIAM output classes */
+    std::string trt_cache;                             /**< TensorRT engine cache directory */
+    bool verbose = false;                              /**< progress messages to stderr */
+    siam::CudaTuning cuda_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
+    bool  tpm = false;                                 /**< true -> emit 4D float32 TPM, false -> 3D labels */
+    float tpm_temperature = 1.0f;                      /**< softmax temperature for the TPM */
 };
 
+/*******************************************************************************/
+/*! \fn    double opt_double(const mxArray* s, const char* name, double fallback)
+    \brief Read an optional numeric scalar field from a MATLAB struct
+
+    Convenience helper used by read_opts to pull `.threads`, `.spacing`,
+    etc. out of the user-supplied opts struct without verbosely
+    typing `mxGetField` + `mxGetScalar` everywhere.
+
+    \param  s         pointer to the opts struct mxArray
+    \param  name      field name to look up
+    \param  fallback  value returned when the field is absent
+    \return           field's numeric scalar, or \a fallback
+*/
 double opt_double(const mxArray* s, const char* name, double fallback) {
     const mxArray* f = mxGetField(s, 0, name);
     return (f && mxIsDouble(f) && !mxIsEmpty(f)) ? mxGetScalar(f) : fallback;
 }
 
+/*******************************************************************************/
+/*! \fn    void read_opts(const mxArray* a, Opts& o)
+    \brief Parse the optional `opts` struct argument into the Opts state object
+
+    Walks every supported field in the input struct (device, threads,
+    patch, spacing, classes, tpm, tpm_t, trt_cache, gpu, verbose),
+    coercing each to its native C++ type and falling back to the
+    defaults already initialized in \a o for any missing fields.
+    Unknown fields are silently ignored so newer MATLAB-side
+    wrappers can pass forward-compatible options.
+
+    \param  a  the opts struct mxArray (must be class `struct`)
+    \param  o  output: parsed options
+*/
 void read_opts(const mxArray* a, Opts& o) {
     if (!mxIsStruct(a)) {
         die("siamize:opts", "opts must be a struct");
@@ -290,6 +409,24 @@ void read_opts(const mxArray* a, Opts& o) {
 
 }  // namespace
 
+/*******************************************************************************/
+/*! \fn    void mexFunction(int nlhs, mxArray* plhs[],
+                            int nrhs, const mxArray* prhs[])
+    \brief Entry point invoked by the MATLAB / Octave MEX runtime
+
+    Parses the positional arguments (img, affine, models[, opts])
+    through the helpers above, dispatches the input voxel buffer on
+    mxClassID to load_volume<SrcT>(), runs the inference pipeline
+    (preprocess -> sliding_window -> postprocess), and constructs
+    either a 3D uint8 labelmap or a 4D float32 TPM mxArray
+    depending on `opts.tpm`. Errors are surfaced to MATLAB via
+    die() / mexErrMsgIdAndTxt.
+
+    \param  nlhs  number of expected output mxArrays
+    \param  plhs  output mxArray vector (length = nlhs)
+    \param  nrhs  number of input mxArrays
+    \param  prhs  input mxArray vector (length = nrhs)
+*/
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     if (nrhs < 3) {
         die("siamize:nrhs",
