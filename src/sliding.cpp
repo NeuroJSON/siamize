@@ -391,11 +391,18 @@ LogitsVolume sliding_window(const Volume& data,
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         const bool will_use_gpu = (use_trt || use_cuda || (!ep_probed && (trt_try || cuda_try)));
+        (void)will_use_gpu;
 
-        if (!will_use_gpu) {
-            opts.DisableCpuMemArena();
-            opts.DisableMemPattern();
-        }
+        // Leave ORT's CPU memory arena and memory-pattern optimizer ON
+        // (the ORT defaults). An earlier revision disabled both to keep
+        // RSS smaller, but profiling on a 64-core Zen2 showed that the
+        // disabled path produced ~75M minor page faults and a 43% dTLB
+        // miss rate -- per-op mmap/munmap churn that dragged ~88% of
+        // system time into the kernel and capped scaling at ~18 cores.
+        // With the arena enabled, the same run drops to ~7M page faults,
+        // ~27 cores of utilization, and 1.5x wall-time speedup at the
+        // cost of ~2x peak RSS (12 GB -> 28 GB on the 18-class SIAM
+        // network). Output is byte-identical.
 
 #ifdef SIAMIZE_HAS_TENSORRT
 
@@ -518,8 +525,9 @@ LogitsVolume sliding_window(const Volume& data,
                 }
 
                 use_cuda = false;
-                opts.DisableCpuMemArena();
-                opts.DisableMemPattern();
+                // CPU fallback path: keep the arena enabled. See the
+                // note at the top of this loop for the profiling
+                // analysis behind that choice.
             }
         }
 
