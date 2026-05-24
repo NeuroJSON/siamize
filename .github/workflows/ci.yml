@@ -131,7 +131,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models/fold_0_fp16.onnx
-          key: siam-fold0-fp16-v2
+          # Cache key bumped from v2 -> v3 to invalidate a stale
+          # pre-dynamic_axes export. The previous v2 key kept serving
+          # a fixed-shape (256,256,192) ONNX that rejected any other
+          # patch size (e.g. --lowmem's 192x192x128). tools/onnx_export
+          # now emits dynamic spatial axes (D, H, W) -- bump to v3 to
+          # force a re-fetch from $SIAMIZE_WEIGHTS_URL.
+          key: siam-fold0-fp16-v3
 
       - name: Fetch + extract fold_0 weight (cache miss)
         if: steps.cache-fold0.outputs.cache-hit != 'true'
