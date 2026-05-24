@@ -281,14 +281,16 @@ void usage(const char* exe) {
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
                  "                      wall time; use only on RAM-constrained hosts.\n"
-                 "      --lowmem        force the low-memory preset (--no-arena + -P 192x192x128\n"
-                 "                      + -t auto-cap=8 + --cudnn-max-workspace 0 + \n"
-                 "                      --gpu-mem-limit 6G). The same preset is auto-applied\n"
-                 "                      when available host RAM is < 24 GB or free GPU VRAM\n"
-                 "                      is < 12 GB; pass --lowmem to force it on otherwise-\n"
-                 "                      large hosts (e.g. shared box with limited budget).\n"
+                 "      --lowmem        force the low-memory preset (--no-arena + -t auto-cap=8\n"
+                 "                      + --cudnn-max-workspace 0 + --gpu-mem-limit 6G).\n"
+                 "                      The same preset is auto-applied when available host\n"
+                 "                      RAM is < 24 GB or free GPU VRAM is < 12 GB; pass\n"
+                 "                      --lowmem to force it on otherwise-large hosts.\n"
                  "                      Individual flags passed alongside --lowmem are NOT\n"
-                 "                      overridden -- explicit beats the preset.\n"
+                 "                      overridden -- explicit beats the preset. NOTE: -P\n"
+                 "                      is not in the preset because the shipped SIAM v0.3\n"
+                 "                      ONNX folds have a fixed (256,256,192) input shape;\n"
+                 "                      pass -P explicitly only with a dynamic-shape export.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
                  "                      file at `-o` is a 4D float32 tissue probability map of\n"
                  "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
@@ -627,11 +629,12 @@ int main(int argc, char** argv) {
     std::vector<std::string> auto_applied;
 
     if (ram_tight) {
-        if (!patch_set) {
-            patch = {192, 192, 128};
-            auto_applied.push_back("-P 192x192x128");
-        }
-
+        // NOTE: We do NOT auto-shrink the patch (-P). The shipped SIAM
+        // v0.3 ONNX folds were exported with a fixed input shape of
+        // (1, 1, 256, 256, 192); the network rejects any other size
+        // with "Got invalid dimensions for input". Re-exporting with
+        // dynamic spatial axes (tools/onnx_export/) would enable a
+        // smaller patch, but until then we leave -P alone.
         if (!cpu_arena_set) {
             engine_tuning.cpu_arena = false;
             auto_applied.push_back("--no-arena");
