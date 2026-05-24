@@ -112,6 +112,7 @@ endif()
 add_executable(siamize
     src/siamize.cpp
     src/nifti_io.cpp
+    src/jnifti_io.cpp
     src/orient.cpp
     src/preprocess.cpp
     src/sliding.cpp
