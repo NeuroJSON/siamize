@@ -148,6 +148,52 @@ long available_ram_mb() {
 }
 
 /*******************************************************************************/
+/*! \fn    long available_vram_mb()
+    \brief Best-effort GPU-free-memory probe via nvidia-smi (returns 0 if unknown)
+
+    Spawns `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits`
+    via popen and parses the first integer on its first line. Works on
+    any host with the NVIDIA driver/userland installed (which is the
+    common case for a machine the user is trying to run CUDA on).
+    Returns 0 on any failure -- caller treats 0 as "unknown, skip the
+    VRAM-tight auto-safe path".
+
+    \return  free VRAM in MiB on the first visible GPU, or 0 if unknown
+*/
+long available_vram_mb() {
+#ifdef _WIN32
+    FILE* pipe = _popen("nvidia-smi --query-gpu=memory.free "
+                        "--format=csv,noheader,nounits 2>NUL", "r");
+#else
+    FILE* pipe = popen("nvidia-smi --query-gpu=memory.free "
+                       "--format=csv,noheader,nounits 2>/dev/null", "r");
+#endif
+
+    if (!pipe) {
+        return 0;
+    }
+
+    long mb = 0;
+    char buf[64] = {0};
+
+    if (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+        // First line carries the free MB for GPU 0 as a plain int.
+        long parsed = 0;
+
+        if (std::sscanf(buf, "%ld", &parsed) == 1 && parsed > 0) {
+            mb = parsed;
+        }
+    }
+
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    return mb;
+}
+
+/*******************************************************************************/
 /*! \fn    std::string expand_fold_shortcut(const std::string& tok)
     \brief Expand a single-digit fold shortcut to the canonical fp16 filename
 
@@ -352,6 +398,16 @@ int main(int argc, char** argv) {
     int64_t num_classes = 18;
     siam::EngineTuning engine_tuning;
 
+    // Per-flag "user explicitly set this" trackers. Used by the post-
+    // parse auto-safe block to avoid stomping on flags the user passed
+    // intentionally. Anything not listed here is auto-applied
+    // unconditionally when tight memory is detected.
+    bool patch_set                = false;
+    bool threads_set              = false;
+    bool cpu_arena_set            = false;
+    bool cudnn_max_workspace_set  = false;
+    bool gpu_mem_limit_set        = false;
+
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto need = [&]() {
@@ -388,6 +444,7 @@ int main(int argc, char** argv) {
             trt_cache_dir = need();
         } else if (a == "-t" || a == "--thread") {
             threads = std::stoi(need());
+            threads_set = true;
         } else if (a == "-u" || a == "--spacing") {
             target_spacing = std::stof(need());
         } else if (a == "-C" || a == "--classes") {
@@ -397,8 +454,10 @@ int main(int argc, char** argv) {
             char x;
             std::stringstream ss(p);
             ss >> patch[0] >> x >> patch[1] >> x >> patch[2];
+            patch_set = true;
         } else if (a == "--cudnn-max-workspace") {
             engine_tuning.cudnn_max_workspace = std::stoi(need());
+            cudnn_max_workspace_set = true;
         } else if (a == "--arena-extend") {
             std::string s = need();
 
@@ -430,6 +489,7 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--no-arena") {
             engine_tuning.cpu_arena = false;
+            cpu_arena_set = true;
         } else if (a == "--upsample") {
             upsample_mode = true;
         } else if (a == "-G" || a == "--gpu") {
@@ -490,6 +550,7 @@ int main(int argc, char** argv) {
 
             engine_tuning.gpu_mem_limit_bytes =
                 static_cast<size_t>(std::stoull(s)) * mult;
+            gpu_mem_limit_set = true;
         } else if (a == "-v" || a == "--verbose") {
             // Verbose is on by default now; -v is kept as a no-op.
             verbose = true;
@@ -517,24 +578,94 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Default to single-fold fold_0 when -M/--models isn't given. resolve_model_path
-    // below will look in $HOME/.cache/siamize/models/ and, on a miss, curl the
-    // weight from the NeuroJSON URL (see weights.h for the default,
-    // overridable via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
+    // ----- Auto-safe defaults for memory-tight hosts --------------------
+    // Detect available host RAM (via /proc/meminfo) and GPU VRAM (via
+    // nvidia-smi when the user picked a CUDA-capable device) and apply
+    // memory-saving flag defaults when either is tight. Flags the user
+    // explicitly passed are NOT overridden -- the `*_set` trackers in
+    // the parse loop guard against stomping on intent.
+    //
+    // Thresholds:
+    //   RAM  < 24 GB available  -> CPU-side safe defaults
+    //   VRAM < 12 GB available  -> GPU-side safe defaults
+    //
+    // CPU safe set:
+    //   -P 192x192x128, --no-arena, -t auto-cap = 8
+    //   targets ~5-7 GB peak RSS (fits 16 GB host with OS overhead)
+    //
+    // GPU safe set:
+    //   --cudnn-max-workspace 0, --gpu-mem-limit 6G
+    //   targets ~3-4 GB peak VRAM (fits 8 GB GPU)
+    const long avail_ram_mb  = available_ram_mb();
+    const bool gpu_active    = (device == "auto" ||
+                                device == "cuda" ||
+                                device == "tensorrt");
+    const long avail_vram_mb = gpu_active ? available_vram_mb() : 0;
+    const bool ram_tight     = avail_ram_mb  > 0 && avail_ram_mb  < 24 * 1024;
+    const bool vram_tight    = avail_vram_mb > 0 && avail_vram_mb < 12 * 1024;
+
+    std::vector<std::string> auto_applied;
+
+    if (ram_tight) {
+        if (!patch_set) {
+            patch = {192, 192, 128};
+            auto_applied.push_back("-P 192x192x128");
+        }
+
+        if (!cpu_arena_set) {
+            engine_tuning.cpu_arena = false;
+            auto_applied.push_back("--no-arena");
+        }
+        // -t auto-cap reduction is handled in the threads-resolution
+        // block below (uses ram_tight to pick 8 instead of 16).
+    }
+
+    if (vram_tight) {
+        if (!cudnn_max_workspace_set) {
+            engine_tuning.cudnn_max_workspace = 0;
+            auto_applied.push_back("--cudnn-max-workspace 0");
+        }
+
+        if (!gpu_mem_limit_set) {
+            engine_tuning.gpu_mem_limit_bytes = 6ull * 1024 * 1024 * 1024;
+            auto_applied.push_back("--gpu-mem-limit 6G");
+        }
+    }
+
     // Resolve threads before the header so it can show the actual count.
-    // Auto path: min(hardware_concurrency, 16). The 16 cap was measured
-    // on a Threadripper 3990X (Zen2, 64C/128T) where ORT's CPU EP hits
-    // its wall-time minimum at -t 16 and regresses at higher counts due
-    // to memory bandwidth and cross-CCD L3 contention. On smaller hosts
-    // (<=16 cores) the min() is just hardware_concurrency. Users with
-    // unusual workloads or hardware can pass -t <hc> explicitly.
+    // Auto path: min(hardware_concurrency, AUTO_CAP). AUTO_CAP is 8 when
+    // RAM is tight (per the safe-defaults block above) and 16 otherwise.
+    // The 16 cap was measured on a Threadripper 3990X (Zen2, 64C/128T)
+    // where ORT's CPU EP hits its wall-time minimum at -t 16 and
+    // regresses at higher counts due to memory bandwidth and cross-CCD
+    // L3 contention. Users with unusual workloads or hardware can pass
+    // -t <N> explicitly.
     bool threads_auto = (threads <= 0);
 
     if (threads_auto) {
         unsigned hc = std::thread::hardware_concurrency();
         int detected = (hc > 0) ? static_cast<int>(hc) : 4;
-        const int auto_cap = 16;
+        const int auto_cap = ram_tight ? 8 : 16;
         threads = std::min(detected, auto_cap);
+
+        if (ram_tight && !threads_set) {
+            auto_applied.push_back("-t cap=8 (auto-tight)");
+        }
+    }
+
+    if (!auto_applied.empty()) {
+        siam::log_hint("auto-safe defaults applied (RAM %ld MB%s%s%s):",
+                       avail_ram_mb,
+                       gpu_active && avail_vram_mb > 0 ? ", VRAM " : "",
+                       gpu_active && avail_vram_mb > 0 ?
+                       std::to_string(avail_vram_mb).c_str() : "",
+                       gpu_active && avail_vram_mb > 0 ? " MB" : "");
+
+        for (const auto& s : auto_applied) {
+            siam::log_hint("  %s", s.c_str());
+        }
+
+        siam::log_hint("(override by passing the flags explicitly; see --help)");
     }
 
     // Verbose header line: prints once at the start of the run so the
