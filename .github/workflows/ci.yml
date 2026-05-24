@@ -188,20 +188,25 @@ jobs:
         # GitHub-hosted runners have no NVIDIA GPU, so siamize will
         # detect that, log "[cuda] unavailable (...); using CPU", and
         # silently fall back to the CPU EP. We only need to verify the
-        # build path + fallback DETECTION line, NOT full inference --
-        # one tile of CPU inference at the default 256x256x192 patch
-        # is already ~60 s on a 4 vCPU runner, and the runner can
-        # send SIGTERM to the step itself for reasons unrelated to
-        # our `timeout` (graceful-shutdown, fail-fast cousins, etc.).
-        # So: timeout the run at 60 s, ignore its exit code entirely,
-        # and let the next step's grep on siamize.log do the real
-        # verification.
+        # build path + fallback DETECTION; running a full CPU inference
+        # to completion on a 4 vCPU / 16 GB runner takes ~25 minutes
+        # and reliably hits step timeouts. So we cap the run at 90 s,
+        # which is plenty to load the model and emit the [cuda]
+        # unavailable line, and tolerate timeout's exit code 124.
         run: |
-          timeout 60 ${{ matrix.binary }} \
+          set +e
+          timeout 90 ${{ matrix.binary }} \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
-              -c auto 2>&1 | tee siamize.log || true
+              -c auto 2>&1 | tee siamize.log
+          rc=${PIPESTATUS[0]}
+          # 0 = completed in 90s; 124 = timeout (expected); other = real failure
+          if [ $rc -ne 0 ] && [ $rc -ne 124 ]; then
+              echo "FAIL: siamize exited with $rc"
+              exit $rc
+          fi
+          set -e
 
       - name: Verify CPU fallback happened
         run: |
