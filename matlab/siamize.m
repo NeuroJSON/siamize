@@ -86,11 +86,20 @@ function nii = siamize(varargin)
 %            flag, with hyphens swapped for underscores):
 %
 %               'compute'             'auto' (default), 'cpu', 'cuda', 'tensorrt'
-%               'thread'              int (0 = all available cores, default)
+%               'thread'              int. 0 (default) = auto:
+%                                      min(hardware_concurrency, 16). The
+%                                      16-thread cap matches the CLI; pass
+%                                      an explicit count to override.
 %               'patch'               [pz, py, px] (default [256 256 192])
 %               'spacing'             double mm (default 0.75)
 %               'classes'             int (default 18, matches SIAM v0.3)
 %               'trt_cache'           char (default ~/.cache/siamize/trt)
+%               'arena'               logical (default true). False disables
+%                                      ORT's CPU memory arena + memory-
+%                                      pattern optimizer; mirrors the CLI
+%                                      --no-arena flag. Saves ~16 GB peak
+%                                      RSS on the 18-class network at the
+%                                      cost of ~1.5x wall time.
 %               'verbose'             logical (default false)
 %
 %            CUDA EP tuning (only used when compute involves CUDA,

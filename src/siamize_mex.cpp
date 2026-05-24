@@ -46,8 +46,11 @@ Inputs:
              "fold_<d>_fp16.onnx".
   - opts:    optional struct with any of `.device`, `.threads`,
              `.patch`, `.spacing`, `.classes`, `.tpm`, `.tpm_t`,
-             `.trt_cache`, `.gpu`, `.verbose`. See read_opts() in
-             this file for parsing details.
+             `.trt_cache`, `.gpu`, `.arena`, `.verbose`. See
+             read_opts() in this file for parsing details. The
+             `.arena` toggle mirrors the CLI's `--no-arena` flag:
+             pass `'arena', false` to keep peak RSS small at the
+             cost of ~1.5x wall time.
 
 Output:
 
@@ -391,6 +394,13 @@ void read_opts(const mxArray* a, Opts& o) {
 
     if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
         o.engine_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+    }
+
+    if ((f = mxGetField(a, 0, "arena")) && !mxIsEmpty(f)) {
+        // Toggle for ORT's CPU memory arena + memory-pattern optimizer.
+        // Default true (fast path). Pass false to match the CLI's
+        // --no-arena flag when peak RSS matters more than wall time.
+        o.engine_tuning.cpu_arena = (mxGetScalar(f) != 0.0);
     }
 
     if ((f = mxGetField(a, 0, "tpm")) && !mxIsEmpty(f)) {
