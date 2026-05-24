@@ -34,6 +34,7 @@ and offline / proxied installations.
 *******************************************************************************/
 
 #include "weights.h"
+#include "siam_log.h"
 
 /**
  * @brief Forward declaration of zmat's bundled miniz one-shot gzip inflater
@@ -279,10 +280,8 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
     fs::path cached = cache / base;
 
     if (fs::exists(cached, ec)) {
-        if (verbose) {
-            std::fprintf(stderr, "  using cached weight: %s\n", cached.string().c_str());
-        }
-
+        siam::log_tag("weights", "cached: %s", cached.string().c_str());
+        (void)verbose;
         return cached.string();
     }
 
@@ -298,9 +297,7 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
     std::string url_gz = url_base + base.string() + ".gz";
     std::string archive_gz = (cache / (base.string() + ".gz")).string();
 
-    if (verbose) {
-        std::fprintf(stderr, "  fetching %s\n", url_gz.c_str());
-    }
+    siam::log_tag("weights", "fetching %s", url_gz.c_str());
 
     std::string cmd_dl_gz = "curl -fL " + verbose_curl + " -o "
                             + quote(archive_gz) + " " + quote(url_gz);
@@ -310,32 +307,22 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
             auto gz_bytes = read_file_bytes(archive_gz);
             auto raw_bytes = gunzip(gz_bytes.data(), gz_bytes.size());
             write_file_bytes(cached.string(), raw_bytes.data(), raw_bytes.size());
-
-            if (verbose) {
-                std::fprintf(stderr,
-                             "  decompressed %s (%zu -> %zu bytes)\n",
-                             base.string().c_str(),
-                             gz_bytes.size(), raw_bytes.size());
-            }
-
+            siam::log_tag("weights", "decompressed %s (%zu -> %zu bytes)",
+                          base.string().c_str(),
+                          gz_bytes.size(), raw_bytes.size());
             fs::remove(archive_gz, ec);
             return cached.string();
         } catch (const std::exception& e) {
             // Fall through to the raw fallback below.
-            if (verbose) {
-                std::fprintf(stderr, "  gzip decode failed: %s\n", e.what());
-            }
-
+            siam::log_tag("weights", "gzip decode failed: %s", e.what());
             fs::remove(archive_gz, ec);
         }
     }
 
     // Try raw uncompressed URL as a last resort.
     std::string url_raw = url_base + base.string();
-
-    if (verbose) {
-        std::fprintf(stderr, "  fetching %s -> %s\n", url_raw.c_str(), cached.string().c_str());
-    }
+    siam::log_tag("weights", "fetching %s -> %s",
+                  url_raw.c_str(), cached.string().c_str());
 
     std::string cmd_dl_raw = "curl -fL " + verbose_curl + " -o "
                              + quote(cached.string()) + " " + quote(url_raw);

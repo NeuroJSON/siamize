@@ -43,6 +43,7 @@ at any moment so peak VRAM stays bounded.
 
 #include "sliding.h"
 #include "siam.h"
+#include "siam_log.h"
 
 #include <onnxruntime_cxx_api.h>
 
@@ -349,15 +350,14 @@ LogitsVolume sliding_window(const Volume& data,
     auto stepsX = compute_steps(spatX, patch_size[2], step_ratio);
     int64_t n_tiles = stepsZ.size() * stepsY.size() * stepsX.size();
 
-    if (verbose) {
-        std::fprintf(stderr,
-                     "sliding window: image (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
-                     ", patch (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
-                     ", step %.2f, %" PRId64 " tiles, %zu fold(s)\n",
-                     spatZ, spatY, spatX,
-                     patch_size[0], patch_size[1], patch_size[2],
-                     step_ratio, n_tiles, model_paths.size());
-    }
+    siam::log_tag("infer",
+                  "image (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
+                  ")  patch (%" PRId64 ",%" PRId64 ",%" PRId64
+                  ")  step %.2f  tiles %" PRId64 "  folds %zu",
+                  spatZ, spatY, spatX,
+                  patch_size[0], patch_size[1], patch_size[2],
+                  step_ratio, n_tiles, model_paths.size());
+    (void)verbose;
 
     auto gauss = compute_gaussian(patch_size);
 
@@ -421,23 +421,17 @@ LogitsVolume sliding_window(const Volume& data,
 
                 if (!ep_probed) {
                     use_trt = true;
-
-                    if (verbose) {
-                        std::fprintf(stderr,
-                                     "  TensorRT EP enabled (engine cache: %s)\n"
-                                     "  (first run on a new GPU/TRT version builds engines; ~1-5 min/fold)\n",
-                                     trt_cache.c_str());
-                    }
+                    siam::log_tag("trt", "enabled (cache: %s)", trt_cache.c_str());
+                    siam::log_cont("first run on a new GPU/TRT version builds engines "
+                                   "(~1-5 min/fold)");
                 }
             } catch (const Ort::Exception& e) {
                 if (trt_required) {
                     throw;   // user explicitly asked for TensorRT
                 }
 
-                if (!ep_probed && verbose) {
-                    std::fprintf(stderr,
-                                 "  TensorRT EP unavailable (%s); falling back\n",
-                                 e.what());
+                if (!ep_probed) {
+                    siam::log_tag("trt", "unavailable (%s); falling back", e.what());
                 }
 
                 use_trt = false;
@@ -496,13 +490,11 @@ LogitsVolume sliding_window(const Volume& data,
                     Ort::ThrowOnError(Ort::GetApi().UpdateCUDAProviderOptions(
                                           cuda_opts, kp.data(), vp.data(), kp.size()));
 
-                    if (verbose) {
-                        std::fprintf(stderr, "  CUDA EP tuning:\n");
+                    siam::log_tag("cuda", "tuning:");
 
-                        for (size_t i = 0; i < kbuf.size(); ++i) {
-                            std::fprintf(stderr, "    %s = %s\n",
-                                         kbuf[i].c_str(), vbuf[i].c_str());
-                        }
+                    for (size_t i = 0; i < kbuf.size(); ++i) {
+                        siam::log_cont("%s = %s",
+                                       kbuf[i].c_str(), vbuf[i].c_str());
                     }
                 }
 
@@ -512,8 +504,8 @@ LogitsVolume sliding_window(const Volume& data,
                 if (!ep_probed) {
                     use_cuda = true;
 
-                    if (verbose && !use_trt) {
-                        std::fprintf(stderr, "  CUDA EP enabled\n");
+                    if (!use_trt) {
+                        siam::log_tag("cuda", "enabled");
                     }
                 }
             } catch (const Ort::Exception& e) {
@@ -521,10 +513,8 @@ LogitsVolume sliding_window(const Volume& data,
                     throw;   // user explicitly asked for CUDA
                 }
 
-                if (!ep_probed && verbose) {
-                    std::fprintf(stderr,
-                                 "  CUDA EP unavailable (%s); using CPU\n",
-                                 e.what());
+                if (!ep_probed) {
+                    siam::log_tag("cuda", "unavailable (%s); using CPU", e.what());
                 }
 
                 use_cuda = false;
@@ -550,10 +540,8 @@ LogitsVolume sliding_window(const Volume& data,
         const char* in_names[] = {in_name};
         const char* out_names[] = {out_name};
 
-        if (verbose) {
-            std::fprintf(stderr, "  fold %zu/%zu: %s\n", fi + 1, model_paths.size(),
-                         model_paths[fi].c_str());
-        }
+        siam::log_tag("fold", "%zu/%zu  %s",
+                      fi + 1, model_paths.size(), model_paths[fi].c_str());
 
         int64_t tile_idx = 0;
 
@@ -614,9 +602,9 @@ LogitsVolume sliding_window(const Volume& data,
 
                     ++tile_idx;
 
-                    if (verbose && (tile_idx % 4 == 0 || tile_idx == n_tiles)) {
-                        std::fprintf(stderr, "    tile %" PRId64 "/%" PRId64 "\n",
-                                     tile_idx, n_tiles);
+                    if (tile_idx % 4 == 0 || tile_idx == n_tiles) {
+                        siam::log_tag("tile", "%" PRId64 "/%" PRId64,
+                                      tile_idx, n_tiles);
                     }
                 }
             }

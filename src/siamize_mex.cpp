@@ -63,6 +63,7 @@ with matching options.
 #include "mex.h"
 
 #include "siam.h"
+#include "siam_log.h"
 #include "orient.h"
 #include "preprocess.h"
 #include "sliding.h"
@@ -457,6 +458,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (nrhs >= 4) {
             read_opts(prhs[3], opts);
         }
+
+        // Mirror the CLI: hoist opts.verbose into the siam_log global so
+        // shared modules (sliding/weights/etc.) emit their tagged log
+        // lines via mexPrintf without each call site checking a flag.
+        siam::set_verbose(opts.verbose);
 
         // Default to single-fold fold_0 if caller passed []/'' for models,
         // matching the CLI behavior. resolve_model_path then either uses

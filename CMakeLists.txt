@@ -117,6 +117,7 @@ add_executable(siamize
     src/preprocess.cpp
     src/sliding.cpp
     src/weights.cpp
+    src/siam_log.cpp
 )
 target_include_directories(siamize PRIVATE
     src
@@ -275,6 +276,7 @@ set(_siamize_mex_sources
     src/preprocess.cpp
     src/sliding.cpp
     src/weights.cpp
+    src/siam_log.cpp
 )
 set(_siamize_mex_includes
     src
@@ -410,10 +412,16 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         # (The MATLAB MEX is different -- MATLAB ships an older bundled
         #  libstdc++.so.6 that lacks recent GLIBCXX_x.y.z symbols, so
         #  there static-linking is the only thing that loads.)
+        # mkoctfile --mex does NOT auto-define MATLAB_MEX_FILE (only
+        # MEX_DEBUG), so we set it explicitly. CMake's matlab_add_mex
+        # already does the same for the MATLAB target. siam_log.cpp
+        # uses MATLAB_MEX_FILE to route through mexPrintf instead of
+        # stderr; without it the Octave MEX would silently print to
+        # the launching terminal rather than the command window.
         add_custom_command(
             OUTPUT ${_oct_out}
             COMMAND ${CMAKE_COMMAND} -E env
-                "CXXFLAGS=-std=c++17 -O2 -fPIC"
+                "CXXFLAGS=-std=c++17 -O2 -fPIC -DMATLAB_MEX_FILE"
                 "LDFLAGS=${_oct_ld}"
                 ${MKOCTFILE} --mex
                 ${_oct_inc}

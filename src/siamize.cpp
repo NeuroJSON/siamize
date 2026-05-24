@@ -47,6 +47,7 @@ single-binary with no Python runtime.
 *******************************************************************************/
 
 #include "siam.h"
+#include "siam_log.h"
 #include "nifti_io.h"
 #include "jnifti_io.h"
 #include "preprocess.h"
@@ -407,6 +408,7 @@ int main(int argc, char** argv) {
                 static_cast<size_t>(std::stoull(s)) * mult;
         } else if (a == "-v" || a == "--verbose") {
             verbose = true;
+            siam::set_verbose(true);
         } else if (a == "-h" || a == "--help")   {
             usage(argv[0]);
             return 0;
@@ -426,49 +428,39 @@ int main(int argc, char** argv) {
     // below will look in $HOME/.cache/siamize/models/ and, on a miss, curl the
     // weight from the NeuroJSON URL (see weights.h for the default,
     // overridable via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
+    // Resolve threads before the header so it can show the actual count.
+    bool threads_auto = (threads <= 0);
+
+    if (threads_auto) {
+        unsigned hc = std::thread::hardware_concurrency();
+        threads = (hc > 0) ? static_cast<int>(hc) : 4;
+    }
+
+    // Verbose header line: prints once at the start of the run so the
+    // following [tag] lines have an unmistakable anchor at the top.
+    siam::log_tag("siamize",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s",
+                  device.c_str(), threads,
+                  threads_auto ? " (auto)" : "",
+                  out_format.c_str(),
+                  tpm_mode ? "  --tpm" : "");
+
     if (models_csv.empty()) {
         models_csv = "fold_0_fp16.onnx";
-
-        if (verbose) {
-            std::fprintf(stderr,
-                         "-M/--models not given; defaulting to single-fold "
-                         "fold_0_fp16.onnx (auto-downloaded if missing).\n");
-        }
+        siam::log_tag("models",
+                      "-M/--models not given; defaulting to single-fold "
+                      "fold_0_fp16.onnx (auto-downloaded if missing).");
     }
 
     auto model_paths = split_csv(models_csv);
 
-    // Resolve every model spec: existing path, cache lookup, or auto-fetch.
     for (auto& m : model_paths) {
         m = expand_fold_shortcut(m);
-
-        try {
-            m = siam::resolve_model_path(m, verbose);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "siamize: %s\n", e.what());
-            return 3;
-        }
-    }
-
-    if (threads <= 0) {
-        unsigned hc = std::thread::hardware_concurrency();
-        threads = (hc > 0) ? static_cast<int>(hc) : 4;
-
-        if (verbose) {
-            std::fprintf(stderr,
-                         "intra-op threads: %d (auto-detected from "
-                         "std::thread::hardware_concurrency())\n",
-                         threads);
-        }
-    } else if (verbose) {
-        std::fprintf(stderr, "intra-op threads: %d (user-supplied)\n", threads);
     }
 
     auto t_start = std::chrono::steady_clock::now();
 
-    if (verbose) {
-        std::fprintf(stderr, "input: %s\n", input_path.c_str());
-    }
+    siam::log_tag("input", "%s", input_path.c_str());
 
     // Input dispatch: .jnii / .bnii go through the JNIfTI reader, anything
     // else (typically .nii / .nii.gz) through the NIfTI-1 reader.
@@ -492,24 +484,18 @@ int main(int argc, char** argv) {
                      ? siam::load_jnifti_ras(input_path)
                      : siam::load_nifti_ras(input_path);
 
-    if (verbose) {
-        std::fprintf(stderr,
-                     "  canon shape (Z, Y, X): (%" PRId64 ", %" PRId64 ", %" PRId64 ")"
-                     ", zooms canon (X, Y, Z): (%.3f, %.3f, %.3f)\n",
-                     img.volume.shape[0], img.volume.shape[1], img.volume.shape[2],
-                     img.zooms_canon[0], img.zooms_canon[1], img.zooms_canon[2]);
-    }
+    siam::log_cont("canon shape (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
+                   ")  zooms (X,Y,Z) (%.3f,%.3f,%.3f) mm",
+                   img.volume.shape[0], img.volume.shape[1], img.volume.shape[2],
+                   img.zooms_canon[0], img.zooms_canon[1], img.zooms_canon[2]);
 
     std::array<int64_t, 3> shape_canon = {img.volume.shape[0], img.volume.shape[1], img.volume.shape[2]};
 
     // crop to nonzero
     auto crop = siam::crop_to_nonzero(img.volume);
 
-    if (verbose) {
-        std::fprintf(stderr,
-                     "  cropped to (Z, Y, X) (%" PRId64 ", %" PRId64 ", %" PRId64 ")\n",
-                     crop.cropped.shape[0], crop.cropped.shape[1], crop.cropped.shape[2]);
-    }
+    siam::log_tag("crop", "nonzero bbox (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64 ")",
+                  crop.cropped.shape[0], crop.cropped.shape[1], crop.cropped.shape[2]);
 
     // z-score
     siam::zscore_inplace(crop.cropped);
@@ -522,15 +508,26 @@ int main(int argc, char** argv) {
     {crop.cropped.shape[0], crop.cropped.shape[1], crop.cropped.shape[2]},
     spacing_zyx, new_spacing);
 
-    if (verbose) {
-        std::fprintf(stderr,
-                     "  resample to (%" PRId64 ", %" PRId64 ", %" PRId64 ") @ %.3f mm\n",
-                     new_shape[0], new_shape[1], new_shape[2], target_spacing);
-    }
+    siam::log_tag("resample", "(Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64 ") @ %.3f mm",
+                  new_shape[0], new_shape[1], new_shape[2], target_spacing);
 
     // Forward path: cubic Catmull-Rom (matches scipy order=3 to within ~0.1% Dice).
     Volume resampled = siam::resample_cubic(crop.cropped, new_shape[0], new_shape[1], new_shape[2]);
     crop.cropped = Volume{};  // free
+
+    // Resolve every model spec: existing path, cache lookup, or auto-fetch.
+    // Done here (after preprocessing) so [weights] lines land between
+    // [resample] and [infer] in the verbose log -- a user typo on the
+    // input path still fails fast above, and the network download (if
+    // any) happens just before it's needed.
+    for (auto& m : model_paths) {
+        try {
+            m = siam::resolve_model_path(m, verbose);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "siamize: %s\n", e.what());
+            return 3;
+        }
+    }
 
     // sliding window. If -c auto chose CUDA/TensorRT and the
     // session aborts mid-Run with an allocation failure (tight VRAM,
@@ -553,11 +550,11 @@ int main(int argc, char** argv) {
 
         if (device == "auto" && oom) {
             std::fprintf(stderr,
-                         "  GPU allocation failed: %s\n"
-                         "  -c auto falling back to CPU. To force CPU from the\n"
-                         "  start, pass `-c cpu`; for tight-VRAM GPUs try also\n"
-                         "  `--cudnn-max-workspace 0 --arena-extend same` before\n"
-                         "  giving up on GPU.\n",
+                         "[warn]     GPU allocation failed: %s\n"
+                         "           -c auto falling back to CPU. To force CPU from the\n"
+                         "           start, pass `-c cpu`; for tight-VRAM GPUs try also\n"
+                         "           `--cudnn-max-workspace 0 --arena-extend same` before\n"
+                         "           giving up on GPU.\n",
                          e.what());
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
@@ -598,16 +595,12 @@ int main(int argc, char** argv) {
 
     if (tpm_mode) {
         // ---- TPM branch: softmax logits -> un-crop -> save 4D float32 ----
-        if (verbose) {
-            if (tpm_temperature != 1.0f) {
-                std::fprintf(stderr,
-                             "  building TPM (softmax, %" PRId64 " classes, T=%.3f)\n",
-                             num_classes, tpm_temperature);
-            } else {
-                std::fprintf(stderr,
-                             "  building TPM (softmax, %" PRId64 " classes)\n",
-                             num_classes);
-            }
+        if (tpm_temperature != 1.0f) {
+            siam::log_tag("tpm", "softmax over %" PRId64 " classes  T=%.3f",
+                          num_classes, tpm_temperature);
+        } else {
+            siam::log_tag("tpm", "softmax over %" PRId64 " classes",
+                          num_classes);
         }
 
         const float inv_T = 1.0f / tpm_temperature;
@@ -718,9 +711,7 @@ int main(int argc, char** argv) {
     auto t_end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(t_end - t_start).count();
 
-    if (verbose) {
-        std::fprintf(stderr, "saved %s in %.1fs\n", output_path.c_str(), seconds);
-    }
+    siam::log_tag("saved", "%s  in %.1fs", output_path.c_str(), seconds);
 
     return 0;
 }
