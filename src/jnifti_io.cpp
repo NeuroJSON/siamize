@@ -36,6 +36,11 @@ using json = nlohmann::ordered_json;
 
 namespace {
 
+bool ends_with(const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size()
+           && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 std::vector<uint8_t> zlib_compress(const uint8_t* in, size_t n, int level = 6) {
     mz_ulong cap = mz_compressBound(static_cast<mz_ulong>(n));
     std::vector<uint8_t> out(cap);
@@ -291,6 +296,322 @@ void write_jnifti_root(const std::string& path, const json& j, bool binary) {
     }
 }
 
+// Inverse of col_to_row_major: takes a buffer flat-stored in
+// "last-dim-fastest" (row-major C-style) layout and produces a buffer
+// flat-stored in "first-dim-fastest" (column-major / MATLAB-native /
+// NIfTI X-fastest) layout, same shape.
+template <typename T>
+std::vector<T> row_to_col_major(const T* row, const std::vector<int64_t>& shape) {
+    size_t n = 1;
+
+    for (auto d : shape) {
+        n *= static_cast<size_t>(d);
+    }
+
+    std::vector<T> col(n);
+    int ndim = static_cast<int>(shape.size());
+    std::vector<int64_t> col_stride(ndim), row_stride(ndim);
+    col_stride[0] = 1;
+
+    for (int d = 1; d < ndim; ++d) {
+        col_stride[d] = col_stride[d - 1] * shape[d - 1];
+    }
+
+    row_stride[ndim - 1] = 1;
+
+    for (int d = ndim - 2; d >= 0; --d) {
+        row_stride[d] = row_stride[d + 1] * shape[d + 1];
+    }
+
+    for (size_t p = 0; p < n; ++p) {
+        // Decode p as row-major linear -> per-axis indices -> col-major linear.
+        size_t rem = p;
+        size_t col_idx = 0;
+
+        for (int d = 0; d < ndim; ++d) {
+            int64_t i = static_cast<int64_t>(rem / static_cast<size_t>(row_stride[d]));
+            rem -= static_cast<size_t>(i) * static_cast<size_t>(row_stride[d]);
+            col_idx += static_cast<size_t>(i) * static_cast<size_t>(col_stride[d]);
+        }
+
+        col[col_idx] = row[p];
+    }
+
+    return col;
+}
+
+// Read all bytes of a file into memory.
+std::vector<uint8_t> read_file_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+
+    if (!f) {
+        throw std::runtime_error("failed to open " + path + " for reading");
+    }
+
+    auto sz = static_cast<std::streamsize>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(sz));
+
+    if (sz > 0 && !f.read(reinterpret_cast<char*>(buf.data()), sz)) {
+        throw std::runtime_error("failed to read " + path);
+    }
+
+    return buf;
+}
+
+// Parse the file as JSON (.jnii) or BJData (.bnii). Returns the parsed
+// tree. Format is inferred from the path extension.
+json parse_jnifti(const std::string& path, bool& is_binary) {
+    is_binary = ends_with(path, ".bnii") || ends_with(path, ".BNII");
+    auto bytes = read_file_bytes(path);
+
+    if (is_binary) {
+        return json::from_bjdata(bytes);
+    }
+
+    return json::parse(bytes.begin(), bytes.end());
+}
+
+// Extract a 4x4 row-major affine from NIFTIHeader.Affine. Accepts two
+// wire formats:
+//   1. Plain nested JSON array: [[r0c0..r0c3], [r1...], [r2...]]
+//      (text .jnii from jsonlab for small matrices, our own writer's
+//      output).
+//   2. JData annotated array: {_ArrayType_, _ArraySize_=[rows, 4],
+//      _ArrayData_=[12-or-16 values, row-major after jsonlab's
+//      permute-reverse step]} -- BJData .bnii path from jsonlab.
+std::array<float, 16> extract_affine(const json& nii_header) {
+    std::array<float, 16> a{};
+    a[0] = a[5] = a[10] = a[15] = 1.0f;
+
+    if (!nii_header.is_object() || !nii_header.contains("Affine")) {
+        throw std::runtime_error("NIFTIHeader.Affine missing in JNIfTI input");
+    }
+
+    const json& A = nii_header["Affine"];
+
+    if (A.is_object() && A.contains("_ArrayData_") && A.contains("_ArraySize_")) {
+        // JData annotated 2D matrix.
+        const json& sz = A["_ArraySize_"];
+
+        if (!sz.is_array() || sz.size() != 2) {
+            throw std::runtime_error(
+                "NIFTIHeader.Affine: annotated _ArraySize_ must be 2D");
+        }
+
+        size_t rows = sz[0].get<size_t>();
+        size_t cols = sz[1].get<size_t>();
+
+        if ((rows != 3 && rows != 4) || cols != 4) {
+            throw std::runtime_error(
+                "NIFTIHeader.Affine annotated shape must be 3x4 or 4x4");
+        }
+
+        const json& ad = A["_ArrayData_"];
+
+        if (!ad.is_array() || ad.size() != rows * cols) {
+            throw std::runtime_error(
+                "NIFTIHeader.Affine: _ArrayData_ length mismatch");
+        }
+
+        for (size_t r = 0; r < rows; ++r) {
+            for (size_t c = 0; c < cols; ++c) {
+                a[r * 4 + c] = ad[r * cols + c].get<float>();
+            }
+        }
+
+        return a;
+    }
+
+    if (!A.is_array()) {
+        throw std::runtime_error(
+            "NIFTIHeader.Affine must be a nested JSON array or a JData "
+            "annotated matrix");
+    }
+
+    size_t rows = A.size();
+
+    if (rows != 3 && rows != 4) {
+        throw std::runtime_error("NIFTIHeader.Affine must have 3 or 4 rows");
+    }
+
+    for (size_t r = 0; r < rows; ++r) {
+        if (!A[r].is_array() || A[r].size() != 4) {
+            throw std::runtime_error("NIFTIHeader.Affine row must be length-4 array");
+        }
+
+        for (size_t c = 0; c < 4; ++c) {
+            a[r * 4 + c] = A[r][c].get<float>();
+        }
+    }
+
+    return a;
+}
+
+// Decode the NIFTIData jdata-annotated array into a flat row-major
+// (last-dim-fastest) byte buffer in dtype `dtype` and `shape` shape.
+std::vector<uint8_t> decode_nifti_data(const json& nd,
+                                       bool is_binary,
+                                       std::vector<int64_t>& shape,
+                                       std::string& dtype) {
+    if (!nd.is_object() || !nd.contains("_ArraySize_") || !nd.contains("_ArrayType_")) {
+        throw std::runtime_error(
+            "NIFTIData must be a JData annotated array with "
+            "_ArrayType_ + _ArraySize_ (got non-struct or missing fields)");
+    }
+
+    dtype = nd["_ArrayType_"].get<std::string>();
+    shape.clear();
+
+    for (const auto& d : nd["_ArraySize_"]) {
+        shape.push_back(d.get<int64_t>());
+    }
+
+    size_t n_elem = 1;
+
+    for (auto d : shape) {
+        n_elem *= static_cast<size_t>(d);
+    }
+
+    auto type_bytes = [&]() -> size_t {
+        if (dtype == "uint8"  || dtype == "int8")    { return 1; }
+
+        if (dtype == "int16"  || dtype == "uint16")  { return 2; }
+
+        if (dtype == "int32"  || dtype == "uint32"
+                || dtype == "single" || dtype == "float32") {
+            return 4;
+        }
+
+        if (dtype == "int64"  || dtype == "uint64"
+                || dtype == "double" || dtype == "float64") {
+            return 8;
+        }
+
+        throw std::runtime_error("unsupported _ArrayType_: " + dtype);
+    };
+    const size_t raw_bytes = n_elem * type_bytes();
+
+    // Compressed path.
+    if (nd.contains("_ArrayZipData_")) {
+        std::string ziptype =
+            nd.contains("_ArrayZipType_") ? nd["_ArrayZipType_"].get<std::string>() : "zlib";
+
+        if (ziptype != "zlib") {
+            throw std::runtime_error(
+                "unsupported _ArrayZipType_: " + ziptype + " (only 'zlib')");
+        }
+
+        const json& zd = nd["_ArrayZipData_"];
+        std::vector<uint8_t> comp;
+
+        if (zd.is_binary()) {
+            const auto& b = zd.get_binary();
+            comp.assign(b.begin(), b.end());
+        } else if (zd.is_string()) {
+            comp = base64_decode(zd.get<std::string>());
+        } else if (zd.is_array()) {
+            // Some encoders may serialize byte arrays as numeric arrays.
+            comp.reserve(zd.size());
+
+            for (const auto& b : zd) {
+                comp.push_back(static_cast<uint8_t>(b.get<int>()));
+            }
+        } else {
+            throw std::runtime_error("_ArrayZipData_ has unexpected type");
+        }
+
+        return zlib_decompress(comp.data(), comp.size(), raw_bytes);
+    }
+
+    // Uncompressed path: _ArrayData_ is a flat numeric array.
+    if (!nd.contains("_ArrayData_")) {
+        throw std::runtime_error(
+            "NIFTIData has neither _ArrayZipData_ nor _ArrayData_");
+    }
+
+    const json& ad = nd["_ArrayData_"];
+    std::vector<uint8_t> raw(raw_bytes);
+    // Walk the JSON array and write per-element values into `raw`. Handle
+    // each supported dtype explicitly so we get exact wire-format
+    // marshalling (no implicit type promotion through json::get<double>()).
+    auto write_one = [&](size_t i, const json& v) {
+        if (dtype == "uint8") {
+            raw[i] = v.get<uint8_t>();
+        } else if (dtype == "int8") {
+            int8_t x = v.get<int8_t>();
+            std::memcpy(&raw[i], &x, 1);
+        } else if (dtype == "int16") {
+            int16_t x = v.get<int16_t>();
+            std::memcpy(&raw[i * 2], &x, 2);
+        } else if (dtype == "uint16") {
+            uint16_t x = v.get<uint16_t>();
+            std::memcpy(&raw[i * 2], &x, 2);
+        } else if (dtype == "int32") {
+            int32_t x = v.get<int32_t>();
+            std::memcpy(&raw[i * 4], &x, 4);
+        } else if (dtype == "uint32") {
+            uint32_t x = v.get<uint32_t>();
+            std::memcpy(&raw[i * 4], &x, 4);
+        } else if (dtype == "single" || dtype == "float32") {
+            float x = v.get<float>();
+            std::memcpy(&raw[i * 4], &x, 4);
+        } else if (dtype == "double" || dtype == "float64") {
+            double x = v.get<double>();
+            std::memcpy(&raw[i * 8], &x, 8);
+        } else {
+            throw std::runtime_error("unsupported _ArrayType_ for direct read: " + dtype);
+        }
+    };
+
+    if (ad.is_array()) {
+        if (ad.size() != n_elem) {
+            throw std::runtime_error(
+                "_ArrayData_ length " + std::to_string(ad.size())
+                + " != expected " + std::to_string(n_elem));
+        }
+
+        for (size_t i = 0; i < n_elem; ++i) {
+            write_one(i, ad[i]);
+        }
+    } else if (ad.is_binary() && dtype == "uint8") {
+        // BJData binary uint8 array.
+        const auto& b = ad.get_binary();
+
+        if (b.size() != raw_bytes) {
+            throw std::runtime_error("_ArrayData_ binary length mismatch");
+        }
+
+        std::copy(b.begin(), b.end(), raw.begin());
+        (void)is_binary;
+    } else {
+        throw std::runtime_error("_ArrayData_ has unexpected type");
+    }
+
+    (void)is_binary;
+    return raw;
+}
+
+// Convert a typed flat row-major buffer into a column-major float32
+// volume of the same shape.
+template <typename SrcT>
+std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vector<int64_t>& shape) {
+    size_t n = 1;
+
+    for (auto d : shape) {
+        n *= static_cast<size_t>(d);
+    }
+
+    const SrcT* src = reinterpret_cast<const SrcT*>(row_bytes);
+    std::vector<float> row_f(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        row_f[i] = static_cast<float>(src[i]);
+    }
+
+    return row_to_col_major<float>(row_f.data(), shape);
+}
+
 }  // anonymous namespace
 
 
@@ -380,8 +701,77 @@ void save_jnifti_tpm(const std::string& path,
 
 
 NiftiImage load_jnifti_ras(const std::string& path) {
-    (void)path;
-    throw std::runtime_error("load_jnifti_ras: not yet implemented (Phase 3)");
+    bool is_binary = false;
+    json root = parse_jnifti(path, is_binary);
+
+    if (!root.is_object() || !root.contains("NIFTIHeader") || !root.contains("NIFTIData")) {
+        throw std::runtime_error(
+            "JNIfTI file must have NIFTIHeader and NIFTIData top-level fields");
+    }
+
+    auto affine = extract_affine(root["NIFTIHeader"]);
+
+    std::vector<int64_t> shape;
+    std::string dtype;
+    auto row_bytes = decode_nifti_data(root["NIFTIData"], is_binary, shape, dtype);
+
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "siamize JNIfTI input must be a 3D scalar volume (got rank "
+            + std::to_string(shape.size()) + ")");
+    }
+
+    const int64_t X = shape[0];
+    const int64_t Y = shape[1];
+    const int64_t Z = shape[2];
+
+    std::vector<float> col_f;
+
+    if      (dtype == "uint8")            { col_f = to_float_col_major<uint8_t>(row_bytes.data(), shape); }
+    else if (dtype == "int8")             { col_f = to_float_col_major<int8_t>(row_bytes.data(), shape); }
+    else if (dtype == "int16")            { col_f = to_float_col_major<int16_t>(row_bytes.data(), shape); }
+    else if (dtype == "uint16")           { col_f = to_float_col_major<uint16_t>(row_bytes.data(), shape); }
+    else if (dtype == "int32")            { col_f = to_float_col_major<int32_t>(row_bytes.data(), shape); }
+    else if (dtype == "uint32")           { col_f = to_float_col_major<uint32_t>(row_bytes.data(), shape); }
+    else if (dtype == "single" || dtype == "float32") { col_f = to_float_col_major<float>(row_bytes.data(), shape); }
+    else if (dtype == "double" || dtype == "float64") { col_f = to_float_col_major<double>(row_bytes.data(), shape); }
+    else {
+        throw std::runtime_error("unsupported _ArrayType_ in JNIfTI input: " + dtype);
+    }
+
+    NiftiImage out;
+    out.affine_orig = affine;
+    out.shape_orig  = {X, Y, Z};
+
+    std::array<int, 3> dst{}, sgn{};
+    axes_to_canonical(affine, dst, sgn);
+    copy_reorient_to_canonical<float>(col_f.data(), X, Y, Z, dst, sgn, out.volume);
+    out.affine_canon = canonicalize_affine(affine, dst, sgn, {X, Y, Z});
+
+    // perm_canon_to_orig[i] = the input-axis index that ends up at canonical axis i.
+    // dst[i] tells us "canonical axis dst[i] receives input axis i". Invert.
+    for (int i = 0; i < 3; ++i) {
+        out.perm_canon_to_orig[dst[i]] = i;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        out.flip_canon[dst[i]] = sgn[i];
+    }
+
+    // Voxel size (X, Y, Z) in canonical: column norms of the canonical affine.
+    auto col_norm = [&](int c) {
+        const auto& A = out.affine_canon;
+        return std::sqrt(A[0 * 4 + c] * A[0 * 4 + c]
+                         + A[1 * 4 + c] * A[1 * 4 + c]
+                         + A[2 * 4 + c] * A[2 * 4 + c]);
+    };
+    out.zooms_canon = {
+        static_cast<float>(col_norm(0)),
+        static_cast<float>(col_norm(1)),
+        static_cast<float>(col_norm(2))
+    };
+
+    return out;
 }
 
 }  // namespace siam

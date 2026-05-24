@@ -6,6 +6,7 @@
 
 #include "siam.h"
 #include "nifti_io.h"
+#include "jnifti_io.h"
 #include "preprocess.h"
 #include "sliding.h"
 #include "weights.h"
@@ -69,13 +70,18 @@ void usage(const char* exe) {
     std::fprintf(stderr,
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
                  "\n"
-                 "  -i, --input         input NIfTI (.nii or .nii.gz, 3D)\n"
-                 "  -o, --output        output NIfTI-1 file (.nii or .nii.gz). By default this\n"
-                 "                      is a 3D uint8 labelmap; pass `--tpm` to write a 4D\n"
-                 "                      float32 tissue probability map to the same path instead.\n"
-                 "                      The CLI writes NIfTI-1 only; for JNIfTI .jnii/.bnii\n"
-                 "                      output, use the MATLAB/Octave wrapper (matlab/siamize.m).\n"
+                 "  -i, --input         input volume (.nii / .nii.gz NIfTI-1/2, or .jnii / .bnii\n"
+                 "                      JNIfTI; format inferred from extension). 3D scalar.\n"
+                 "  -o, --output        output file. By default a 3D uint8 labelmap; pass `--tpm`\n"
+                 "                      to write a 4D float32 tissue probability map instead.\n"
+                 "                      Container format follows -F/--format (default nii).\n"
                  "                      JNIfTI spec: https://neurojson.org/jnifti\n"
+                 "  -F, --format        output container: nii (default; NIfTI-1, gzipped if .gz)\n"
+                 "                      | jnii (JSON-text JNIfTI, zlib+base64 payload)\n"
+                 "                      | bnii (BJData binary JNIfTI, zlib payload).\n"
+                 "                      For small label volumes .nii.gz is usually tightest;\n"
+                 "                      .bnii is competitive and interoperates with jsonlab /\n"
+                 "                      the NeuroJSON ecosystem; .jnii is human-readable JSON.\n"
                  "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
@@ -145,6 +151,13 @@ void usage(const char* exe) {
                  "  # Same, with a softer (temperature-scaled) softmax for graded boundaries:\n"
                  "  siamize -i input.nii.gz -o tpm.nii.gz   -M 0:4 -c cuda --tpm --tpm-t 1.5\n"
                  "\n"
+                 "  # JNIfTI output (smaller on disk than .nii.gz; readable by jsonlab):\n"
+                 "  siamize -i input.nii.gz   -o labels.jnii -M 0:4 -F jnii\n"
+                 "  siamize -i input.nii.gz   -o labels.bnii -M 0:4 -F bnii\n"
+                 "\n"
+                 "  # JNIfTI input round-trip (use jsonlab/savejnifti to make one first):\n"
+                 "  siamize -i preproc.bnii   -o labels.bnii -M 0:4 -F bnii\n"
+                 "\n"
                  "  # TensorRT engine path (opt-in: heavy first-run engine build, fast thereafter):\n"
                  "  siamize -i input.nii.gz -o labels.nii.gz -M 0 -c tensorrt \\\n"
                  "          --trt-cache-dir $HOME/.cache/siamize/trt\n"
@@ -163,6 +176,7 @@ int main(int argc, char** argv) {
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
+    std::string out_format      = "nii"; // nii | jnii | bnii
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     bool verbose = false;
     std::array<int64_t, 3> patch = {256, 256, 192};
@@ -248,6 +262,17 @@ int main(int argc, char** argv) {
             }
         } else if (a == "-G" || a == "--gpu") {
             cuda_tuning.gpuid = std::stoi(need());
+        } else if (a == "-F" || a == "--format") {
+            std::string s = need();
+
+            if (s != "nii" && s != "jnii" && s != "bnii") {
+                std::fprintf(stderr,
+                             "-F/--format must be nii|jnii|bnii (got '%s')\n",
+                             s.c_str());
+                return 2;
+            }
+
+            out_format = s;
         } else if (a == "--tpm") {
             // Bare flag OR optional 0|1|true|false. If the next arg
             // looks like a bool value, consume it; otherwise default to
@@ -358,7 +383,27 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "input: %s\n", input_path.c_str());
     }
 
-    NiftiImage img = siam::load_nifti_ras(input_path);
+    // Input dispatch: .jnii / .bnii go through the JNIfTI reader, anything
+    // else (typically .nii / .nii.gz) through the NIfTI-1 reader.
+    auto ends_with_ci = [](const std::string& s, const std::string& suf) {
+        if (s.size() < suf.size()) {
+            return false;
+        }
+
+        for (size_t i = 0; i < suf.size(); ++i) {
+            char a = s[s.size() - suf.size() + i], b = suf[i];
+
+            if (std::tolower(static_cast<unsigned char>(a))
+                    != std::tolower(static_cast<unsigned char>(b))) {
+                return false;
+            }
+        }
+
+        return true;
+    };
+    NiftiImage img = (ends_with_ci(input_path, ".jnii") || ends_with_ci(input_path, ".bnii"))
+                     ? siam::load_jnifti_ras(input_path)
+                     : siam::load_nifti_ras(input_path);
 
     if (verbose) {
         std::fprintf(stderr,
@@ -530,7 +575,12 @@ int main(int argc, char** argv) {
         }
 
         logits_back = LogitsVolume{};
-        siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes);
+        if (out_format == "nii") {
+            siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes);
+        } else {
+            siam::save_jnifti_tpm(output_path, img, tpm_canon.data(),
+                                  num_classes, out_format);
+        }
     } else {
         // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------
         std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
@@ -570,7 +620,12 @@ int main(int argc, char** argv) {
             }
         }
 
-        siam::save_nifti_labels(output_path, img, labels_canon.data());
+        if (out_format == "nii") {
+            siam::save_nifti_labels(output_path, img, labels_canon.data());
+        } else {
+            siam::save_jnifti_labels(output_path, img, labels_canon.data(),
+                                     out_format);
+        }
     }
 
     auto t_end = std::chrono::steady_clock::now();
