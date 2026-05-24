@@ -287,6 +287,40 @@ build/siamize -i input.nii.gz -o output.nii.gz \
 `std::thread::hardware_concurrency()`); set it explicitly only if you
 want to throttle CPU use.
 
+#### JNIfTI containers (`.jnii` / `.bnii`)
+
+In addition to NIfTI-1, `siamize` reads and writes
+[JNIfTI](https://neurojson.org/jnifti) — the JData/BJData wrapping
+of NIfTI metadata + voxel data used by the NeuroJSON ecosystem.
+Input format is inferred from the file extension; output format is
+selected via `-F/--format`:
+
+```bash
+# Text-JSON JNIfTI labelmap (human-readable; zlib + base64 payload)
+build/siamize -i input.nii.gz -o labels.jnii -M 0 -F jnii
+
+# BJData binary JNIfTI labelmap (compact binary; zlib raw bytes)
+build/siamize -i input.nii.gz -o labels.bnii -M 0 -F bnii
+
+# JNIfTI input (e.g. produced by jsonlab's savejd):
+build/siamize -i preproc.bnii -o labels.bnii -M 0 -F bnii
+```
+
+| `-F` | Output container | Payload | Notes |
+|---|---|---|---|
+| `nii` (default) | NIfTI-1 (`.nii`, gzipped if `.gz`) | raw bytes | Smallest for sparse uint8 labelmaps. |
+| `jnii` | JSON-text JNIfTI | zlib + base64 | Human-readable; pairs with `loadjd` / `jsonlab`. |
+| `bnii` | BJData binary JNIfTI | zlib (raw bytes) | Compact binary; pairs with the NeuroJSON ecosystem. |
+
+For label volumes specifically, `.nii.gz` is usually the tightest on
+disk — raw gzip already exploits per-voxel value redundancy
+efficiently. JNIfTI's value here is interoperability with JSON / JData
+tooling (jsonlab, `jdataencode` / `jdatadecode`, browser-based viewers,
+the NeuroJSON database), not raw compression. Voxel-identical
+round-tripping has been verified for `.nii.gz` ↔ `.jnii` ↔ `.bnii`
+inputs on the bundled `sub-01_T1w.nii.gz` (100 % agreement, 5-fold
+ensemble).
+
 ### 4. Regression test (optional)
 
 ```bash
@@ -573,6 +607,30 @@ the published SIAM v0.3 weights without modification.
   the file's header. Inside zmat:
   - **[miniz](https://github.com/richgel999/miniz)** by Rich Geldreich
     — public-domain (Unlicense) zlib-subset deflate/inflate.
+- **[nlohmann/json](https://github.com/NeuroJSON/json)** (NeuroJSON
+  fork) — the single-header `src/nlohmann/json.hpp` provides the
+  JSON / BJData parser and serializer used for `.jnii` / `.bnii` I/O.
+  MIT-licensed. The NeuroJSON fork extends upstream nlohmann/json with
+  BJData Draft 4 SOA (structure-of-arrays) support; the JData
+  annotated-array spec (`_ArrayType_`, `_ArrayZipData_`, etc.) is
+  implemented by `src/jnifti_io.cpp` on top of it. The header is
+  vendored from the **[umcx](https://github.com/fangq/umcx)** project
+  by Qianqian Fang — a single-source OpenMP / OpenACC Monte Carlo
+  photon simulator — where the same header serves the same JData /
+  BJData container role; keeping a single vendored copy across
+  NeuroJSON-family C/C++ tools (umcx, siamize, …) avoids divergence.
+
+### Standards implemented
+
+- **[JNIfTI specification](https://neurojson.org/jnifti)** by Qianqian
+  Fang — defines the JSON / BJData wrapping of NIfTI-1/2 metadata and
+  voxel data used by siamize for `.jnii` / `.bnii` containers. JNIfTI
+  is part of the [NeuroJSON project](https://neurojson.org); the
+  underlying [JData](https://neurojson.org/jdata) annotated-array
+  encoding (`_ArrayType_`, `_ArraySize_`, `_ArrayZipData_`, …) and
+  [BJData](https://neurojson.org/bjdata) binary container are
+  implemented in `src/jnifti_io.cpp` on top of the vendored
+  nlohmann/json header described above.
 
 ### Test data
 
