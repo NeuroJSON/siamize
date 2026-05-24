@@ -582,11 +582,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 
         if (ram_tight) {
-            // Patch (-P) is intentionally NOT auto-shrunk: the shipped
-            // SIAM v0.3 ONNX folds have a fixed (256, 256, 192) input
-            // shape, and any other size triggers
-            // "Got invalid dimensions for input". A dynamic-shape
-            // re-export would unlock smaller patches.
+            if (!opts.patch_set) {
+                opts.patch = {192, 192, 128};
+            }
+
             if (!opts.cpu_arena_set) {
                 opts.engine_tuning.cpu_arena = false;
             }

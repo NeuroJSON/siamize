@@ -190,6 +190,7 @@ jobs:
         run: |
           set +e
           timeout 90 ${{ matrix.binary }} \
+              --lowmem \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
