@@ -1,0 +1,91 @@
+# Doxygen configuration for siamize
+# https://github.com/NeuroJSON/siamize
+#
+# Generates HTML documentation from the in-source doxygen blocks added
+# across src/ and the top-level README.md. Run via `make doc`; output
+# lands under build/doc/html/ -- open build/doc/html/index.html to browse.
+
+# ---- Project metadata -------------------------------------------------------
+
+PROJECT_NAME           = "siamize"
+PROJECT_NUMBER         = 0.1.0
+PROJECT_BRIEF          = "Native C++/ONNX port of SIAM v0.3 brain segmentation"
+OUTPUT_DIRECTORY       = build/doc
+OUTPUT_LANGUAGE        = English
+CREATE_SUBDIRS         = NO
+ALLOW_UNICODE_NAMES    = YES
+
+# ---- Inputs -----------------------------------------------------------------
+
+INPUT                  = src \
+                         README.md \
+                         matlab/README.md
+USE_MDFILE_AS_MAINPAGE = README.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h \
+                         *.hpp \
+                         *.cpp \
+                         *.md
+
+# Bundled third-party headers don't need their own doxygen pages. Skip them
+# so the output focuses on siamize's own source.
+EXCLUDE_PATTERNS       = */nlohmann/* \
+                         */zmat/*
+
+# ---- What to extract --------------------------------------------------------
+
+# EXTRACT_ALL lets undocumented entities still appear in the index; the
+# doxygen sweep covers most public surface, but this catches anything missed.
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_ANON_NSPACES   = YES
+
+# First line of /** ... */ is treated as the brief description (mcxcl style).
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+BUILTIN_STL_SUPPORT    = YES
+
+# ---- Output formats ---------------------------------------------------------
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_DYNAMIC_MENUS     = YES
+GENERATE_TREEVIEW      = YES
+
+GENERATE_LATEX         = NO
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+
+# ---- Warnings ---------------------------------------------------------------
+
+QUIET                  = NO
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+
+# ---- Source browser ---------------------------------------------------------
+
+# Cross-link tags / declarations to the source so readers can jump from
+# the API page into the implementation.
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# ---- Diagrams ---------------------------------------------------------------
+
+# Off by default; flip to YES + install graphviz to get class / call graphs.
+HAVE_DOT               = NO
+CLASS_DIAGRAMS         = NO
+
+# ---- Preprocessor predefines ------------------------------------------------
+
+# Make doxygen evaluate the same #ifdef branches the compiler picks for the
+# common Linux/macOS CPU build, so the rendered code matches what runs.
+PREDEFINED             = __cplusplus=201703L \
+                         _OPENMP=1

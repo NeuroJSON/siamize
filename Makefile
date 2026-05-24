@@ -19,6 +19,9 @@
 #
 #   make test             run tests/run_regression.sh (needs models/ populated)
 #
+#   make doc              build doxygen HTML docs -> build/doc/html/index.html
+#   make doc-clean        rm -rf build/doc/
+#
 #   make pretty           astyle on C++, black on Python
 #   make pretty-cpp / pretty-py
 #
@@ -43,7 +46,8 @@ ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
-        ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test
+        ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
+        doc doc-clean
 
 # ---- CLI builds -------------------------------------------------------------
 
@@ -121,6 +125,25 @@ package-tensorrt:
 
 package-mex:
 	scripts/package.sh mex      siamex
+
+# ---- Documentation ----------------------------------------------------------
+
+# Build doxygen HTML docs from the in-source doxygen blocks. Output lands
+# under build/doc/html/. Requires the `doxygen` binary on PATH
+# (apt install doxygen / brew install doxygen).
+doc:
+	@command -v doxygen >/dev/null 2>&1 || { \
+	    echo "doxygen not found. Install it:"; \
+	    echo "    Debian/Ubuntu: sudo apt install doxygen"; \
+	    echo "    macOS:         brew install doxygen"; \
+	    exit 1; \
+	}
+	doxygen Doxyfile
+	@echo
+	@echo "[make doc] generated $(BUILD_DIR)/doc/html/index.html"
+
+doc-clean:
+	rm -rf $(BUILD_DIR)/doc
 
 # ---- Misc -------------------------------------------------------------------
 
