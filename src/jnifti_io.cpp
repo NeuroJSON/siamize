@@ -1,8 +1,48 @@
-// JNIfTI (.jnii text / .bnii BJData) container I/O. Same NIfTI metadata
-// + voxel data the NIfTI-1 path handles, but wrapped in a JSON-Data
-// container per https://neurojson.org/jnifti. Voxel data is
-// zlib-compressed and stored as a JData annotated array
-// (_ArrayZipData_).
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**  \li \c (\b JNIfTI) The JNIfTI specification, Q. Fang, NeuroJSON project.
+**         <a href="https://neurojson.org/jnifti">https://neurojson.org/jnifti</a>
+**  \li \c (\b JData) The JData specification, Q. Fang, NeuroJSON project.
+**         <a href="https://neurojson.org/jdata">https://neurojson.org/jdata</a>
+**  \li \c (\b BJData) The Binary JData specification, Q. Fang, NeuroJSON project.
+**         <a href="https://neurojson.org/bjdata">https://neurojson.org/bjdata</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    jnifti_io.cpp
+\brief   JNIfTI (.jnii / .bnii) container reader / writer implementation
+
+This translation unit implements siamize's JNIfTI I/O path. It mirrors
+the NIfTI-1 functionality in nifti_io.cpp but emits / consumes JNIfTI
+containers per https://neurojson.org/jnifti -- JData-annotated JSON
+(.jnii, text) or BJData (.bnii, binary JSON). Voxel data is always
+stored compressed via the `_ArrayZipData_` field; compression and
+base64 encoding/decoding are delegated to zmat (src/zmat/zmat.h),
+matching the codec siamize already uses for `.nii.gz` gzip I/O.
+
+The reader handles the dtype variety that real-world NIfTI volumes
+contain (uint8 / int8 / int16 / uint16 / int32 / uint32 / float32 /
+float64) and converts to a column-major (NIfTI X-fastest) float32
+volume, which copy_reorient_to_canonical() then turns into the
+(Z, Y, X) RAS layout the rest of siamize expects. The writer mirrors
+jsonlab's jdataencode convention: it permutes axes BEFORE flattening
+so the on-disk byte order is row-major (last-dim-fastest), and emits
+`_ArrayZipSize_ = [1, N]` (the jsonlab "flat-shape" convention for
+compressed arrays).
+*******************************************************************************/
 
 #include "jnifti_io.h"
 #include "orient.h"
@@ -21,22 +61,41 @@
 
 namespace siam {
 
-using json = nlohmann::ordered_json;
+using json = nlohmann::ordered_json;  ///< preserve key order in emitted JSON
 
 namespace {
 
+/*******************************************************************************/
+/*! \fn    bool ends_with(const std::string& s, const std::string& suffix)
+    \brief Case-sensitive suffix test on a path string
+    \param s       the haystack string (typically a file path)
+    \param suffix  the needle suffix (e.g. ".bnii")
+    \return true if \a s ends with \a suffix, false otherwise
+*/
 bool ends_with(const std::string& s, const std::string& suffix) {
     return s.size() >= suffix.size()
            && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-// Thin C++ wrapper around zmat's all-in-one driver zmat_run, returning
-// the output in a std::vector and throwing on error. zmat owns the
-// output buffer via malloc; we copy and zmat_free it before returning.
-// zipid: one of zmZlib / zmGzip / zmBase64 (zmat supports more --
-// zmLzma, zmZstd, etc. -- but the JNIfTI spec only mandates zlib here).
-// iscompress: 1 for encode/compress, 0 for decode/decompress.
-std::vector<uint8_t> run_zmat(const uint8_t* in, size_t n, int zipid, int iscompress) {
+/*******************************************************************************/
+/*! \fn    std::vector<uint8_t> zmat_xform(const uint8_t* in, size_t n,
+                                           int zipid, int iscompress)
+    \brief Thin C++ wrapper around zmat's all-in-one driver zmat_run
+
+    Returns the output buffer in a std::vector and throws on error. zmat
+    owns the raw output buffer via malloc; this wrapper copies into a
+    vector and calls zmat_free before returning so the caller never has
+    to worry about manual cleanup. JNIfTI only mandates zlib for the
+    `_ArrayZipType_` field, but zmat itself supports zmGzip, zmLzma,
+    zmZstd, zmBlosc2*, etc. -- the same wrapper handles them all.
+
+    \param  in          input buffer (read-only)
+    \param  n           number of bytes in \a in
+    \param  zipid       codec ID: zmZlib / zmGzip / zmBase64 / ...
+    \param  iscompress  1 = encode/compress, 0 = decode/decompress
+    \return             a std::vector<uint8_t> holding the transformed bytes
+*/
+std::vector<uint8_t> zmat_xform(const uint8_t* in, size_t n, int zipid, int iscompress) {
     unsigned char* out = nullptr;
     size_t outlen = 0;
     int zret = 0;
@@ -60,11 +119,26 @@ std::vector<uint8_t> run_zmat(const uint8_t* in, size_t n, int zipid, int iscomp
     return result;
 }
 
-// Column-major (X-fastest) -> row-major (last-dim-fastest) transpose.
-// Required for _ArrayZipData_ output because jsonlab's jdataencode does
-// the same reshape+permute internally before compression, so the on-
-// disk byte order is row-major regardless of any _ArrayOrder_ tag.
-// Matches jsonlab/jdataencode.m lines 475-480.
+/*******************************************************************************/
+/*! \fn    template <typename T>
+           std::vector<T> col_to_row_major(const T* col,
+                                           const std::vector<int64_t>& shape)
+    \brief Transpose a flat buffer from column-major to row-major layout
+
+    Column-major == NIfTI X-fastest / MATLAB native; row-major ==
+    last-dim-fastest / numpy C-order. Required before writing
+    `_ArrayZipData_` because jsonlab's jdataencode internally
+    permutes axes via `permute(item, ndims:-1:1)` before flattening
+    (see jsonlab/jdataencode.m lines 475-480), so the on-disk byte
+    order is last-dim-fastest regardless of any `_ArrayOrder_` tag.
+    Mirroring that here ensures round-trip identity through jsonlab's
+    loadjd / jdatadecode without channel scrambling.
+
+    \tparam T      element type (uint8_t, float, etc.)
+    \param  col    column-major flat buffer of length prod(shape)
+    \param  shape  N-D shape (X, Y, Z[, C])
+    \return        row-major flat buffer of the same length
+*/
 template <typename T>
 std::vector<T> col_to_row_major(const T* col, const std::vector<int64_t>& shape) {
     size_t n = 1;
@@ -104,7 +178,15 @@ std::vector<T> col_to_row_major(const T* col, const std::vector<int64_t>& shape)
     return row;
 }
 
-// JData dtype string for the C++ scalar type.
+/*******************************************************************************/
+/*! \fn    template <typename T> std::string jdata_dtype()
+    \brief Map a C++ scalar type to the JData `_ArrayType_` string
+
+    JData uses MATLAB-style dtype names ("single" / "double" instead of
+    "float32" / "float64"). Specializations are provided for the dtypes
+    siamize actually emits (writer side). The reader supports a wider
+    set (uint16, uint32, etc.) via decode_nifti_data().
+*/
 template <typename T> std::string jdata_dtype();
 template <> std::string jdata_dtype<uint8_t>()  { return "uint8";  }
 template <> std::string jdata_dtype<int16_t>()  { return "int16";  }
@@ -112,9 +194,28 @@ template <> std::string jdata_dtype<int32_t>()  { return "int32";  }
 template <> std::string jdata_dtype<float>()    { return "single"; }
 template <> std::string jdata_dtype<double>()   { return "double"; }
 
-// Build the JData annotated-array sub-object for `data` of dtype T,
-// dimensions `shape`. Compresses with zlib; encodes the result as
-// base64 string for text format, raw bytes for binary format.
+/*******************************************************************************/
+/*! \fn    template <typename T>
+           json jdata_annotated(const T* data,
+                                const std::vector<int64_t>& shape,
+                                bool binary_format)
+    \brief Build a JData annotated-array sub-object for one volume buffer
+
+    Permutes \a data from column-major to row-major (jsonlab convention),
+    zlib-compresses the result, and packages it as a JData annotated
+    array with `_ArrayType_`, `_ArraySize_`, `_ArrayZipType_`,
+    `_ArrayZipSize_`, and `_ArrayZipData_` fields. `_ArrayZipSize_` is
+    always `[1, N]` (jsonlab's flat-shape convention for compressed
+    arrays); the actual N-D shape is recovered by jsonlab from
+    `_ArraySize_` via its format>1.9 reshape+permute pair.
+
+    \tparam T              scalar element type (uint8_t, float, ...)
+    \param  data           column-major flat input, length prod(shape)
+    \param  shape          N-D shape, in NIfTI-native (X-fastest) order
+    \param  binary_format  true for .bnii (raw bytes in BJData binary string),
+                           false for .jnii (base64-encoded ASCII string)
+    \return                a JSON object holding the annotated array
+*/
 template <typename T>
 json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool binary_format) {
     size_t n_elem = 1;
@@ -133,7 +234,7 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool bina
     // format>1.9 reshape+permute pair recovers it correctly.
     std::vector<T> row = col_to_row_major(data, shape);
     const size_t raw_bytes = n_elem * sizeof(T);
-    auto comp = run_zmat(reinterpret_cast<const uint8_t*>(row.data()), raw_bytes,
+    auto comp = zmat_xform(reinterpret_cast<const uint8_t*>(row.data()), raw_bytes,
                          zmZlib, /*iscompress=*/1);
 
     json arr = json::object();
@@ -150,13 +251,28 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool bina
         // should be on the .bnii wire.
         arr["_ArrayZipData_"] = json::binary(comp);
     } else {
-        auto b64 = run_zmat(comp.data(), comp.size(), zmBase64, /*iscompress=*/1);
+        auto b64 = zmat_xform(comp.data(), comp.size(), zmBase64, /*iscompress=*/1);
         arr["_ArrayZipData_"] = std::string(b64.begin(), b64.end());
     }
 
     return arr;
 }
 
+/*******************************************************************************/
+/*! \fn    json build_header(const NiftiImage& src,
+                             const std::vector<int64_t>& dim)
+    \brief Build the JNIfTI `NIFTIHeader` sub-object for the output file
+
+    Carries the input image's affine and voxel size into the output
+    header so downstream readers see the same spatial metadata the
+    original NIfTI carried. Affine is written as a 3x4 nested JSON
+    array (the form jsonlab's text path emits for small matrices; the
+    reader also accepts the JData annotated form for BJData files).
+
+    \param  src  source NiftiImage (provides affine_orig)
+    \param  dim  output volume shape (3D for labelmaps, 4D for TPM)
+    \return      a NIFTIHeader JSON object
+*/
 json build_header(const NiftiImage& src, const std::vector<int64_t>& dim) {
     json h = json::object();
     h["NIIHeaderSize"] = 348;
@@ -192,6 +308,20 @@ json build_header(const NiftiImage& src, const std::vector<int64_t>& dim) {
     return h;
 }
 
+/*******************************************************************************/
+/*! \fn    void write_jnifti_root(const std::string& path,
+                                  const json& j, bool binary)
+    \brief Serialize the root JSON object and write it to disk
+
+    For text output, dumps the JSON tree with nlohmann/json's default
+    compact formatter. For binary output, uses BJData's optimized
+    "use_count=true, use_type=true" mode which produces typed `[$T#`
+    array headers, matching what jsonlab's saveubjson / savebj emits.
+
+    \param  path    destination file path
+    \param  j       fully-populated JNIfTI root object
+    \param  binary  true to emit BJData (.bnii), false for JSON text (.jnii)
+*/
 void write_jnifti_root(const std::string& path, const json& j, bool binary) {
     std::ofstream f(path, std::ios::binary);
 
@@ -213,10 +343,24 @@ void write_jnifti_root(const std::string& path, const json& j, bool binary) {
     }
 }
 
-// Inverse of col_to_row_major: takes a buffer flat-stored in
-// "last-dim-fastest" (row-major C-style) layout and produces a buffer
-// flat-stored in "first-dim-fastest" (column-major / MATLAB-native /
-// NIfTI X-fastest) layout, same shape.
+/*******************************************************************************/
+/*! \fn    template <typename T>
+           std::vector<T> row_to_col_major(const T* row,
+                                           const std::vector<int64_t>& shape)
+    \brief Transpose a flat buffer from row-major to column-major
+
+    Inverse of col_to_row_major: takes a buffer flat-stored in
+    last-dim-fastest (row-major / numpy C-order) layout and produces
+    a buffer flat-stored in first-dim-fastest (column-major /
+    MATLAB-native / NIfTI X-fastest) layout, of the same N-D shape.
+    Used on the read path to recover NIfTI-native voxel order from
+    the wire-format byte stream.
+
+    \tparam T      element type
+    \param  row    row-major flat buffer of length prod(shape)
+    \param  shape  N-D shape
+    \return        column-major flat buffer of the same length
+*/
 template <typename T>
 std::vector<T> row_to_col_major(const T* row, const std::vector<int64_t>& shape) {
     size_t n = 1;
@@ -257,7 +401,13 @@ std::vector<T> row_to_col_major(const T* row, const std::vector<int64_t>& shape)
     return col;
 }
 
-// Read all bytes of a file into memory.
+/*******************************************************************************/
+/*! \fn    std::vector<uint8_t> read_file_bytes(const std::string& path)
+    \brief Slurp the entire contents of a file into memory
+
+    \param  path  source file path
+    \return       a std::vector<uint8_t> holding the raw file bytes
+*/
 std::vector<uint8_t> read_file_bytes(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
 
@@ -276,8 +426,18 @@ std::vector<uint8_t> read_file_bytes(const std::string& path) {
     return buf;
 }
 
-// Parse the file as JSON (.jnii) or BJData (.bnii). Returns the parsed
-// tree. Format is inferred from the path extension.
+/*******************************************************************************/
+/*! \fn    json parse_jnifti(const std::string& path, bool& is_binary)
+    \brief Parse a JNIfTI file (.jnii or .bnii) into a nlohmann::json tree
+
+    The container format is inferred from the file extension
+    (case-insensitive): `.bnii` / `.BNII` -> BJData binary, anything
+    else -> JSON text.
+
+    \param  path       source file path
+    \param  is_binary  output: set true if the file was parsed as BJData
+    \return            parsed JSON tree (root object)
+*/
 json parse_jnifti(const std::string& path, bool& is_binary) {
     is_binary = ends_with(path, ".bnii") || ends_with(path, ".BNII");
     auto bytes = read_file_bytes(path);
@@ -289,14 +449,28 @@ json parse_jnifti(const std::string& path, bool& is_binary) {
     return json::parse(bytes.begin(), bytes.end());
 }
 
-// Extract a 4x4 row-major affine from NIFTIHeader.Affine. Accepts two
-// wire formats:
-//   1. Plain nested JSON array: [[r0c0..r0c3], [r1...], [r2...]]
-//      (text .jnii from jsonlab for small matrices, our own writer's
-//      output).
-//   2. JData annotated array: {_ArrayType_, _ArraySize_=[rows, 4],
-//      _ArrayData_=[12-or-16 values, row-major after jsonlab's
-//      permute-reverse step]} -- BJData .bnii path from jsonlab.
+/*******************************************************************************/
+/*! \fn    std::array<float, 16> extract_affine(const json& nii_header)
+    \brief Extract a 4x4 row-major affine from `NIFTIHeader.Affine`
+
+    JNIfTI files written by different tools encode the affine in
+    different ways:
+
+      1. Plain nested JSON array `[[r0c0..r0c3], [r1...], [r2...]]` --
+         emitted by jsonlab's text-JSON path for small matrices, and by
+         siamize's own writer.
+
+      2. JData annotated array
+         `{_ArrayType_, _ArraySize_=[rows, 4], _ArrayData_=[12-or-16 values]}`
+         where the data is row-major after jsonlab's permute-reverse
+         step -- emitted by jsonlab's BJData path.
+
+    Both forms are accepted. Missing rows (a 3x4 affine) are interpreted
+    as having an implicit `[0, 0, 0, 1]` bottom row.
+
+    \param  nii_header  the parsed `NIFTIHeader` JSON object
+    \return             the affine as a 16-element row-major std::array
+*/
 std::array<float, 16> extract_affine(const json& nii_header) {
     std::array<float, 16> a{};
     a[0] = a[5] = a[10] = a[15] = 1.0f;
@@ -365,8 +539,33 @@ std::array<float, 16> extract_affine(const json& nii_header) {
     return a;
 }
 
-// Decode the NIFTIData jdata-annotated array into a flat row-major
-// (last-dim-fastest) byte buffer in dtype `dtype` and `shape` shape.
+/*******************************************************************************/
+/*! \fn    std::vector<uint8_t> decode_nifti_data(const json& nd,
+                                                  bool is_binary,
+                                                  std::vector<int64_t>& shape,
+                                                  std::string& dtype)
+    \brief Decode `NIFTIData` into a flat row-major byte buffer
+
+    Handles both wire-format paths:
+
+      - **Compressed**: `_ArrayZipData_` (zlib bytes, in either a BJData
+        binary string, base64-encoded JSON string, or a defensive
+        numeric-array fallback). Decompressed via zmat.
+      - **Uncompressed**: `_ArrayData_` as a flat numeric array (or a
+        BJData binary string for uint8). Each element is marshalled
+        into its dtype's wire representation via std::memcpy.
+
+    The output buffer is in row-major (last-dim-fastest) order with
+    the dtype reported via the \a dtype out-parameter; downstream
+    code converts to column-major + float32 via to_float_col_major().
+
+    \param  nd         the parsed `NIFTIData` JSON object
+    \param  is_binary  whether the source file was BJData (currently
+                       unused; the in-payload encoding is self-describing)
+    \param  shape      output: the N-D shape from `_ArraySize_`
+    \param  dtype      output: the JData dtype string from `_ArrayType_`
+    \return            flat row-major byte buffer of length prod(shape)*sizeof(dtype)
+*/
 std::vector<uint8_t> decode_nifti_data(const json& nd,
                                        bool is_binary,
                                        std::vector<int64_t>& shape,
@@ -429,7 +628,7 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
         } else if (zd.is_string()) {
             // .jnii: base64 ASCII -> raw zlib bytes via zmat.
             const std::string& s = zd.get<std::string>();
-            comp = run_zmat(reinterpret_cast<const uint8_t*>(s.data()), s.size(),
+            comp = zmat_xform(reinterpret_cast<const uint8_t*>(s.data()), s.size(),
                             zmBase64, /*iscompress=*/0);
         } else if (zd.is_array()) {
             // Defensive: a few encoders emit byte payloads as numeric arrays.
@@ -442,7 +641,7 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
             throw std::runtime_error("_ArrayZipData_ has unexpected type");
         }
 
-        auto raw = run_zmat(comp.data(), comp.size(), zmZlib, /*iscompress=*/0);
+        auto raw = zmat_xform(comp.data(), comp.size(), zmZlib, /*iscompress=*/0);
 
         if (raw.size() != raw_bytes) {
             throw std::runtime_error(
@@ -521,8 +720,22 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
     return raw;
 }
 
-// Convert a typed flat row-major buffer into a column-major float32
-// volume of the same shape.
+/*******************************************************************************/
+/*! \fn    template <typename SrcT>
+           std::vector<float> to_float_col_major(const uint8_t* row_bytes,
+                                                 const std::vector<int64_t>& shape)
+    \brief Convert a typed row-major byte buffer to a column-major float32 volume
+
+    Reinterprets \a row_bytes as `SrcT*`, casts each element to float,
+    then transposes to column-major via row_to_col_major(). Matches
+    the dtype handling of NIfTI-1: the inference pipeline only ever
+    sees float32 with NIfTI-native X-fastest axis order.
+
+    \tparam SrcT       source element type (uint8_t, int16_t, float, ...)
+    \param  row_bytes  row-major byte buffer
+    \param  shape      N-D shape (X, Y, Z)
+    \return            column-major float32 buffer of length prod(shape)
+*/
 template <typename SrcT>
 std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vector<int64_t>& shape) {
     size_t n = 1;
@@ -544,6 +757,23 @@ std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vecto
 }  // anonymous namespace
 
 
+/*******************************************************************************/
+/*! \fn    void save_jnifti_labels(const std::string& path,
+                                   const NiftiImage& src,
+                                   const uint8_t* labels_zyx,
+                                   const std::string& format)
+    \brief Save a 3D uint8 labelmap as a JNIfTI container
+
+    Reorients the canonical (Z, Y, X) labelmap back to the input
+    file's native voxel axis order via copy_reorient_from_canonical,
+    builds the NIFTIHeader/NIFTIData JSON root, and writes it as
+    either text JSON (.jnii) or BJData binary (.bnii).
+
+    \param  path        destination file path
+    \param  src         input NiftiImage providing affine + axis order
+    \param  labels_zyx  canonical (Z, Y, X) labelmap, length cZ*cY*cX bytes
+    \param  format      "jnii" (text JSON) or "bnii" (BJData binary)
+*/
 void save_jnifti_labels(const std::string& path,
                         const NiftiImage& src,
                         const uint8_t* labels_zyx,
@@ -581,6 +811,26 @@ void save_jnifti_labels(const std::string& path,
 }
 
 
+/*******************************************************************************/
+/*! \fn    void save_jnifti_tpm(const std::string& path,
+                                const NiftiImage& src,
+                                const float* tpm_canon_czyx,
+                                int64_t num_classes,
+                                const std::string& format)
+    \brief Save a 4D float32 tissue probability map as a JNIfTI container
+
+    Same machinery as save_jnifti_labels but for the per-class softmax
+    output. The source layout is channel-slowest (C, cZ, cY, cX) in
+    canonical orientation; each channel is independently reoriented
+    via copy_reorient_from_canonical and interleaved into a
+    (X, Y, Z, C) volume before serialization.
+
+    \param  path             destination file path
+    \param  src              input NiftiImage whose header is reused
+    \param  tpm_canon_czyx   channel-slowest TPM in canonical orientation
+    \param  num_classes      number of channels (NIfTI dim[4])
+    \param  format           "jnii" (text JSON) or "bnii" (BJData binary)
+*/
 void save_jnifti_tpm(const std::string& path,
                      const NiftiImage& src,
                      const float* tpm_canon_czyx,
@@ -629,6 +879,24 @@ void save_jnifti_tpm(const std::string& path,
 }
 
 
+/*******************************************************************************/
+/*! \fn    NiftiImage load_jnifti_ras(const std::string& path)
+    \brief Load a JNIfTI file (.jnii or .bnii) into a canonical NiftiImage
+
+    Pipeline: read file bytes -> parse JSON / BJData -> extract affine
+    from `NIFTIHeader.Affine` -> decode `NIFTIData` to a row-major byte
+    buffer of the appropriate dtype -> cast to float32, transpose to
+    column-major -> compute axis permutation to RAS via
+    axes_to_canonical -> copy into canonical (Z, Y, X) order via
+    copy_reorient_to_canonical -> compute canonical affine + zooms.
+
+    The returned NiftiImage is bit-compatible with what load_nifti_ras()
+    produces, so the downstream pipeline does not need to know which
+    container fed it.
+
+    \param  path  source file path (.jnii or .bnii, case-insensitive)
+    \return       canonical NiftiImage in (Z, Y, X) RAS orientation
+*/
 NiftiImage load_jnifti_ras(const std::string& path) {
     bool is_binary = false;
     json root = parse_jnifti(path, is_binary);
