@@ -486,9 +486,27 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             m = siam::resolve_model_path(m, opts.verbose);
         }
 
-        if (opts.threads <= 0) {
+        // Match the CLI: auto -> min(hardware_concurrency, 16). The
+        // 16-cap matches the CPU EP's wall-time minimum measured on
+        // many-core hosts; beyond that ORT's CPU path plateaus or
+        // regresses due to memory-bandwidth + cross-CCD L3
+        // contention. See README's "CPU thread tuning" section.
+        bool threads_auto = (opts.threads <= 0);
+
+        if (threads_auto) {
             unsigned hc = std::thread::hardware_concurrency();
-            opts.threads = (hc > 0) ? static_cast<int>(hc) : 4;
+            int detected = (hc > 0) ? static_cast<int>(hc) : 4;
+            const int auto_cap = 16;
+            opts.threads = std::min(detected, auto_cap);
+        }
+
+        if (opts.verbose) {
+            siam::log_tag("siamize",
+                          "v0.1.0  device=%s  threads=%d%s%s%s",
+                          opts.device.c_str(), opts.threads,
+                          threads_auto ? " (auto)" : "",
+                          opts.tpm ? "  tpm" : "",
+                          opts.engine_tuning.cpu_arena ? "" : "  no-arena");
         }
 
         // ---- reorient to canonical (Z, Y, X) -----------------------------

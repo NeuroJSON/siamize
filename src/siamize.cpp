@@ -204,6 +204,17 @@ void usage(const char* exe) {
                  "                      T > 1 softens the distribution (more graded boundaries,\n"
                  "                      better-calibrated probabilities); T < 1 sharpens. Only\n"
                  "                      meaningful when --tpm is on.\n"
+                 "      --upsample      save the output at the internal inference resolution\n"
+                 "                      (target spacing, default 0.75 mm isotropic) instead\n"
+                 "                      of the input file's grid. Skips the per-channel\n"
+                 "                      trilinear back-resample, so a low-resolution input\n"
+                 "                      (e.g. 64^3 @ 4 mm) yields a super-resolved\n"
+                 "                      segmentation at ~341^3 @ 0.75 mm matching the network's\n"
+                 "                      learned detail. Output is in canonical (Z,Y,X) RAS\n"
+                 "                      orientation; the affine is rebuilt accordingly and the\n"
+                 "                      result is un-cropped to the full canonical extent\n"
+                 "                      (regions outside the nonzero head bbox are\n"
+                 "                      background-filled). Works with --tpm and all -F formats.\n"
                  "  -P, --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
                  "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
                  "  -C, --classes N     number of output classes, default 18 (SIAM v0.3).\n"
@@ -274,6 +285,10 @@ int main(int argc, char** argv) {
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
+    bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
+                                         //         (skip per-channel back-resample),
+                                         //         un-cropped to full canonical extent,
+                                         //         using canonical RAS orientation.
     std::string out_format      = "nii"; // nii | jnii | bnii
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     bool verbose = false;
@@ -360,6 +375,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--no-arena") {
             engine_tuning.cpu_arena = false;
+        } else if (a == "--upsample") {
+            upsample_mode = true;
         } else if (a == "-G" || a == "--gpu") {
             engine_tuning.gpuid = std::stoi(need());
         } else if (a == "-F" || a == "--format") {
@@ -459,11 +476,12 @@ int main(int argc, char** argv) {
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),
                   tpm_mode ? "  --tpm" : "",
+                  upsample_mode ? "  --upsample" : "",
                   engine_tuning.cpu_arena ? "" : "  --no-arena");
 
     if (models_csv.empty()) {
@@ -586,6 +604,209 @@ int main(int argc, char** argv) {
     }
 
     resampled = Volume{};  // free
+
+    // ===== Upsample branch: save the network's output at its native     ====
+    // ===== inference resolution (0.75 mm by default), un-cropped to     ====
+    // ===== the full canonical extent, with canonical RAS orientation.   ====
+    // ===== Skips the per-channel trilinear back-resample below, so a    ====
+    // ===== low-res input yields a super-resolved segmentation matching  ====
+    // ===== the network's learned detail.                                ====
+    if (upsample_mode) {
+        // Shape of the FULL canonical grid at the target spacing.
+        auto full_up_shape = siam::compute_new_shape(
+                                 shape_canon, spacing_zyx, new_spacing);
+
+        // Where the cropped-and-network-resampled region falls inside
+        // the full upsampled grid (per-axis floor of bbox_lo scaled by
+        // input_spacing / target_spacing).
+        std::array<int64_t, 3> bbox_lo_up{};
+
+        for (int i = 0; i < 3; ++i) {
+            bbox_lo_up[i] = static_cast<int64_t>(std::llround(
+                                static_cast<double>(crop.bbox[i][0]) *
+                                spacing_zyx[i] / new_spacing[i]));
+        }
+
+        // Clamp the high end so round-off from compute_new_shape never
+        // drives writes past the end of the buffer.
+        const std::array<int64_t, 3> net_extent = {
+            logits.spat[0], logits.spat[1], logits.spat[2]
+        };
+        std::array<int64_t, 3> bbox_hi_up{};
+
+        for (int i = 0; i < 3; ++i) {
+            bbox_hi_up[i] = std::min(bbox_lo_up[i] + net_extent[i],
+                                     full_up_shape[i]);
+        }
+
+        siam::log_tag("upsample",
+                      "full canonical at %.3f mm  (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
+                      ")  bbox lo (%" PRId64 ",%" PRId64 ",%" PRId64 ")",
+                      target_spacing,
+                      full_up_shape[0], full_up_shape[1], full_up_shape[2],
+                      bbox_lo_up[0], bbox_lo_up[1], bbox_lo_up[2]);
+
+        // Build the canonical-RAS affine for the high-res grid:
+        //   col_i_new = col_i_canon * (target_spacing / canonical_zoom[i])
+        //   origin_new = origin_canon + half-pixel shift from spacing change
+        std::array<float, 16> A_up{};
+        A_up[15] = 1.0f;
+
+        for (int r = 0; r < 3; ++r) {
+            float origin_shift = 0.0f;
+
+            for (int i = 0; i < 3; ++i) {
+                const float scale = target_spacing / img.zooms_canon[i];
+                A_up[r * 4 + i] = img.affine_canon[r * 4 + i] * scale;
+                origin_shift += img.affine_canon[r * 4 + i] * 0.5f * (scale - 1.0f);
+            }
+
+            A_up[r * 4 + 3] = img.affine_canon[r * 4 + 3] + origin_shift;
+        }
+
+        // Synthetic NiftiImage in canonical RAS coords. perm/flip identity
+        // so save_nifti_* / save_jnifti_* do a memcpy through
+        // copy_reorient_from_canonical instead of a real reorient.
+        NiftiImage img_up;
+        img_up.affine_orig = A_up;
+        img_up.affine_canon = A_up;
+        img_up.zooms_canon = {target_spacing, target_spacing, target_spacing};
+        img_up.perm_canon_to_orig = {0, 1, 2};
+        img_up.flip_canon = {1, 1, 1};
+        img_up.shape_orig = {full_up_shape[2], full_up_shape[1], full_up_shape[0]};
+        img_up.volume.shape = {full_up_shape[0], full_up_shape[1], full_up_shape[2]};
+
+        const int64_t Zup = full_up_shape[0];
+        const int64_t Yup = full_up_shape[1];
+        const int64_t Xup = full_up_shape[2];
+        const int64_t plane_up = Yup * Xup;
+        const int64_t voxel_count_up = Zup * Yup * Xup;
+
+        const int64_t lzN = logits.spat[0];
+        const int64_t lyN = logits.spat[1];
+        const int64_t lxN = logits.spat[2];
+
+        if (tpm_mode) {
+            // ---- TPM branch (upsample): softmax in place on logits, then
+            //      pad each channel into a full-canonical-extent buffer
+            //      with background channel = 1.0 outside the bbox.
+            if (tpm_temperature != 1.0f) {
+                siam::log_tag("tpm",
+                              "softmax over %" PRId64 " classes  T=%.3f",
+                              num_classes, tpm_temperature);
+            } else {
+                siam::log_tag("tpm",
+                              "softmax over %" PRId64 " classes",
+                              num_classes);
+            }
+
+            const float inv_T = 1.0f / tpm_temperature;
+            const int64_t N_net = lzN * lyN * lxN;
+
+            for (int64_t i = 0; i < N_net; ++i) {
+                float m = logits.channel_ptr(0)[i] * inv_T;
+
+                for (int64_t c = 1; c < num_classes; ++c) {
+                    float v = logits.channel_ptr(c)[i] * inv_T;
+
+                    if (v > m) {
+                        m = v;
+                    }
+                }
+
+                float s = 0.0f;
+
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    float e = std::exp(logits.channel_ptr(c)[i] * inv_T - m);
+                    logits.channel_ptr(c)[i] = e;
+                    s += e;
+                }
+
+                float invs = 1.0f / s;
+
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    logits.channel_ptr(c)[i] *= invs;
+                }
+            }
+
+            std::vector<float> tpm_up(static_cast<size_t>(num_classes) * voxel_count_up, 0.0f);
+            // background channel (c=0) starts at 1.0 everywhere
+            std::fill_n(tpm_up.data(), voxel_count_up, 1.0f);
+
+            for (int64_t c = 0; c < num_classes; ++c) {
+                const float* src = logits.channel_ptr(c);
+                float* dst_chan = tpm_up.data() + c * voxel_count_up;
+
+                for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
+                    const int64_t lz = z - bbox_lo_up[0];
+
+                    for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
+                        const int64_t ly = y - bbox_lo_up[1];
+                        const int64_t copy_n_x = bbox_hi_up[2] - bbox_lo_up[2];
+                        std::copy_n(&src[lz * lyN * lxN + ly * lxN],
+                                    copy_n_x,
+                                    &dst_chan[z * plane_up + y * Xup + bbox_lo_up[2]]);
+                    }
+                }
+            }
+
+            logits = LogitsVolume{};
+
+            if (out_format == "nii") {
+                siam::save_nifti_tpm(output_path, img_up,
+                                     tpm_up.data(), num_classes);
+            } else {
+                siam::save_jnifti_tpm(output_path, img_up,
+                                      tpm_up.data(), num_classes, out_format);
+            }
+        } else {
+            // ---- Labels branch (upsample): argmax over logits at
+            //      network resolution, then pad into a full canonical
+            //      buffer (zeros outside the bbox = background class).
+            std::vector<uint8_t> labels_up(static_cast<size_t>(voxel_count_up), 0);
+
+            for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
+                const int64_t lz = z - bbox_lo_up[0];
+
+                for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
+                    const int64_t ly = y - bbox_lo_up[1];
+
+                    for (int64_t x = bbox_lo_up[2]; x < bbox_hi_up[2]; ++x) {
+                        const int64_t lx = x - bbox_lo_up[2];
+                        const int64_t i_net = lz * lyN * lxN + ly * lxN + lx;
+                        int best = 0;
+                        float bestv = logits.channel_ptr(0)[i_net];
+
+                        for (int64_t c = 1; c < num_classes; ++c) {
+                            float v = logits.channel_ptr(c)[i_net];
+
+                            if (v > bestv) {
+                                bestv = v;
+                                best = static_cast<int>(c);
+                            }
+                        }
+
+                        labels_up[z * plane_up + y * Xup + x] =
+                            static_cast<uint8_t>(best);
+                    }
+                }
+            }
+
+            logits = LogitsVolume{};
+
+            if (out_format == "nii") {
+                siam::save_nifti_labels(output_path, img_up, labels_up.data());
+            } else {
+                siam::save_jnifti_labels(output_path, img_up, labels_up.data(),
+                                         out_format);
+            }
+        }
+
+        auto t_end_up = std::chrono::steady_clock::now();
+        double seconds_up = std::chrono::duration<double>(t_end_up - t_start).count();
+        siam::log_tag("saved", "%s  in %.1fs", output_path.c_str(), seconds_up);
+        return 0;
+    }
 
     // resample logits back to cropped (pre-resample) shape, per channel, with trilinear.
     LogitsVolume logits_back;
