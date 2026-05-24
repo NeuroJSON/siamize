@@ -363,8 +363,8 @@ end
 
 % Everything after `models` is the options bag. Built with jsonlab's
 % `varargin2struct` so callers can mix:
-%     a single struct:                       siamize(in, out, 0, struct('device','cuda'))
-%     'param', value pairs:                  siamize(in, out, 0, 'device','cuda','verbose',1)
+%     a single struct:                       siamize(in, out, 0, struct('compute','cuda'))
+%     'param', value pairs:                  siamize(in, out, 0, 'compute','cuda','verbose',1)
 %     a struct + name/value overrides:       siamize(in, out, 0, defs, 'verbose', 1)
 %     nothing (empty opts):                  siamize(in, out, 0)
 opts_args = rest(2:end);

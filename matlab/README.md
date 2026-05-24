@@ -17,6 +17,7 @@
 - [Calling forms](#calling-forms)
 - [File-in / file-out](#file-in--file-out)
 - [Model selection](#model-selection)
+- [Options](#options)
 - [Weight cache](#weight-cache)
 - [Layout](#layout)
 - [Platforms](#platforms)
@@ -93,13 +94,27 @@ siamize('input.nii.gz', 'labels.nii.gz');
 % read .nii.gz, write binary JNIfTI, full 5-fold ensemble
 siamize('input.nii.gz', 'labels.bnii', 0:4);
 
-% pre-loaded jnifti struct, return labels in-memory
-nii = loadnifti('input.nii.gz');
-lab = siamize(nii);
+% pre-loaded jnifti struct, get a jnifti struct back in memory
+nii_in  = loadnifti('input.nii.gz');
+nii_out = siamize(nii_in);
+% nii_out.NIFTIData is uint8 [X, Y, Z] (the labelmap).
+% nii_out.NIFTIHeader is cloned from nii_in's header.
 
 % pure array, default centered affine inferred
-lab = siamize(my_volume);
+nii_out = siamize(my_volume);
+
+% TPM mode: nii_out.NIFTIData becomes 4D single (float32) [X, Y, Z, 18]
+nii_tpm = siamize('input.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
 ```
+
+`siamize` always returns a single jnifti struct (`nii.NIFTIHeader` +
+`nii.NIFTIData`). The dtype/rank of `nii.NIFTIData` depends on
+`opts.tpm`:
+
+| opts.tpm | nii.NIFTIData class | nii.NIFTIData size |
+|---|---|---|
+| `false` (default) | `uint8` | `[X Y Z]` (the labelmap) |
+| `true` | `single` | `[X Y Z num_classes]` (softmax probs, sum = 1 per voxel) |
 
 The wrapper auto-downloads each missing fold from the NeuroJSON URL
 listed under [Weight cache](#weight-cache) (overridable via
@@ -136,23 +151,29 @@ round-tripping when the user supplies a bare array.
 ```matlab
 siamize(inputfile, outputfile)
 siamize(inputfile, outputfile, models)
-siamize(inputfile, outputfile, models, opts)
-siamize(img, affine, outputfile, models, opts)
-siamize(array, outputfile, models, opts)   % synth header
+siamize(inputfile, outputfile, models, opts...)         % name/value pairs
+siamize(img, affine, outputfile, models, opts...)
+siamize(array, outputfile, models, opts...)             % synth header
+
+% TPM output works the same way -- writer infers dtype/rank from
+% nii.NIFTIData, so the same call writes a 4D file when opts.tpm is true:
+siamize('input.nii.gz', 'tpm.nii.gz', 0:4, 'tpm', true);
 ```
 
-Output extension picks the writer:
+Output extension picks the writer (works equally for 3D uint8 labels
+and 4D float32 TPMs):
 
 | Extension | Writer |
 |---|---|
-| `.nii`, `.nii.gz` | `jnii2nii(jnii_out, file)` |
-| `.jnii` | `savejnifti(jnii_out, file)` (text JNIfTI) |
-| `.bnii` | `savejnifti(jnii_out, file)` (binary JNIfTI) |
+| `.nii`, `.nii.gz` | `jnii2nii(nii_out, file)` |
+| `.jnii` | `savejnifti(nii_out, file)` (text JNIfTI) |
+| `.bnii` | `savejnifti(nii_out, file)` (binary JNIfTI) |
 
 When the input is a file / jnifti struct / readnifti struct, the source
 `NIFTIHeader` is preserved in the output (only `NIFTIData` is swapped to
-the labels and `Affine` is overwritten with the working affine). When the
-input is a bare array, `jnifticreate` builds a minimal header.
+the segmentation result and `Affine` is overwritten with the working
+affine). When the input is a bare array, `jnifticreate` builds a
+minimal header.
 
 The 2-arg ambiguity (output filename vs model spec) resolves by extension:
 `siamize(in, 'out.nii.gz')` writes a file, `siamize(in, '0')` runs fold 0.
@@ -173,6 +194,55 @@ siamize(in, out, {'fold_0_fp16.onnx','/abs/path/fold_1_fp16.onnx'})
 
 Single-digit `0..9` expands to `fold_<N>_fp16.onnx`; anything else is
 treated as a filename / path.
+
+## Options
+
+Options live in `opts`, which is the variadic tail after `models`.
+You can pass either a struct, a sequence of `'name', value` pairs, or
+any mix thereof — jsonlab's `varargin2struct` merges them into a
+single lowercase-keyed struct. The recognized keys mirror the
+siamize CLI long flags (hyphens become underscores in MATLAB):
+
+| Key | CLI counterpart | Value |
+|---|---|---|
+| `'compute'` | `-c / --compute` | `'auto'` (default), `'cpu'`, `'cuda'`, `'tensorrt'` |
+| `'thread'` | `-t / --thread` | int (default 0 = all available cores) |
+| `'gpu'` | `-G / --gpu` | int (0-based CUDA device id) |
+| `'patch'` | `-P / --patch` | `[pz, py, px]` (default `[256 256 192]`) |
+| `'spacing'` | `-u / --spacing` | double mm (default 0.75) |
+| `'classes'` | `-C / --classes` | int (default 18, matches SIAM v0.3) |
+| `'trt_cache'` | `--trt-cache-dir` | char (default `~/.cache/siamize/trt`) |
+| `'verbose'` | `-v / --verbose` | logical (default false) |
+| `'cudnn_max_workspace'` | `--cudnn-max-workspace` | 0 or 1 (default 1) |
+| `'arena_extend'` | `--arena-extend` | `'power'` (default) or `'same'` |
+| `'cudnn_algo'` | `--cudnn-algo` | `'default'` / `'heuristic'` / `'exhaustive'` |
+| `'gpu_mem_limit'` | `--gpu-mem-limit` | bytes (double, e.g. `6*1024^3` for 6 GB) |
+| `'tpm'` | `--tpm` | logical (default false). When true, `nii.NIFTIData` is a 4D single TPM instead of 3D uint8 labels. |
+| `'tpm_t'` | `--tpm-t` | softmax temperature (default 1.0). Only meaningful when `tpm` is true. |
+
+Examples mixing the three opts-passing styles:
+
+```matlab
+% struct
+siamize('in.nii.gz', 'lab.nii.gz', 0:4, struct('compute', 'cuda', 'verbose', 1));
+
+% name/value pairs
+siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'verbose', 1);
+
+% struct + override
+defs = struct('compute', 'cuda', 'tpm_t', 1.5);
+siamize('in.nii.gz', 'tpm.nii.gz', 0:4, defs, 'tpm', true);
+
+% tight-VRAM GPU recipe (8 GB consumer laptop card):
+siamize('in.nii.gz', 'lab.nii.gz', 0:4, ...
+        'compute', 'cuda', ...
+        'cudnn_max_workspace', 0, ...
+        'arena_extend', 'same', ...
+        'patch', [192 192 128]);
+
+% multi-GPU box, pick GPU 1 of N:
+siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'gpu', 1);
+```
 
 ## Weight cache
 

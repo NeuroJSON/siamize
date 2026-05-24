@@ -324,8 +324,9 @@ visible.
 
 ### Calling format
 
-`siamize.m` accepts flexible inputs and (optionally) writes the result
-to disk:
+`siamize.m` accepts flexible inputs and returns a single jnifti
+struct (`nii.NIFTIHeader` + `nii.NIFTIData`). The same struct is
+written to disk when an outputfile is supplied.
 
 ```matlab
 % one-shot file -> file (defaults: single-fold fold_0, auto-downloaded)
@@ -335,16 +336,20 @@ siamize('input.nii.gz', 'labels.nii.gz');
 siamize('input.nii.gz', 'labels.bnii', 0:4);
 
 % struct input (jnifti or readnifti-style), in-memory labels
-nii = loadnifti('input.nii.gz');
-lab = siamize(nii);
+nii_in  = loadnifti('input.nii.gz');
+nii_out = siamize(nii_in);        % nii_out.NIFTIData is uint8 3D labels
 
 % bare 3D array, default centered affine inferred
-lab = siamize(my_volume);
-lab = siamize(my_volume, 0);                       % single fold by shortcut
-lab = siamize(my_volume, '0,2,4', struct('verbose', true));
+nii_out = siamize(my_volume);
+nii_out = siamize(my_volume, 0);                       % single fold by shortcut
+nii_out = siamize(my_volume, '0,2,4', 'verbose', true);
 
 % explicit affine + output file + ensemble + opts
-siamize(my_volume, A, 'labels.nii.gz', 0:4, struct('compute', 'cuda'));
+siamize(my_volume, A, 'labels.nii.gz', 0:4, 'compute', 'cuda');
+
+% TPM mode: nii_out.NIFTIData becomes 4D single (float32) [X, Y, Z, 18]:
+nii_tpm = siamize('input.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
+siamize('input.nii.gz', 'tpm.nii.gz', 0:4, 'tpm', true);  % save TPM to disk
 ```
 
 | First arg | Interpretation |

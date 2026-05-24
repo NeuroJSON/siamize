@@ -23,6 +23,6 @@ done
 MODELS_CSV="$(IFS=,; echo "${MODELS[*]}")"
 
 OUT="tests/pred_regression.nii.gz"
-"$BIN" -i tests/sub-01_T1w.nii.gz -o "$OUT" --models "$MODELS_CSV" --threads 8 -v
+"$BIN" -i tests/sub-01_T1w.nii.gz -o "$OUT" -M "$MODELS_CSV" -t 8 -v
 
 python3 tools/onnx_export/compare.py --ref tests/pred_ref_allfolds.nii.gz --new "$OUT"
