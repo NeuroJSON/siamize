@@ -269,9 +269,11 @@ void usage(const char* exe) {
                  "                      to write a 4D float32 tissue probability map instead.\n"
                  "                      Container format follows -F/--format (default nii).\n"
                  "                      JNIfTI spec: https://neurojson.org/jnifti\n"
-                 "  -F, --format        output container: nii (default; NIfTI-1, gzipped if .gz)\n"
-                 "                      | jnii (JSON-text JNIfTI, zlib+base64 payload)\n"
-                 "                      | bnii (BJData binary JNIfTI, zlib payload).\n"
+                 "  -F, --format        output container: nii (NIfTI-1, gzipped if .gz) | jnii\n"
+                 "                      (JSON-text JNIfTI, zlib+base64 payload) | bnii (BJData\n"
+                 "                      binary JNIfTI, zlib payload). If -F is omitted, the\n"
+                 "                      format is inferred from the -o extension: `.jnii` ->\n"
+                 "                      jnii, `.bnii` -> bnii, anything else -> nii.\n"
                  "                      .nii.gz has the broadest tool support, but the\n"
                  "                      compressed payload is not directly searchable; .bnii\n"
                  "                      interoperates with jsonlab / the NeuroJSON ecosystem\n"
@@ -458,6 +460,7 @@ int main(int argc, char** argv) {
     bool cpu_arena_set            = false;
     bool cudnn_max_workspace_set  = false;
     bool gpu_mem_limit_set        = false;
+    bool format_set               = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -558,6 +561,7 @@ int main(int argc, char** argv) {
             }
 
             out_format = s;
+            format_set = true;
         } else if (a == "--tpm") {
             // Bare flag OR optional 0|1|true|false. If the next arg
             // looks like a bool value, consume it; otherwise default to
@@ -629,6 +633,41 @@ int main(int argc, char** argv) {
     if (input_path.empty() || output_path.empty()) {
         usage(argv[0]);
         return 2;
+    }
+
+    // ----- Infer output format from extension --------------------------
+    // -F/--format wins if the user passed it; otherwise we sniff the
+    // output path. `.jnii` -> text-JSON JNIfTI, `.bnii` -> BJData binary
+    // JNIfTI, anything else (`.nii`, `.nii.gz`, ...) -> NIfTI-1. This
+    // mirrors the input-side extension dispatch already in place, and
+    // matches what users expect from a `.jnii` filename: a JSON-text
+    // file per https://neurojson.org/jnifti , not an opaque binary
+    // blob with the wrong extension.
+    if (!format_set) {
+        auto path_ends_with_ci = [](const std::string& s, const std::string& suf) {
+            if (s.size() < suf.size()) {
+                return false;
+            }
+
+            for (size_t i = 0; i < suf.size(); ++i) {
+                char a = s[s.size() - suf.size() + i], b = suf[i];
+
+                if (std::tolower(static_cast<unsigned char>(a))
+                        != std::tolower(static_cast<unsigned char>(b))) {
+                    return false;
+                }
+            }
+
+            return true;
+        };
+
+        if (path_ends_with_ci(output_path, ".jnii")) {
+            out_format = "jnii";
+        } else if (path_ends_with_ci(output_path, ".bnii")) {
+            out_format = "bnii";
+        } else {
+            out_format = "nii";
+        }
     }
 
     // ----- Lowmem preset (manual or auto-detected) ----------------------
