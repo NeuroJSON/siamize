@@ -169,6 +169,10 @@ and 4D float32 TPMs):
 | `.jnii` | `savejnifti(nii_out, file)` (text JNIfTI) |
 | `.bnii` | `savejnifti(nii_out, file)` (binary JNIfTI) |
 
+JNIfTI is a NeuroJSON container that wraps NIfTI metadata + voxel
+data as JSON-Data (`.jnii`, ASCII) or Binary JSON-Data (`.bnii`,
+binary). Full spec: [neurojson.org/jnifti](https://neurojson.org/jnifti).
+
 When the input is a file / jnifti struct / readnifti struct, the source
 `NIFTIHeader` is preserved in the output (only `NIFTIData` is swapped to
 the segmentation result and `Affine` is overwritten with the working

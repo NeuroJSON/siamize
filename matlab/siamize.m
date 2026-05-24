@@ -18,6 +18,8 @@ function nii = siamize(varargin)
 %         .nii, .nii.gz   - NIfTI-1/2 (read via loadnifti)
 %         .jnii           - text JNIfTI (read via loadjson)
 %         .bnii           - binary JNIfTI (read via loadbj)
+%       For the JNIfTI text/binary container format, see the spec at
+%       https://neurojson.org/jnifti
 %       jsonlab must be on the MATLAB/Octave path; if not, siamize
 %       auto-adds the bundled copy at <siamize_dir>/matlab/jsonlab
 %       (`git submodule update --init` populates it).
@@ -138,41 +140,64 @@ function nii = siamize(varargin)
 %            provided.
 %
 % Examples
-%   % one-shot file -> file:
+%
+%   % --- Basic file -> file, single-fold, CPU auto-detect ----------------
 %   siamize('input.nii.gz', 'labels.nii.gz');
 %
-%   % cross-format: read .nii.gz, write binary JNIfTI:
-%   siamize('input.nii.gz', 'labels.bnii');
+%   % --- Full 5-fold ensemble, verbose progress, CUDA EP -----------------
+%   siamize('input.nii.gz', 'labels.nii.gz', 0:4, ...
+%           'compute', 'cuda', 'verbose', true);
 %
-%   % struct in, file out, full ensemble, verbose, CUDA EP:
-%   nii = loadnifti('input.nii.gz');
-%   siamize(nii, 'labels.jnii', 0:4, 'compute', 'cuda', 'verbose', true);
+%   % --- Multi-GPU host: pick GPU 1 of N (see `nvidia-smi`) --------------
+%   siamize('input.nii.gz', 'labels.nii.gz', 0:4, ...
+%           'compute', 'cuda', 'gpu', 1);
 %
-%   % tight-VRAM GPU: shrink cuDNN workspace, dynamic-shape patch:
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, ...
-%           'compute', 'cuda', 'cudnn_max_workspace', 0, ...
-%           'arena_extend', 'same', 'patch', [192 192 128]);
+%   % --- Tight-VRAM 8 GB consumer card: smaller patch + lean cuDNN -------
+%   siamize('input.nii.gz', 'labels.nii.gz', 0:4, ...
+%           'compute', 'cuda', ...
+%           'cudnn_max_workspace', 0, 'arena_extend', 'same', ...
+%           'patch', [192 192 128]);
 %
-%   % pick GPU 1 of 3 on a multi-GPU box:
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'gpu', 1);
+%   % --- Throttle CPU usage to 4 intra-op threads ------------------------
+%   siamize('input.nii.gz', 'labels.nii.gz', 0:4, ...
+%           'compute', 'cpu', 'thread', 4);
 %
-%   % default behavior: discrete labels (3D uint8) wrapped in jnifti struct:
-%   nii_lab = siamize('in.nii.gz', 0:4);
+%   % --- Cross-format I/O: read .nii.gz, write binary JNIfTI -------------
+%   siamize('input.nii.gz', 'labels.bnii', 0:4);
 %
-%   % TPM mode: jnifti struct whose NIFTIData is 4D single (float32):
-%   nii_tpm = siamize('in.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
-%   % size(nii_tpm.NIFTIData) -> [X Y Z 18]
+%   % --- In-memory: jnifti struct in, jnifti struct out ------------------
+%   nii_in  = loadnifti('input.nii.gz');
+%   nii_out = siamize(nii_in, 0:4, 'compute', 'cuda');
+%   % nii_out.NIFTIData is uint8 [X Y Z]; nii_out.NIFTIHeader cloned from nii_in.
 %
-%   % Write TPM to disk (outputfile + 'tpm', true; same writer dispatch):
-%   siamize('in.nii.gz', 'tpm.nii.gz', 0:4, 'tpm', true);
+%   % --- Bare 3D array in, default centered affine synthesized -----------
+%   nii_out = siamize(my_volume);           % single-fold fold_0 by default
+%   nii_out = siamize(my_volume, 0:4);      % full ensemble
 %
-%   % opts struct still works; can mix with name/value overrides:
-%   defs = struct('compute', 'cuda', 'verbose', true);
-%   siamize('in.nii.gz', 'lab.bnii', 0:4, defs, 'tpm_t', 1.2);
+%   % --- 4D tissue probability map output instead of labels --------------
+%   nii_tpm = siamize('input.nii.gz', 0:4, 'tpm', true);
+%   % size(nii_tpm.NIFTIData) -> [X Y Z 18], class single (float32).
 %
-%   % pure array, default affine inferred:
-%   lab = siamize(my_volume);
-%   lab = siamize(my_volume, 0);
+%   % --- TPM with softer (temperature-scaled) softmax --------------------
+%   nii_tpm = siamize('input.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
+%
+%   % --- Write TPM straight to disk --------------------------------------
+%   siamize('input.nii.gz', 'tpm.nii.gz', 0:4, ...
+%           'compute', 'cuda', 'tpm', true);
+%
+%   % --- Smaller-on-disk binary JNIfTI for large 4D TPM outputs ----------
+%   siamize('input.nii.gz', 'tpm.bnii', 0:4, ...
+%           'compute', 'cuda', 'tpm', true);
+%
+%   % --- Mix shortcut digits and explicit fold paths in `models` ---------
+%   siamize('input.nii.gz', 'labels.nii.gz', ...
+%           {'0', '2', '/abs/path/fold_4_fp16.onnx'}, ...
+%           'compute', 'cuda');
+%
+%   % --- TensorRT EP path (heavy first-run engine build, fast after) -----
+%   siamize('input.nii.gz', 'labels.nii.gz', 0, ...
+%           'compute', 'tensorrt', ...
+%           'trt_cache', '~/.cache/siamize/trt');
 %
 % See also: siamex, loadjd, savejd, loadnifti, jnii2nii, savejnifti
 % (https://github.com/NeuroJSON/jsonlab).
