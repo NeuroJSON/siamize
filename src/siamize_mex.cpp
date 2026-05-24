@@ -268,7 +268,7 @@ struct Opts {
     int64_t classes = 18;                              /**< number of SIAM output classes */
     std::string trt_cache;                             /**< TensorRT engine cache directory */
     bool verbose = false;                              /**< progress messages to stderr */
-    siam::CudaTuning cuda_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
+    siam::EngineTuning engine_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
     bool  tpm = false;                                 /**< true -> emit 4D float32 TPM, false -> 3D labels */
     float tpm_temperature = 1.0f;                      /**< softmax temperature for the TPM */
 };
@@ -349,20 +349,20 @@ void read_opts(const mxArray* a, Opts& o) {
         o.patch = {(int64_t)p[0], (int64_t)p[1], (int64_t)p[2]};
     }
 
-    // CUDA EP tuning knobs. All optional; absent fields keep CudaTuning
+    // CUDA EP tuning knobs. All optional; absent fields keep EngineTuning
     // defaults (which are ORT defaults).
     if ((f = mxGetField(a, 0, "cudnn_max_workspace")) && !mxIsEmpty(f)) {
-        o.cuda_tuning.cudnn_max_workspace = static_cast<int>(mxGetScalar(f));
+        o.engine_tuning.cudnn_max_workspace = static_cast<int>(mxGetScalar(f));
     }
 
     if ((f = mxGetField(a, 0, "arena_extend")) && !mxIsEmpty(f)) {
         // Accept either the string ('same'/'power') or numeric (0/1).
         if (mxIsChar(f)) {
             std::string s = mx_to_string(f);
-            o.cuda_tuning.arena_same_as_req =
+            o.engine_tuning.arena_same_as_req =
                 (s == "same" || s == "kSameAsRequested") ? 1 : 0;
         } else {
-            o.cuda_tuning.arena_same_as_req = static_cast<int>(mxGetScalar(f)) ? 1 : 0;
+            o.engine_tuning.arena_same_as_req = static_cast<int>(mxGetScalar(f)) ? 1 : 0;
         }
     }
 
@@ -375,7 +375,7 @@ void read_opts(const mxArray* a, Opts& o) {
         }
 
         if (s == "DEFAULT" || s == "HEURISTIC" || s == "EXHAUSTIVE") {
-            o.cuda_tuning.algo_search = s;
+            o.engine_tuning.algo_search = s;
         } else {
             die("siamize:cudnn_algo",
                 "opts.cudnn_algo must be 'default' | 'heuristic' | 'exhaustive'");
@@ -385,12 +385,12 @@ void read_opts(const mxArray* a, Opts& o) {
     if ((f = mxGetField(a, 0, "gpu_mem_limit")) && !mxIsEmpty(f)) {
         // Pass through as raw byte count. The .m wrapper is responsible for
         // K/M/G suffix interpretation if it wants -- here we just take a number.
-        o.cuda_tuning.gpu_mem_limit_bytes =
+        o.engine_tuning.gpu_mem_limit_bytes =
             static_cast<size_t>(mxGetScalar(f));
     }
 
     if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
-        o.cuda_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+        o.engine_tuning.gpuid = static_cast<int>(mxGetScalar(f));
     }
 
     if ((f = mxGetField(a, 0, "tpm")) && !mxIsEmpty(f)) {
@@ -558,7 +558,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         siam::LogitsVolume logits = siam::sliding_window(
                                         resampled, models, opts.patch, opts.classes,
                                         opts.threads, 0.5f, opts.verbose,
-                                        opts.device, opts.trt_cache, opts.cuda_tuning);
+                                        opts.device, opts.trt_cache, opts.engine_tuning);
         resampled = siam::Volume{};
 
         const int64_t cZ = crop.bbox[0][1] - crop.bbox[0][0];

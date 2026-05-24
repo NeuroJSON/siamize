@@ -183,7 +183,17 @@ void usage(const char* exe) {
                  "                         Honors any CUDA_VISIBLE_DEVICES filter set in the environment;\n"
                  "                         use `nvidia-smi --query-gpu=index,name --format=csv,noheader`\n"
                  "                         to see what physical GPU each index maps to.\n"
-                 "  -t, --thread N      ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs).\n"
+                 "  -t, --thread N      ORT intra-op threads. Default 0 = auto, which selects\n"
+                 "                      min(hardware_concurrency, 16). The 16-thread cap is\n"
+                 "                      a heuristic: on huge-core hosts (e.g. AMD Zen2 64-core)\n"
+                 "                      ORT's CPU EP plateaus past ~16 threads on this workload\n"
+                 "                      and starts regressing at 32+ due to memory-bandwidth\n"
+                 "                      and L3 contention. Pass -t 0 -t <hc> explicitly to\n"
+                 "                      override; ignored for GPU EPs.\n"
+                 "      --no-arena      disable ORT's CPU memory arena + memory-pattern\n"
+                 "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
+                 "                      peak RSS on the 18-class network but adds ~1.5x to\n"
+                 "                      wall time; use only on RAM-constrained hosts.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
                  "                      file at `-o` is a 4D float32 tissue probability map of\n"
                  "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
@@ -270,7 +280,7 @@ int main(int argc, char** argv) {
     std::array<int64_t, 3> patch = {256, 256, 192};
     float target_spacing = 0.75f;
     int64_t num_classes = 18;
-    siam::CudaTuning cuda_tuning;
+    siam::EngineTuning engine_tuning;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -318,14 +328,14 @@ int main(int argc, char** argv) {
             std::stringstream ss(p);
             ss >> patch[0] >> x >> patch[1] >> x >> patch[2];
         } else if (a == "--cudnn-max-workspace") {
-            cuda_tuning.cudnn_max_workspace = std::stoi(need());
+            engine_tuning.cudnn_max_workspace = std::stoi(need());
         } else if (a == "--arena-extend") {
             std::string s = need();
 
             if      (s == "same"  || s == "kSameAsRequested") {
-                cuda_tuning.arena_same_as_req = 1;
+                engine_tuning.arena_same_as_req = 1;
             } else if (s == "power" || s == "kNextPowerOfTwo") {
-                cuda_tuning.arena_same_as_req = 0;
+                engine_tuning.arena_same_as_req = 0;
             } else                                            {
                 std::fprintf(stderr,
                              "--arena-extend must be power|same (got '%s')\n",
@@ -337,19 +347,21 @@ int main(int argc, char** argv) {
 
             // Accept lowercase shortcuts; canonicalize to ORT's string form.
             if      (s == "default"    || s == "DEFAULT")    {
-                cuda_tuning.algo_search = "DEFAULT";
+                engine_tuning.algo_search = "DEFAULT";
             } else if (s == "heuristic"  || s == "HEURISTIC")  {
-                cuda_tuning.algo_search = "HEURISTIC";
+                engine_tuning.algo_search = "HEURISTIC";
             } else if (s == "exhaustive" || s == "EXHAUSTIVE") {
-                cuda_tuning.algo_search = "EXHAUSTIVE";
+                engine_tuning.algo_search = "EXHAUSTIVE";
             } else {
                 std::fprintf(stderr,
                              "--cudnn-algo must be default|heuristic|exhaustive (got '%s')\n",
                              s.c_str());
                 return 2;
             }
+        } else if (a == "--no-arena") {
+            engine_tuning.cpu_arena = false;
         } else if (a == "-G" || a == "--gpu") {
-            cuda_tuning.gpuid = std::stoi(need());
+            engine_tuning.gpuid = std::stoi(need());
         } else if (a == "-F" || a == "--format") {
             std::string s = need();
 
@@ -404,7 +416,7 @@ int main(int argc, char** argv) {
                 s.pop_back();
             }
 
-            cuda_tuning.gpu_mem_limit_bytes =
+            engine_tuning.gpu_mem_limit_bytes =
                 static_cast<size_t>(std::stoull(s)) * mult;
         } else if (a == "-v" || a == "--verbose") {
             verbose = true;
@@ -429,21 +441,30 @@ int main(int argc, char** argv) {
     // weight from the NeuroJSON URL (see weights.h for the default,
     // overridable via SIAMIZE_WEIGHTS_BASE_URL / SIAMIZE_CACHE_DIR).
     // Resolve threads before the header so it can show the actual count.
+    // Auto path: min(hardware_concurrency, 16). The 16 cap was measured
+    // on a Threadripper 3990X (Zen2, 64C/128T) where ORT's CPU EP hits
+    // its wall-time minimum at -t 16 and regresses at higher counts due
+    // to memory bandwidth and cross-CCD L3 contention. On smaller hosts
+    // (<=16 cores) the min() is just hardware_concurrency. Users with
+    // unusual workloads or hardware can pass -t <hc> explicitly.
     bool threads_auto = (threads <= 0);
 
     if (threads_auto) {
         unsigned hc = std::thread::hardware_concurrency();
-        threads = (hc > 0) ? static_cast<int>(hc) : 4;
+        int detected = (hc > 0) ? static_cast<int>(hc) : 4;
+        const int auto_cap = 16;
+        threads = std::min(detected, auto_cap);
     }
 
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),
-                  tpm_mode ? "  --tpm" : "");
+                  tpm_mode ? "  --tpm" : "",
+                  engine_tuning.cpu_arena ? "" : "  --no-arena");
 
     if (models_csv.empty()) {
         models_csv = "fold_0_fp16.onnx";
@@ -540,7 +561,7 @@ int main(int argc, char** argv) {
     try {
         logits = siam::sliding_window(
                      resampled, model_paths, patch, num_classes,
-                     threads, 0.5f, verbose, device, trt_cache_dir, cuda_tuning);
+                     threads, 0.5f, verbose, device, trt_cache_dir, engine_tuning);
     } catch (const Ort::Exception& e) {
         std::string msg = e.what();
         bool oom = msg.find("allocate") != std::string::npos
@@ -558,7 +579,7 @@ int main(int argc, char** argv) {
                          e.what());
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
-                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, cuda_tuning);
+                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
         } else {
             throw;
         }

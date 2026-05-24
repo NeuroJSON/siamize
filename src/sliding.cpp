@@ -227,7 +227,7 @@ std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step
                                        bool verbose,
                                        const std::string& device,
                                        const std::string& trt_cache_dir,
-                                       const CudaTuning& cuda_tuning)
+                                       const EngineTuning& engine_tuning)
     \brief Run sliding-window inference over one canonical volume
 
     Implementation outline:
@@ -249,7 +249,7 @@ std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step
          weight buffer to obtain final logits.
 
     \param  data, model_paths, patch_size, num_classes, intra_threads,
-            step_ratio, verbose, device, trt_cache_dir, cuda_tuning
+            step_ratio, verbose, device, trt_cache_dir, engine_tuning
             - see sliding.h for parameter semantics
     \return Per-class logits at the same grid as \a data
 */
@@ -262,7 +262,7 @@ LogitsVolume sliding_window(const Volume& data,
                             bool verbose,
                             const std::string& device,
                             const std::string& trt_cache_dir,
-                            const CudaTuning& cuda_tuning) {
+                            const EngineTuning& engine_tuning) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
@@ -391,18 +391,22 @@ LogitsVolume sliding_window(const Volume& data,
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         const bool will_use_gpu = (use_trt || use_cuda || (!ep_probed && (trt_try || cuda_try)));
-        (void)will_use_gpu;
 
-        // Leave ORT's CPU memory arena and memory-pattern optimizer ON
-        // (the ORT defaults). An earlier revision disabled both to keep
-        // RSS smaller, but profiling on a 64-core Zen2 showed that the
-        // disabled path produced ~75M minor page faults and a 43% dTLB
-        // miss rate -- per-op mmap/munmap churn that dragged ~88% of
-        // system time into the kernel and capped scaling at ~18 cores.
-        // With the arena enabled, the same run drops to ~7M page faults,
-        // ~27 cores of utilization, and 1.5x wall-time speedup at the
-        // cost of ~2x peak RSS (12 GB -> 28 GB on the 18-class SIAM
-        // network). Output is byte-identical.
+        // ORT's CPU memory arena + memory-pattern optimizer:
+        // default ON (fast path) for the CPU EP. Profiling on a
+        // 64-core Zen2 showed the disabled path produced ~75M minor
+        // page faults and a 43% dTLB miss rate -- per-op mmap/munmap
+        // churn that dragged ~88% of system time into the kernel and
+        // capped scaling at ~18 cores. With the arena enabled, the
+        // same run drops to ~7M page faults and ~27 cores of
+        // utilization at the cost of ~2x peak RSS (12 GB -> 28 GB on
+        // the 18-class SIAM network). Pass --no-arena on the CLI (or
+        // engine_tuning.cpu_arena = false in the MEX) to opt out
+        // when RSS matters more than wall time.
+        if (!will_use_gpu && !engine_tuning.cpu_arena) {
+            opts.DisableCpuMemArena();
+            opts.DisableMemPattern();
+        }
 
 #ifdef SIAMIZE_HAS_TENSORRT
 
@@ -463,24 +467,24 @@ LogitsVolume sliding_window(const Volume& data,
                     vbuf.emplace_back(v);
                 };
 
-                if (cuda_tuning.cudnn_max_workspace == 0) {
+                if (engine_tuning.cudnn_max_workspace == 0) {
                     add("cudnn_conv_use_max_workspace", "0");
                 }
 
-                if (cuda_tuning.arena_same_as_req == 1) {
+                if (engine_tuning.arena_same_as_req == 1) {
                     add("arena_extend_strategy", "kSameAsRequested");
                 }
 
-                if (!cuda_tuning.algo_search.empty()) {
-                    add("cudnn_conv_algo_search", cuda_tuning.algo_search);
+                if (!engine_tuning.algo_search.empty()) {
+                    add("cudnn_conv_algo_search", engine_tuning.algo_search);
                 }
 
-                if (cuda_tuning.gpu_mem_limit_bytes > 0) {
-                    add("gpu_mem_limit", std::to_string(cuda_tuning.gpu_mem_limit_bytes));
+                if (engine_tuning.gpu_mem_limit_bytes > 0) {
+                    add("gpu_mem_limit", std::to_string(engine_tuning.gpu_mem_limit_bytes));
                 }
 
-                if (cuda_tuning.gpuid != 0) {
-                    add("device_id", std::to_string(cuda_tuning.gpuid));
+                if (engine_tuning.gpuid != 0) {
+                    add("device_id", std::to_string(engine_tuning.gpuid));
                 }
 
                 if (!kbuf.empty()) {

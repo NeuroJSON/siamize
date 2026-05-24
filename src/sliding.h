@@ -23,7 +23,7 @@
 @brief   Sliding-window inference public interface + CUDA tuning knobs
 
 Declares the entry point that runs the SIAM ResEnc-UNet over a
-canonical (Z, Y, X) volume using ONNX Runtime, plus the CudaTuning
+canonical (Z, Y, X) volume using ONNX Runtime, plus the EngineTuning
 struct that lets callers override the CUDA Execution Provider's
 memory/algorithm defaults on tight-VRAM GPUs.
 
@@ -44,20 +44,27 @@ caching, and accumulated multi-fold logit averaging.
 namespace siam {
 
 /**
- * \struct CudaTuning
- * \brief  CUDA Execution Provider memory + algorithm knobs
+ * \struct EngineTuning
+ * \brief  Per-EP memory + algorithm knobs (CUDA + CPU)
  *
- * Most relevant on tight-VRAM GPUs where the default cuDNN algorithm
- * picks blow ORT's BFC arena past the GPU's usable contiguous free
- * memory. All fields are optional; defaults mean "let ORT decide".
+ * Most CUDA knobs are relevant on tight-VRAM GPUs where the default
+ * cuDNN algorithm picks blow ORT's BFC arena past the GPU's usable
+ * contiguous free memory. The `cpu_arena` field controls ORT's CPU
+ * memory arena + memory-pattern optimizer (default ON; turning it
+ * off keeps RSS smaller at the cost of substantial wall-time
+ * regression, see sliding.cpp for the profiling notes).
+ * All fields are optional; defaults mean "let ORT decide".
  */
-struct CudaTuning {
+struct EngineTuning {
     int cudnn_max_workspace = 1;     /**< 0 = pick small-workspace cuDNN algos */
     int arena_same_as_req   = 0;     /**< 1 = kSameAsRequested arena extend strategy
                                           (vs the default kNextPowerOfTwo) */
     std::string algo_search;         /**< "", "DEFAULT", "HEURISTIC", or "EXHAUSTIVE" */
     size_t gpu_mem_limit_bytes = 0;  /**< 0 = no explicit memory cap */
     int gpuid = 0;                   /**< CUDA EP device_id (0 = first visible GPU) */
+    bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
+                                          (default, fast path); false = both disabled
+                                          (lower RSS, much slower) */
 };
 
 /**
@@ -82,7 +89,7 @@ struct CudaTuning {
  * @param  trt_cache_dir  TensorRT engine cache directory (only used
  *                        when \a device == "tensorrt"); empty resolves
  *                        to `$HOME/.cache/siamize/trt`
- * @param  cuda_tuning    CUDA EP overrides (see CudaTuning)
+ * @param  engine_tuning    CUDA EP overrides (see EngineTuning)
  * @return                logits at the same grid as \a data
  */
 LogitsVolume sliding_window(const Volume& data,
@@ -94,7 +101,7 @@ LogitsVolume sliding_window(const Volume& data,
                             bool verbose,
                             const std::string& device = "auto",
                             const std::string& trt_cache_dir = "",
-                            const CudaTuning& cuda_tuning = {});
+                            const EngineTuning& engine_tuning = {});
 
 }  // namespace siam
 

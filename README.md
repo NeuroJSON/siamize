@@ -508,6 +508,49 @@ All measurements use the bundled `tests/sub-01_T1w.nii.gz` (160×192×192,
 | Python ORT 5-fold | 781 s (13 min) |
 | Original `siam-pred` 5-fold CPU (per upstream README) | ~25 min |
 
+#### CPU thread tuning on many-core hosts (Zen2 / EPYC / Threadripper)
+
+ORT's CPU Execution Provider does **not** scale linearly past ~16
+threads on this workload. Profiling on an AMD Threadripper 3990X
+(Zen2, 64C/128T, single NUMA node) gives a clear shape:
+
+| `-t` | Wall (s) | CPU% | Avg cores busy |
+|---|---|---|---|
+| 4 (no auto) | 300.2 | 331 % | 3.3 |
+| 8 | 206.4 | 540 % | 5.4 |
+| 12 | 171.6 | 694 % | 6.9 |
+| **16** | **158.9** | 840 % | **8.4** ← optimum |
+| 32 | 160.4 | 1098 % | 11.0 |
+| 48 | 162.2 | 1372 % | 13.7 |
+| 64 | 165.1 | 1632 % | 16.3 |
+| 0 (=128) | 178.4 | 2674 % | 26.7 |
+
+Zen2's 16-cores-per-CCD topology is the reason: `-t 16` keeps the
+active hot set inside one CCD's 64 MB L3 and one memory controller.
+At 32+ threads the active set spills across CCDs through the I/O
+die, which costs roughly what the extra parallelism gains. At 128
+the contention wins outright.
+
+To match this, `siamize -t 0` (the default) now resolves to
+`min(hardware_concurrency, 16)` rather than full
+`hardware_concurrency`. On laptops / small workstations (≤16 cores)
+this is a no-op; on big servers it stops siamize from oversubscribing
+ORT's thread pool. Pass `-t N` explicitly to override.
+
+#### Memory-arena trade-off
+
+`siamize -c cpu` keeps ORT's CPU memory arena + memory-pattern
+optimizer **on** by default. On the same Threadripper run this
+buys 1.5× wall-time (273.6 → 178.3 s on `-t 0`) at the cost of
+peak RSS growing from 12.4 GB → 28.3 GB for the 18-class network.
+Profiling traced the off-arena path's slowdown to 75 M minor page
+faults and a 43 % dTLB miss rate from per-op `mmap`/`munmap` churn.
+
+If you'd rather trade speed for memory, pass `--no-arena` on the
+CLI (or `engine_tuning.cpu_arena = false` from the MEX). The
+`-v` header surfaces the choice (`--no-arena` is appended when
+the arena is disabled).
+
 ### NVIDIA GPU (siamize built with `-DSIAMIZE_GPU=cuda`)
 
 | Run | GPU | Time | vs CPU C++ |
