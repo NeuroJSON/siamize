@@ -1,12 +1,48 @@
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**  \li \c (\b NeuroJSON) NeuroJSON project,
+**         <a href="https://neurojson.org">neurojson.org</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    weights.cpp
+\brief   Lazy weight cache + NeuroJSON auto-download implementation
+
+When the user does not supply a local `.onnx` weight path, this
+module shells out to the system `curl` to fetch the requested fold
+from NeuroJSON's CGI endpoint. The downloaded `.onnx.gz` is
+inflated in-place via zmat's miniz instance (the same one
+nifti_io.cpp activates with ZMAT_IMPLEMENTATION), so the binary
+keeps zero dependency on a system zlib.
+
+The cache directory and the base URL are environment-overridable
+(`SIAMIZE_CACHE_DIR`, `SIAMIZE_WEIGHTS_BASE_URL`) for CI runners
+and offline / proxied installations.
+*******************************************************************************/
+
 #include "weights.h"
 
-// zmat's implementation lives in nifti_io.cpp; the public header only
-// exposes prototypes under ZMAT_IMPLEMENTATION, so we forward-declare the
-// single function we need here. The linker resolves it against the
-// definition in the same binary.
-// Matches the C++ linkage used when nifti_io.cpp pulls in zmat.h with
-// ZMAT_IMPLEMENTATION. Same forward-declaration both sides; the linker
-// resolves it inside the same binary.
+/**
+ * @brief Forward declaration of zmat's bundled miniz one-shot gzip inflater
+ *
+ * zmat.h gates its implementation behind `ZMAT_IMPLEMENTATION`, which
+ * is defined exactly once (in nifti_io.cpp). Forward-declaring the
+ * helper here lets us call into the same linked-in copy without
+ * pulling in the whole 6500-line header.
+ */
 int miniz_gzip_uncompress(void* in_data, size_t in_len,
                           void** out_data, size_t* out_len);
 
@@ -24,14 +60,32 @@ namespace siam {
 
 namespace {
 
+/*******************************************************************************/
+/*! \fn    const char* env_or(const char* name, const char* fallback)
+    \brief Read an environment variable or fall back to a default string
+    \param  name      environment variable name
+    \param  fallback  used when the variable is unset or empty
+    \return           the variable value or \a fallback
+*/
 const char* env_or(const char* name, const char* fallback) {
     const char* v = std::getenv(name);
     return (v && *v) ? v : fallback;
 }
 
-// Quote a shell argument with single quotes (POSIX) or double quotes (Windows).
-// We only escape the embedded quote char to keep paths sane in the resulting
-// `system()` invocation.
+/*******************************************************************************/
+/*! \fn    std::string quote(const std::string& s)
+    \brief Shell-quote a path argument for use inside a `std::system` command
+
+    POSIX path: wraps in single quotes and escapes embedded `'` by
+    closing/reopening the quoting; Windows path: wraps in double
+    quotes and escapes embedded `"`. Only the embedded quote
+    character is special-cased; everything else passes through
+    literally, which is what curl and the shell expect for a file
+    path argument.
+
+    \param  s  the raw argument string
+    \return    the quoted form, safe for command-line use
+*/
 std::string quote(const std::string& s) {
 #ifdef _WIN32
     std::string out = "\"";
@@ -62,10 +116,22 @@ std::string quote(const std::string& s) {
 #endif
 }
 
+/*******************************************************************************/
+/*! \fn    bool run_silent(const std::string& cmd)
+    \brief Run a shell command and return whether it exited with status 0
+    \param  cmd  the command line to pass to std::system
+    \return      true on exit code 0
+*/
 bool run_silent(const std::string& cmd) {
     return std::system(cmd.c_str()) == 0;
 }
 
+/*******************************************************************************/
+/*! \fn    std::vector<uint8_t> read_file_bytes(const std::string& path)
+    \brief Slurp a file's bytes into memory
+    \param  path  source file path
+    \return       file contents as a byte vector
+*/
 std::vector<uint8_t> read_file_bytes(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
 
@@ -84,6 +150,14 @@ std::vector<uint8_t> read_file_bytes(const std::string& path) {
     return buf;
 }
 
+/*******************************************************************************/
+/*! \fn    void write_file_bytes(const std::string& path,
+                                 const uint8_t* data, size_t n)
+    \brief Write \a n bytes of \a data to \a path, truncating any existing file
+    \param  path  destination file path
+    \param  data  byte buffer
+    \param  n     number of bytes
+*/
 void write_file_bytes(const std::string& path, const uint8_t* data, size_t n) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
 
@@ -98,9 +172,19 @@ void write_file_bytes(const std::string& path, const uint8_t* data, size_t n) {
     }
 }
 
-// Decompress an in-memory gzip blob via zmat's miniz_gzip_uncompress.
-// The output buffer is malloc'd inside miniz; we copy it to a vector and
-// free the original.
+/*******************************************************************************/
+/*! \fn    std::vector<uint8_t> gunzip(const uint8_t* in, size_t n)
+    \brief Inflate an in-memory gzip blob via zmat/miniz
+
+    Calls the forward-declared `miniz_gzip_uncompress` whose definition
+    lives in zmat.h's ZMAT_IMPLEMENTATION block (instantiated by
+    nifti_io.cpp). The output buffer is malloc'd by miniz; we copy
+    into a std::vector and free the original.
+
+    \param  in  gzip-encoded buffer (must start with magic 0x1F 0x8B)
+    \param  n   number of bytes in \a in
+    \return     decompressed bytes
+*/
 std::vector<uint8_t> gunzip(const uint8_t* in, size_t n) {
     void* out = nullptr;
     size_t outlen = 0;
@@ -120,8 +204,13 @@ std::vector<uint8_t> gunzip(const uint8_t* in, size_t n) {
     return result;
 }
 
-}  // namespace
+}  // anonymous namespace
 
+/*******************************************************************************/
+/*! \fn    std::string default_cache_dir()
+    \brief Resolve siamize's local weight-cache directory
+    \return  absolute path to the cache directory (no trailing slash)
+*/
 std::string default_cache_dir() {
     const char* env = std::getenv("SIAMIZE_CACHE_DIR");
 
@@ -138,6 +227,11 @@ std::string default_cache_dir() {
 #endif
 }
 
+/*******************************************************************************/
+/*! \fn    std::string default_weights_url()
+    \brief Resolve the NeuroJSON URL prefix for auto-fetched weights
+    \return  URL prefix (env-overridable; see weights.h)
+*/
 std::string default_weights_url() {
     const char* env = std::getenv("SIAMIZE_WEIGHTS_BASE_URL");
 
@@ -149,6 +243,22 @@ std::string default_weights_url() {
            "&doc=dynshape&size=95360591&file=";
 }
 
+/*******************************************************************************/
+/*! \fn    std::string resolve_model_path(const std::string& spec, bool verbose)
+    \brief Resolve a model spec to an on-disk path, fetching from NeuroJSON if needed
+
+    Three-stage lookup: (1) spec is an existing file; (2) the spec's
+    basename is already in the cache; (3) `curl`-download the weight
+    from NeuroJSON (trying `<basename>.gz` first, falling back to
+    `<basename>` raw) into the cache. The gzipped path is decompressed
+    in-memory via the zmat-bundled miniz so we don't depend on `gunzip`
+    being on PATH.
+
+    \param  spec     fold spec (filename, digit shortcut, or full path)
+    \param  verbose  print per-step progress to stderr
+    \return          absolute path to the resolved .onnx file
+    \throws std::runtime_error if none of the lookup stages produces a file
+*/
 std::string resolve_model_path(const std::string& spec, bool verbose) {
     namespace fs = std::filesystem;
 
