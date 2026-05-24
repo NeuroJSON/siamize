@@ -16,6 +16,7 @@ struct CudaTuning {
     int arena_same_as_req   = 0;     // 1 = kSameAsRequested (vs kNextPowerOfTwo)
     std::string algo_search;         // "", "DEFAULT", "HEURISTIC", "EXHAUSTIVE"
     size_t gpu_mem_limit_bytes = 0;  // 0 = no explicit limit
+    int gpuid = 0;                   // CUDA EP device_id; 0 = first visible GPU
 };
 
 // Run sliding-window inference over `data` using each .onnx file in

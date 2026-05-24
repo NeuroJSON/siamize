@@ -99,6 +99,11 @@ function [lab, tpm] = siamize(varargin)
 %                                      | 'exhaustive'.
 %               'gpu_mem_limit'       bytes (double, e.g. 6*1024^3 for 6GB).
 %                                      Default 0 = no cap.
+%               'gpuid'               int (0-based CUDA device id; default
+%                                      0 = first visible GPU). Honors any
+%                                      CUDA_VISIBLE_DEVICES filter set in
+%                                      the environment. Use `nvidia-smi`
+%                                      to see what each index maps to.
 %
 %            TPM output (4D float32 tissue probability map, softmax
 %            over the 18 fold-averaged class logits):

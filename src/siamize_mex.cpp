@@ -268,6 +268,10 @@ void read_opts(const mxArray* a, Opts& o) {
             static_cast<size_t>(mxGetScalar(f));
     }
 
+    if ((f = mxGetField(a, 0, "gpuid")) && !mxIsEmpty(f)) {
+        o.cuda_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+    }
+
     if ((f = mxGetField(a, 0, "tpm_temperature")) && !mxIsEmpty(f)) {
         o.tpm_temperature = static_cast<float>(mxGetScalar(f));
 

@@ -67,6 +67,7 @@ tests = {
          @test_opts_name_value_pairs_, ...
          @test_opts_struct_plus_overrides_, ...
          @test_opts_cuda_tuning_passthrough_, ...
+         @test_opts_gpuid_passthrough_, ...
          @test_opts_tpm_temperature_passthrough_ ...
         };
 
@@ -481,6 +482,12 @@ assert(SIAMEX_LAST.opts.cudnn_max_workspace == 0);
 assert(strcmp(SIAMEX_LAST.opts.arena_extend, 'same'));
 assert(strcmp(SIAMEX_LAST.opts.cudnn_algo, 'heuristic'));
 assert(SIAMEX_LAST.opts.gpu_mem_limit == 6 * 1024^3);
+end
+
+function test_opts_gpuid_passthrough_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, 'gpuid', 2);
+assert(SIAMEX_LAST.opts.gpuid == 2);
 end
 
 function test_opts_tpm_temperature_passthrough_(fx)

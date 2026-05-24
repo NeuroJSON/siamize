@@ -94,6 +94,10 @@ void usage(const char* exe) {
                  "                         `heuristic` is the smallest-workspace option.\n"
                  "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
                  "                         e.g. 6G). Default 0 = no explicit cap.\n"
+                 "      --gpuid N       CUDA EP device_id (0-based index, default 0 = first visible GPU).\n"
+                 "                         Honors any CUDA_VISIBLE_DEVICES filter set in the environment;\n"
+                 "                         use `nvidia-smi --query-gpu=index,name --format=csv,noheader`\n"
+                 "                         to see what physical GPU each index maps to.\n"
                  "      --threads N     ORT intra-op threads (default 0 = all available cores; ignored for GPU EPs)\n"
                  "      --tpm-out P     also save a 4D float32 tissue probability map (TPM) to P.\n"
                  "                      Output shape is (X, Y, Z, num_classes) -- softmax over the\n"
@@ -202,6 +206,8 @@ int main(int argc, char** argv) {
                              s.c_str());
                 return 2;
             }
+        } else if (a == "--gpuid") {
+            cuda_tuning.gpuid = std::stoi(need());
         } else if (a == "--tpm-out") {
             tpm_out = need();
         } else if (a == "--tpm-temperature") {

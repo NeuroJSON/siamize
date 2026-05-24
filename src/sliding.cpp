@@ -367,6 +367,10 @@ LogitsVolume sliding_window(const Volume& data,
                     add("gpu_mem_limit", std::to_string(cuda_tuning.gpu_mem_limit_bytes));
                 }
 
+                if (cuda_tuning.gpuid != 0) {
+                    add("device_id", std::to_string(cuda_tuning.gpuid));
+                }
+
                 if (!kbuf.empty()) {
                     std::vector<const char*> kp, vp;
 
