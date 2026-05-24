@@ -99,17 +99,13 @@ void ORT_API_CALL siam_ort_logging_func(void* /*param*/,
         return;
     }
 
-    // Drop the expected EP-probe failures entirely; the catch
-    // blocks below already emit a tidy [cuda] / [trt] log line.
-    const std::string m = message;
-    if (m.find("Failed to load library") != std::string::npos ||
-            m.find("cannot open shared object file") != std::string::npos) {
-        return;
-    }
-
-    // Anything else at ERROR severity gets surfaced as a [warn] line.
-    // INFO/WARNING/VERBOSE are dropped (we don't need ORT's chatter
-    // unless something actually breaks).
+    // ERROR-severity messages get re-routed through siam::log_warn so
+    // they appear as "[warn] ORT: ..." instead of the loud
+    // "[E:onnxruntime:siam,...]" default ORT format. The full message
+    // body is preserved -- including "Failed to load library
+    // libXXX.so" / "cannot open shared object file" lines from the
+    // EP-probe path -- so users can see which dependency is missing
+    // when an EP fails. INFO/WARNING/VERBOSE chatter is dropped.
     if (severity >= ORT_LOGGING_LEVEL_ERROR) {
         siam::log_warn("ORT: %s", message);
     }
