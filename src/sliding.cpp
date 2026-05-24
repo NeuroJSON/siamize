@@ -401,7 +401,7 @@ LogitsVolume sliding_window(const Volume& data,
     siam::log_tag("infer",
                   "image (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
                   ")  patch (%" PRId64 ",%" PRId64 ",%" PRId64
-                  ")  step %.2f  tiles %" PRId64 "  folds %zu",
+                  ")  step %.2f  tiles %" PRId64 "  weights %zu",
                   spatZ, spatY, spatX,
                   patch_size[0], patch_size[1], patch_size[2],
                   step_ratio, n_tiles, model_paths.size());
@@ -612,7 +612,7 @@ LogitsVolume sliding_window(const Volume& data,
         const char* in_names[] = {in_name};
         const char* out_names[] = {out_name};
 
-        siam::log_tag("fold", "%zu/%zu  %s",
+        siam::log_tag("weight", "%zu/%zu  %s",
                       fi + 1, model_paths.size(), model_paths[fi].c_str());
 
         int64_t tile_idx = 0;
@@ -674,13 +674,13 @@ LogitsVolume sliding_window(const Volume& data,
 
                     ++tile_idx;
 
-                    // One log line per tile so the user has a continuous
-                    // progress signal during the long inference phase.
-                    // For default 8 tiles x 1 fold this is 8 lines;
-                    // for a 5-fold ensemble it's 40 lines spread over
-                    // several minutes -- one line every ~30 s.
-                    siam::log_tag("tile", "%" PRId64 "/%" PRId64,
-                                  tile_idx, n_tiles);
+                    // TTY-aware progress bar (self-redrawing on a terminal,
+                    // one-line-per-tile when piped / inside a MEX). One
+                    // continuous progress signal across the long inference
+                    // phase regardless of where stderr ends up.
+                    siam::log_progress("tile",
+                                       static_cast<long long>(tile_idx),
+                                       static_cast<long long>(n_tiles));
                 }
             }
         }

@@ -21,3 +21,4 @@ __pycache__/
 [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
 octave-workspace
 sub-01_T1w.nii.gz
+output.jnii

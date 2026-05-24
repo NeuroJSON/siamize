@@ -117,6 +117,26 @@ void log_warn(const char* fmt, ...)
 __attribute__((format(printf, 1, 2)));
 
 /**
+ * @brief Progress-bar line: redraws in place on a TTY, falls back to
+ *        one-line-per-call when stderr is piped or in a MEX context
+ *
+ * Formats as `[tag]      [##########----------] current/total (XX%)`
+ * with a fixed-width 20-cell bar. On a TTY the line is prefixed with
+ * `\r` so successive calls overwrite each other; on the final call
+ * (current >= total) a trailing newline is emitted to release the
+ * line. When stderr is not a TTY (pipe, redirect, MEX), each call
+ * emits a normal newline-terminated line so logs remain sane in
+ * captured output.
+ *
+ * No-op when verbose() is false.
+ *
+ * @param  tag      short tag name (no brackets)
+ * @param  current  current step (1-indexed)
+ * @param  total    total number of steps
+ */
+void log_progress(const char* tag, long long current, long long total);
+
+/**
  * @brief Unconditional hint (ignores the verbose flag)
  *
  * Like log_warn but with a softer `[hint]` tag. Intended for
