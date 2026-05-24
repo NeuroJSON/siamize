@@ -99,16 +99,11 @@ jobs:
     # the CPU EP. This validates the build path AND the runtime fallback.
     #
     # The fp16 ONNX weight file (~270 MB raw, ~91 MB gzipped) is too
-    # big for git, so CI grabs it from a public URL configured in the
-    # repository's GitHub Actions variables: Settings -> Secrets and
-    # variables -> Actions -> Variables -> SIAMIZE_WEIGHTS_URL is the
-    # FULL URL of the fold_0 weight (e.g.
-    #   https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz
-    # ). The URL may end in .gz (preferred, decompressed with gunzip),
-    # .onnx (used raw), or .7z (legacy -- extracted with 7z if
-    # available). The job is skipped if the variable is not configured.
+    # big for git, so CI grabs it from the public NeuroJSON URL hardcoded
+    # below -- the same URL `default_weights_url()` in src/weights.cpp
+    # falls back to when SIAMIZE_WEIGHTS_BASE_URL isn't set. No GitHub
+    # Actions variable / secret is required.
     name: build+run cuda (${{ matrix.os }})
-    if: vars.SIAMIZE_WEIGHTS_URL != ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -127,50 +122,29 @@ jobs:
         run: scripts/fetch_deps.sh
 
       - name: Fetch + extract fold_0 weight (always fresh, no cache)
-        # The actions/cache layer was removed because a stale-cache
-        # entry can persist a pre-dynamic_axes ONNX across cache-key
-        # bumps once the bump itself happened to fetch a fixed-shape
-        # build. 91 MB download is fast (~5 s on GHA's network);
-        # the cache savings aren't worth the staleness risk.
-        env:
-          URL: ${{ vars.SIAMIZE_WEIGHTS_URL }}
+        # The URL is the same one weights.cpp's default_weights_url()
+        # falls back to. Inlined here (rather than parameterized
+        # through a repo variable) so the CI can never drift to a
+        # stale upload; this URL is verified dynamic-shape ONNX.
+        # The actions/cache layer was removed because a stale cache
+        # was the source of repeated CI failures: 91 MB download is
+        # ~5 s on GHA's network, well worth eating to keep freshness
+        # under our control.
         run: |
+          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz'
           mkdir -p models
           rm -f models/fold_0_fp16.onnx*
           echo "Downloading $URL"
-          # Dispatch by the actual URL extension so the repo variable can
-          # point at .gz (preferred), .onnx (uncompressed), or .7z (legacy)
-          # without us guessing.
-          case "$URL" in
-            *.gz)
-              curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
-              gunzip -f models/fold_0_fp16.onnx.gz
-              ;;
-            *.7z)
-              if ! command -v 7z >/dev/null; then
-                sudo apt-get update -qq
-                sudo apt-get install -y --no-install-recommends p7zip-full
-              fi
-              curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
-              7z e -y -omodels models/fold_0_fp16.onnx.7z >/dev/null
-              rm -f models/fold_0_fp16.onnx.7z
-              ;;
-            *.onnx)
-              curl -fsSL "$URL" -o models/fold_0_fp16.onnx
-              ;;
-            *)
-              echo "unsupported extension for SIAMIZE_WEIGHTS_URL: $URL"
-              echo "expected one of: .gz, .onnx, .7z"
-              exit 1
-              ;;
-          esac
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
+          gunzip -f models/fold_0_fp16.onnx.gz
           ls -la models/
 
       - name: Verify ONNX has dynamic spatial axes
-        # If the weight at $SIAMIZE_WEIGHTS_URL is still a
-        # pre-dynamic_axes export, --lowmem -P 192x192x128 will fail
-        # with "Got invalid dimensions". Fail fast here with a
-        # clear message instead of crashing inside ORT later.
+        # The hardcoded NeuroJSON URL is verified dynamic-shape, but
+        # this step stays as a defense-in-depth: if the NeuroJSON
+        # upload ever gets replaced with a fixed-shape file, --lowmem
+        # would silently break inference. Fail fast here with a clear
+        # message instead of crashing inside ORT later.
         shell: bash
         run: |
           python3 -m pip install --quiet onnx
@@ -187,12 +161,14 @@ jobs:
           spatial = dims[2:5]
           if any(isinstance(d, int) and d > 0 for d in spatial):
               print()
-              print("ERROR: SIAMIZE_WEIGHTS_URL serves a FIXED-SHAPE ONNX.")
-              print("       The ONNX exported by tools/onnx_export/export.py")
-              print("       uses dynamic_axes={'D','H','W'} for axes 2,3,4.")
-              print("       Update the Actions variable SIAMIZE_WEIGHTS_URL")
-              print("       (Settings -> Secrets and variables -> Actions ->")
-              print("       Variables) to point at a re-exported file.")
+              print("ERROR: NeuroJSON now serves a FIXED-SHAPE ONNX at the")
+              print("       hardcoded URL in this workflow. The ONNX exported")
+              print("       by tools/onnx_export/export.py uses dynamic_axes=")
+              print("       {'D','H','W'} for axes 2,3,4. Either the upload")
+              print("       at neurojson.org/io/.../siam_v03/dynshape was")
+              print("       overwritten with a fixed-shape build, or the URL")
+              print("       in .github/workflows/ci.yml needs updating to a")
+              print("       different document/key.")
               sys.exit(1)
           print("OK: spatial axes are symbolic; --lowmem patch shrink will work.")
           PY
