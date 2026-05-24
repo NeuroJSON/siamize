@@ -1,13 +1,49 @@
-// Preprocessing primitives mirroring siam_ref.py / siam_ort.py
-//
-//   crop_to_nonzero   — like nnUNet's crop_to_nonzero but without the
-//                       binary_fill_holes step (no measurable Dice impact on
-//                       realistic head MRI; the head is convex enough that
-//                       the bbox is identical with or without fill-holes).
-//   zscore_inplace    — (x - mean) / max(std, 1e-8), whole-volume stats.
-//   resample_trilinear— mode='edge', align_corners=False, anti_aliasing=False.
-//                       Skimage uses input_coord = (i+0.5)*scale - 0.5 with
-//                       edge clamping; we replicate that.
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    preprocess.cpp
+\brief   Pre-network preprocessing primitives (crop, z-score, resample)
+
+Implements the volume-level preprocessing that mirrors the SIAM
+reference pipeline (py/siam_ref.py / tools/onnx_export/siam_ort.py):
+
+  - crop_to_nonzero:    nnUNet-style tight bounding box around the
+                        nonzero region. We omit the
+                        `binary_fill_holes` step found in the
+                        reference; on realistic head MRI the head is
+                        convex enough that the bbox is identical
+                        with or without it.
+
+  - zscore_inplace:     whole-volume z-score normalization,
+                        `(x - mean) / max(std, 1e-8)`. No masking.
+
+  - resample_trilinear: first-order resampler, matching skimage's
+                        `resize(order=1, mode='edge', anti_aliasing=False)`
+                        using the
+                        `input_coord = (i + 0.5) * scale - 0.5` mapping
+                        with edge clamping at the borders. Used as a
+                        fast path.
+
+  - resample_cubic:     three-pass separable Catmull-Rom cubic
+                        Hermite resampler, matching skimage's
+                        `resize(order=3, mode='edge', anti_aliasing=False)`
+                        to ~99.9 % argmax agreement on real images.
+*******************************************************************************/
 
 #include "preprocess.h"
 
@@ -18,6 +54,18 @@
 
 namespace siam {
 
+/*******************************************************************************/
+/*! \fn    CropResult crop_to_nonzero(const Volume& vol)
+    \brief Crop a volume to the bounding box of its nonzero voxels
+
+    Single triple-nested pass over the volume that tracks the
+    per-axis min/max indices where a voxel exceeds zero. When no
+    nonzero voxels exist, returns the full volume with an
+    [0, shape) bbox (degenerate but well-defined).
+
+    \param  vol  input canonical volume
+    \return      cropped volume + axis-aligned bbox
+*/
 CropResult crop_to_nonzero(const Volume& vol) {
     int64_t Z = vol.shape[0], Y = vol.shape[1], X = vol.shape[2];
     int64_t zlo = Z, zhi = -1, ylo = Y, yhi = -1, xlo = X, xhi = -1;
@@ -78,6 +126,17 @@ CropResult crop_to_nonzero(const Volume& vol) {
     return r;
 }
 
+/*******************************************************************************/
+/*! \fn    void zscore_inplace(Volume& vol)
+    \brief Whole-volume z-score normalization, in place
+
+    Two passes over the data: pass 1 accumulates sum and sum-of-squares
+    (in double precision to keep the variance stable for large volumes);
+    pass 2 applies `(x - mean) / max(std, 1e-8)`. No masking and no
+    per-channel split because the input is single-channel.
+
+    \param  vol  volume modified in place
+*/
 void zscore_inplace(Volume& vol) {
     double sum = 0.0;
     double sum_sq = 0.0;
@@ -110,6 +169,21 @@ void zscore_inplace(Volume& vol) {
     }
 }
 
+/*******************************************************************************/
+/*! \fn    std::array<int64_t, 3> compute_new_shape(
+              std::array<int64_t, 3> old_shape,
+              std::array<float, 3> old_spacing,
+              std::array<float, 3> new_spacing)
+    \brief Round-to-nearest shape after a spacing change
+
+    Per-axis: `new = round(old * old_spacing / new_spacing)`. Matches
+    nnUNet's preprocessing rule.
+
+    \param  old_shape    current shape in voxels
+    \param  old_spacing  current voxel spacing (mm) per axis
+    \param  new_spacing  target voxel spacing (mm) per axis
+    \return              the new shape after resampling
+*/
 std::array<int64_t, 3> compute_new_shape(std::array<int64_t, 3> old_shape,
         std::array<float, 3> old_spacing,
         std::array<float, 3> new_spacing) {
@@ -123,9 +197,15 @@ std::array<int64_t, 3> compute_new_shape(std::array<int64_t, 3> old_shape,
     return out;
 }
 
-// --- Resampling ---------------------------------------------------------------
+/* ============================================================================ */
+/*                                 Resampling                                  */
+/* ============================================================================ */
 
 namespace {
+
+/**
+ * @brief Clamp a sample index to `[0, n)` for edge-mode boundary handling
+ */
 inline int64_t clamp_idx(int64_t i, int64_t n) {
     if (i < 0) {
         return 0;
@@ -139,6 +219,21 @@ inline int64_t clamp_idx(int64_t i, int64_t n) {
 }
 }  // namespace
 
+/*******************************************************************************/
+/*! \fn    Volume resample_trilinear(const Volume& src,
+                                     int64_t outZ, int64_t outY, int64_t outX)
+    \brief Trilinear resample with edge-clamped boundary handling
+
+    Pre-computes per-axis sample indices and weights once, then runs
+    a triple-nested loop (parallelized over Z when the workload is
+    non-trivial). Coordinate mapping is
+    `t = (k + 0.5) * (in / out) - 0.5` to match skimage's half-pixel
+    center convention with `mode='edge'`.
+
+    \param  src             source volume (any shape)
+    \param  outZ,outY,outX  target shape
+    \return                 new volume of shape (outZ, outY, outX)
+*/
 Volume resample_trilinear(const Volume& src,
                           int64_t outZ, int64_t outY, int64_t outX) {
     Volume out;
@@ -232,10 +327,23 @@ Volume resample_trilinear(const Volume& src,
     return out;
 }
 
-// --- Cubic Catmull-Rom resample ----------------------------------------------
+/* ============================================================================ */
+/*                          Cubic Catmull-Rom resample                         */
+/* ============================================================================ */
 
 namespace {
 
+/**
+ * @brief One-dimensional Catmull-Rom cubic Hermite interpolation
+ *
+ * Standard Catmull-Rom basis (tension = 0); evaluates the cubic
+ * Hermite polynomial that interpolates four equispaced samples
+ * v(-1), v(0), v(+1), v(+2) at position `t` in [0, 1].
+ *
+ * @param  v_m1, v_0, v_p1, v_p2  four equispaced samples
+ * @param  t   fractional offset in [0, 1] from v_0 toward v_p1
+ * @return     interpolated value
+ */
 inline float catmull_rom(float v_m1, float v_0, float v_p1, float v_p2, float t) {
     // Standard Catmull-Rom (tension = 0) cubic Hermite.
     const float t2 = t * t;
@@ -248,11 +356,30 @@ inline float catmull_rom(float v_m1, float v_0, float v_p1, float v_p2, float t)
            );
 }
 
+/**
+ * \struct CubicCoeffs
+ * \brief  Per-output-pixel sample indices + fractional offset for cubic resample
+ *
+ * Used by resample_cubic to precompute, for each output pixel along
+ * one axis, the four input sample indices (with edge clamping
+ * already applied) and the [0, 1) fractional offset that feed
+ * catmull_rom().
+ */
 struct CubicCoeffs {
-    std::vector<int64_t> i_m1, i_0, i_p1, i_p2;   // clamped sample indices
-    std::vector<float> t;                          // fractional offset in [0, 1)
+    std::vector<int64_t> i_m1;   /**< clamped index of v(-1) for each output pixel */
+    std::vector<int64_t> i_0;    /**< clamped index of v(0) */
+    std::vector<int64_t> i_p1;   /**< clamped index of v(+1) */
+    std::vector<int64_t> i_p2;   /**< clamped index of v(+2) */
+    std::vector<float> t;        /**< fractional offset in [0, 1) */
 };
 
+/**
+ * @brief Pre-compute per-output-pixel Catmull-Rom coefficients along one axis
+ *
+ * @param  out    target axis length
+ * @param  in_n   input axis length
+ * @return        4 index vectors + a fractional-offset vector
+ */
 CubicCoeffs make_cubic_coeffs(int64_t out, int64_t in_n) {
     CubicCoeffs c;
     c.i_m1.resize(out);
@@ -278,6 +405,20 @@ CubicCoeffs make_cubic_coeffs(int64_t out, int64_t in_n) {
 
 }  // namespace
 
+/*******************************************************************************/
+/*! \fn    Volume resample_cubic(const Volume& src,
+                                 int64_t outZ, int64_t outY, int64_t outX)
+    \brief Three-pass separable Catmull-Rom cubic resample
+
+    Three-pass separable design (along X, Y, Z) so each pass is a
+    simple 4-tap stencil. Two intermediate buffers hold the partial
+    products; the X-result buffer is freed before the Z pass to keep
+    peak memory bounded.
+
+    \param  src             source volume (any shape)
+    \param  outZ,outY,outX  target shape
+    \return                 new volume of shape (outZ, outY, outX)
+*/
 Volume resample_cubic(const Volume& src,
                       int64_t outZ, int64_t outY, int64_t outX) {
     Volume out;
