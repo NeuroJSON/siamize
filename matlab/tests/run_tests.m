@@ -62,7 +62,12 @@ tests = {
          @test_reject_struct_missing_fields_, ...
          @test_reject_fold_out_of_range_, ...
          @test_reject_non_char_cell_entry_, ...
-         @test_reject_unknown_output_extension_ ...
+         @test_reject_unknown_output_extension_, ...
+         @test_opts_struct_, ...
+         @test_opts_name_value_pairs_, ...
+         @test_opts_struct_plus_overrides_, ...
+         @test_opts_cuda_tuning_passthrough_, ...
+         @test_opts_tpm_temperature_passthrough_ ...
         };
 
 do_exit = any(strcmp(varargin, '--exit'));
@@ -436,6 +441,52 @@ function test_reject_unknown_output_extension_(fx)
 % .onnx URL). Expect a fetch / resolve error, NOT an output-write one.
 err = catch_call_(@() siamize(fx.img, 'out.txt'));
 assert(~isempty(err.message), 'expected some failure');
+end
+
+% =============================================================================
+% Opts plumbing (varargin2struct pattern)
+% =============================================================================
+
+function test_opts_struct_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, struct('device', 'cpu', 'verbose', true));
+assert(strcmp(SIAMEX_LAST.opts.device, 'cpu'));
+assert(logical(SIAMEX_LAST.opts.verbose));
+end
+
+function test_opts_name_value_pairs_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, 'device', 'cpu', 'verbose', true);
+assert(strcmp(SIAMEX_LAST.opts.device, 'cpu'));
+assert(logical(SIAMEX_LAST.opts.verbose));
+end
+
+function test_opts_struct_plus_overrides_(fx)
+global SIAMEX_LAST
+defs = struct('device', 'auto', 'verbose', false);
+siamize(fx.img, fx.A, 0, defs, 'verbose', true);
+% 'verbose' override should win; 'device' should stay from struct.
+assert(strcmp(SIAMEX_LAST.opts.device, 'auto'));
+assert(logical(SIAMEX_LAST.opts.verbose));
+end
+
+function test_opts_cuda_tuning_passthrough_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, ...
+        'cudnn_max_workspace', 0, ...
+        'arena_extend', 'same', ...
+        'cudnn_algo', 'heuristic', ...
+        'gpu_mem_limit', 6 * 1024^3);
+assert(SIAMEX_LAST.opts.cudnn_max_workspace == 0);
+assert(strcmp(SIAMEX_LAST.opts.arena_extend, 'same'));
+assert(strcmp(SIAMEX_LAST.opts.cudnn_algo, 'heuristic'));
+assert(SIAMEX_LAST.opts.gpu_mem_limit == 6 * 1024^3);
+end
+
+function test_opts_tpm_temperature_passthrough_(fx)
+global SIAMEX_LAST
+siamize(fx.img, fx.A, 0, 'tpm_temperature', 1.5);
+assert(abs(SIAMEX_LAST.opts.tpm_temperature - 1.5) < 1e-9);
 end
 
 % =============================================================================

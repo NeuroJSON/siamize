@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -174,6 +175,8 @@ struct Opts {
     int64_t classes = 18;
     std::string trt_cache;
     bool verbose = false;
+    siam::CudaTuning cuda_tuning;
+    float tpm_temperature = 1.0f;    // softmax temperature for the TPM
 };
 
 double opt_double(const mxArray* s, const char* name, double fallback) {
@@ -223,6 +226,55 @@ void read_opts(const mxArray* a, Opts& o) {
 
         const double* p = mxGetPr(f);
         o.patch = {(int64_t)p[0], (int64_t)p[1], (int64_t)p[2]};
+    }
+
+    // CUDA EP tuning knobs. All optional; absent fields keep CudaTuning
+    // defaults (which are ORT defaults).
+    if ((f = mxGetField(a, 0, "cudnn_max_workspace")) && !mxIsEmpty(f)) {
+        o.cuda_tuning.cudnn_max_workspace = static_cast<int>(mxGetScalar(f));
+    }
+
+    if ((f = mxGetField(a, 0, "arena_extend")) && !mxIsEmpty(f)) {
+        // Accept either the string ('same'/'power') or numeric (0/1).
+        if (mxIsChar(f)) {
+            std::string s = mx_to_string(f);
+            o.cuda_tuning.arena_same_as_req =
+                (s == "same" || s == "kSameAsRequested") ? 1 : 0;
+        } else {
+            o.cuda_tuning.arena_same_as_req = static_cast<int>(mxGetScalar(f)) ? 1 : 0;
+        }
+    }
+
+    if ((f = mxGetField(a, 0, "cudnn_algo")) && !mxIsEmpty(f)) {
+        std::string s = mx_to_string(f);
+
+        // Canonicalize to ORT's uppercase string form.
+        for (auto& c : s) {
+            c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
+        }
+
+        if (s == "DEFAULT" || s == "HEURISTIC" || s == "EXHAUSTIVE") {
+            o.cuda_tuning.algo_search = s;
+        } else {
+            die("siamize:cudnn_algo",
+                "opts.cudnn_algo must be 'default' | 'heuristic' | 'exhaustive'");
+        }
+    }
+
+    if ((f = mxGetField(a, 0, "gpu_mem_limit")) && !mxIsEmpty(f)) {
+        // Pass through as raw byte count. The .m wrapper is responsible for
+        // K/M/G suffix interpretation if it wants -- here we just take a number.
+        o.cuda_tuning.gpu_mem_limit_bytes =
+            static_cast<size_t>(mxGetScalar(f));
+    }
+
+    if ((f = mxGetField(a, 0, "tpm_temperature")) && !mxIsEmpty(f)) {
+        o.tpm_temperature = static_cast<float>(mxGetScalar(f));
+
+        if (o.tpm_temperature <= 0.0f) {
+            die("siamize:tpm_temperature",
+                "opts.tpm_temperature must be > 0");
+        }
     }
 }
 
@@ -353,7 +405,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         siam::LogitsVolume logits = siam::sliding_window(
                                         resampled, models, opts.patch, opts.classes,
                                         opts.threads, 0.5f, opts.verbose,
-                                        opts.device, opts.trt_cache);
+                                        opts.device, opts.trt_cache, opts.cuda_tuning);
         resampled = siam::Volume{};
 
         const int64_t cZ = crop.bbox[0][1] - crop.bbox[0][0];
@@ -429,6 +481,85 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             X, Y, Z,
             dst, sgn,
             out_ptr);
+
+        // ---- optional 4D TPM output -------------------------------------
+        // Compute only if the caller actually asked for it (nargout >= 2).
+        // Skipping when not requested saves the softmax + the ~1 GB
+        // single-precision output buffer.
+        if (nlhs >= 2) {
+            const float inv_T = 1.0f / opts.tpm_temperature;
+            const int64_t N = cZ * cY * cX;
+
+            for (int64_t i = 0; i < N; ++i) {
+                float m = logits_back.channel_ptr(0)[i] * inv_T;
+
+                for (int64_t c = 1; c < opts.classes; ++c) {
+                    float v = logits_back.channel_ptr(c)[i] * inv_T;
+
+                    if (v > m) {
+                        m = v;
+                    }
+                }
+
+                float s = 0.0f;
+
+                for (int64_t c = 0; c < opts.classes; ++c) {
+                    float e = std::exp(logits_back.channel_ptr(c)[i] * inv_T - m);
+                    logits_back.channel_ptr(c)[i] = e;
+                    s += e;
+                }
+
+                float invs = 1.0f / s;
+
+                for (int64_t c = 0; c < opts.classes; ++c) {
+                    logits_back.channel_ptr(c)[i] *= invs;
+                }
+            }
+
+            // Un-crop to canonical (C, Zc, Yc, Xc); outside the bbox is
+            // [1, 0, 0, ...] (background = 1).
+            const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
+            std::vector<float> tpm_canon(
+                static_cast<size_t>(opts.classes) * Zc * Yc * Xc, 0.0f);
+            std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);
+
+            for (int64_t c = 0; c < opts.classes; ++c) {
+                const float* src = logits_back.channel_ptr(c);
+                float* dst_chan = tpm_canon.data() + c * Zc * Yc * Xc;
+
+                for (int64_t z = 0; z < cZ; ++z) {
+                    for (int64_t y = 0; y < cY; ++y) {
+                        std::copy_n(
+                            &src[z * cY * cX + y * cX],
+                            cX,
+                            &dst_chan[(z + crop.bbox[0][0]) * Yc * Xc +
+                                                            (y + crop.bbox[1][0]) * Xc +
+                                                            crop.bbox[2][0]]);
+                    }
+                }
+            }
+
+            // Allocate the MATLAB 4D output as single (float32) and
+            // reorient each channel to (X, Y, Z) input-axis order.
+            const mwSize tdims[4] = {
+                static_cast<mwSize>(X),
+                static_cast<mwSize>(Y),
+                static_cast<mwSize>(Z),
+                static_cast<mwSize>(opts.classes),
+            };
+            plhs[1] = mxCreateNumericArray(4, tdims, mxSINGLE_CLASS, mxREAL);
+            float* tpm_ptr = static_cast<float*>(mxGetData(plhs[1]));
+            const int64_t per_chan_out = X * Y * Z;
+            const int64_t per_chan_in  = Zc * Yc * Xc;
+
+            for (int64_t c = 0; c < opts.classes; ++c) {
+                siam::copy_reorient_from_canonical<float, float>(
+                    tpm_canon.data() + c * per_chan_in,
+                    Zc, Yc, Xc,
+                    X, Y, Z, dst, sgn,
+                    tpm_ptr + c * per_chan_out);
+            }
+        }
 
     } catch (const std::exception& e) {
         die("siamize:runtime", e.what());

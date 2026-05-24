@@ -1,4 +1,4 @@
-function lab = siamize(varargin)
+function [lab, tpm] = siamize(varargin)
 % SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on a NIfTI volume.
 %
 %   labels = siamize(input)
@@ -76,19 +76,52 @@ function lab = siamize(varargin)
 %            via MATLAB/Octave's urlwrite + gunzip. The URL prefix is
 %            concatenated with `<basename>.gz` directly (no `/` between).
 %
-%   opts     optional struct with any of:
-%               .device     'auto' (default), 'cpu', 'cuda', 'tensorrt'
-%               .threads    int (0 = all available cores, default)
-%               .patch      [pz, py, px] (default [256 256 192])
-%               .spacing    double mm (default 0.75)
-%               .classes    int (default 18, matches SIAM v0.3)
-%               .trt_cache  char (default ~/.cache/siamize/trt)
-%               .verbose    logical (default false)
+%   opts     optional. Either a struct, a series of 'name', value
+%            pairs, or any mix of structs and 'name', value pairs that
+%            jsonlab's varargin2struct can merge. All keys are case-
+%            insensitive (varargin2struct lowercases). Recognized:
+%
+%               'device'              'auto' (default), 'cpu', 'cuda', 'tensorrt'
+%               'threads'             int (0 = all available cores, default)
+%               'patch'               [pz, py, px] (default [256 256 192])
+%               'spacing'             double mm (default 0.75)
+%               'classes'             int (default 18, matches SIAM v0.3)
+%               'trt_cache'           char (default ~/.cache/siamize/trt)
+%               'verbose'             logical (default false)
+%
+%            CUDA EP tuning (only used when device involves CUDA, see
+%            the CLI flags --cudnn-* for the same knobs):
+%
+%               'cudnn_max_workspace' 0 or 1 (default 1 = ORT default).
+%                                      Use 0 on tight-VRAM GPUs.
+%               'arena_extend'        'power' (default) or 'same'.
+%               'cudnn_algo'          'default' (default) | 'heuristic'
+%                                      | 'exhaustive'.
+%               'gpu_mem_limit'       bytes (double, e.g. 6*1024^3 for 6GB).
+%                                      Default 0 = no cap.
+%
+%            TPM output (4D float32 tissue probability map, softmax
+%            over the 18 fold-averaged class logits):
+%
+%               'tpm_out'             char output path (.nii(.gz) /
+%                                      .jnii / .bnii). When set, the
+%                                      TPM is saved to disk in
+%                                      addition to (or instead of)
+%                                      returning it.
+%               'tpm_temperature'     double (default 1.0). T>1 softens
+%                                      the softmax (more graded
+%                                      boundaries, better calibration).
 %
 %   labels   uint8 3D array with the same [X, Y, Z] shape as the input
 %            volume. Label integers 0..17 per SIAM v0.3 (0=background,
 %            1=GM, 2=WM, 3=CSF, ..., 17=Anomalies). Always returned;
 %            also written to outputfile if one was provided.
+%
+%   tpm      (optional second output) 4D single (float32) of shape
+%            [X, Y, Z, 18] holding the softmax probabilities per voxel
+%            and class. Computed and returned only when the caller
+%            requests two outputs OR when opts.tpm_out is set. Sums
+%            to 1 per voxel; argmax(tpm, 4)-1 reproduces `labels`.
 %
 % Examples
 %   % one-shot file -> file:
@@ -97,9 +130,24 @@ function lab = siamize(varargin)
 %   % cross-format: read .nii.gz, write binary JNIfTI:
 %   siamize('input.nii.gz', 'labels.bnii');
 %
-%   % struct in, file out, full ensemble:
+%   % struct in, file out, full ensemble, verbose, CUDA EP:
 %   nii = loadnifti('input.nii.gz');
-%   siamize(nii, 'labels.jnii', 0:4);
+%   siamize(nii, 'labels.jnii', 0:4, 'device', 'cuda', 'verbose', true);
+%
+%   % tight-VRAM GPU: shrink cuDNN workspace, dynamic-shape patch:
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, ...
+%           'device', 'cuda', 'cudnn_max_workspace', 0, ...
+%           'arena_extend', 'same', 'patch', [192 192 128]);
+%
+%   % save 4D TPM to disk alongside the labelmap:
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'tpm_out', 'tpm.nii.gz');
+%
+%   % return TPM in-memory (second nargout); no file written:
+%   [lab, tpm] = siamize('in.nii.gz', 0:4, 'tpm_temperature', 1.5);
+%
+%   % opts struct still works (BC); can mix with name/value overrides:
+%   defs = struct('device', 'cuda', 'verbose', true);
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, defs, 'tpm_out', 'tpm.bnii');
 %
 %   % pure array, default affine inferred:
 %   lab = siamize(my_volume);
@@ -161,10 +209,24 @@ if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
     end
 end
 
-lab = siamex(img, affine, resolved, opts);
+% Decide whether to request the optional 4D TPM. Compute it iff the
+% caller asked for it via the second nargout or via opts.tpm_out (in
+% which case we save it to disk after).
+tpm_out = jsonopt('tpm_out', '', opts);
+want_tpm = (nargout >= 2) || ~isempty(tpm_out);
+
+if want_tpm
+    [lab, tpm] = siamex(img, affine, resolved, opts);
+else
+    lab = siamex(img, affine, resolved, opts);
+end
 
 if ~isempty(outputfile)
     siamize_write_output_(lab, affine, src, outputfile);
+end
+
+if ~isempty(tpm_out)
+    siamize_write_tpm_(tpm, affine, src, tpm_out);
 end
 end
 
@@ -272,12 +334,15 @@ end
 if numel(rest) >= 1
     models = rest{1};
 end
-if numel(rest) >= 2
-    opts = rest{2};
-end
-if isempty(opts) || ~isstruct(opts)
-    opts = struct();
-end
+
+% Everything after `models` is the options bag. Built with jsonlab's
+% `varargin2struct` so callers can mix:
+%     a single struct:                       siamize(in, out, 0, struct('device','cuda'))
+%     'param', value pairs:                  siamize(in, out, 0, 'device','cuda','verbose',1)
+%     a struct + name/value overrides:       siamize(in, out, 0, defs, 'verbose', 1)
+%     nothing (empty opts):                  siamize(in, out, 0)
+opts_args = rest(2:end);
+opts = varargin2struct(opts_args{:});
 end
 
 function siamize_write_output_(lab, affine, src, outputfile)
@@ -302,6 +367,35 @@ elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
 else
     error('siamize:outext', ...
           ['unsupported output extension: %s (expected '...
+           '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
+end
+end
+
+
+function siamize_write_tpm_(tpm, affine, src, outputfile)
+% SIAMIZE_WRITE_TPM_  Save a 4D float32 TPM volume to disk.
+%   Same writer dispatch as for labels (.nii(.gz) via jnii2nii;
+%   .jnii / .bnii via savejnifti). Header inherited from the source
+%   jnifti struct when available; otherwise synthesized via
+%   jnifticreate so the affine round-trips.
+if isstruct(src) && isfield(src, 'NIFTIHeader')
+    jnii_out = src;
+    jnii_out.NIFTIData = tpm;
+    if isfield(jnii_out.NIFTIHeader, 'Affine')
+        jnii_out.NIFTIHeader.Affine = affine;
+    end
+else
+    jnii_out = jnifticreate(tpm);
+    jnii_out.NIFTIHeader.Affine = affine;
+end
+
+if ~isempty(regexpi(outputfile, '\.nii(\.gz)?$', 'once'))
+    jnii2nii(jnii_out, outputfile);
+elseif ~isempty(regexpi(outputfile, '\.(jnii|bnii)$', 'once'))
+    savejnifti(jnii_out, outputfile);
+else
+    error('siamize:tpmext', ...
+          ['unsupported tpm_out extension: %s (expected '...
            '.nii / .nii.gz / .jnii / .bnii)'], outputfile);
 end
 end
@@ -391,10 +485,7 @@ if isempty(urlbase)
                '&doc=dynshape&size=95360591&file='];
 end
 
-verbose = false;
-if isstruct(opts) && isfield(opts, 'verbose') && ~isempty(opts.verbose)
-    verbose = logical(opts.verbose);
-end
+verbose = logical(jsonopt('verbose', false, opts));
 
 url_gz = [urlbase, basename, '.gz'];
 tmp_gz = [p, '.gz'];
