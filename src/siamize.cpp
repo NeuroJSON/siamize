@@ -143,6 +143,9 @@ std::string expand_fold_shortcut(const std::string& tok) {
 */
 void usage(const char* exe) {
     std::fprintf(stderr,
+                 "[siamize]  v0.1.0  native C++/ONNX port of SIAM v0.3 brain segmentation\n"
+                 "           https://github.com/NeuroJSON/siamize\n"
+                 "\n"
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
                  "\n"
                  "  -i, --input         input volume (.nii / .nii.gz NIfTI-1/2, or .jnii / .bnii\n"
