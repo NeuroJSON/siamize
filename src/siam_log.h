@@ -48,6 +48,16 @@ to enable progress output.
 #ifndef SIAMIZE_SIAM_LOG_H
 #define SIAMIZE_SIAM_LOG_H
 
+// printf-format checking attribute: GCC / Clang understand it; MSVC has
+// no direct equivalent (its /analyze adds something similar but not as
+// a function attribute), so the macro expands to nothing there.
+#if defined(__GNUC__) || defined(__clang__)
+    #define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx) \
+        __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+    #define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx)
+#endif
+
 namespace siam {
 
 /**
@@ -84,7 +94,7 @@ bool verbose();
  * @param  fmt  printf-style format for the body
  */
 void log_tag(const char* tag, const char* fmt, ...)
-__attribute__((format(printf, 2, 3)));
+SIAM_LOG_PRINTF_FMT(2, 3);
 
 /**
  * @brief Continuation line aligned under the tag column
@@ -101,7 +111,7 @@ __attribute__((format(printf, 2, 3)));
  * No-op when verbose() is false.
  */
 void log_cont(const char* fmt, ...)
-__attribute__((format(printf, 1, 2)));
+SIAM_LOG_PRINTF_FMT(1, 2);
 
 /**
  * @brief Unconditional warning (ignores the verbose flag)
@@ -114,7 +124,7 @@ __attribute__((format(printf, 1, 2)));
  * @param  fmt  printf-style format
  */
 void log_warn(const char* fmt, ...)
-__attribute__((format(printf, 1, 2)));
+SIAM_LOG_PRINTF_FMT(1, 2);
 
 /**
  * @brief Progress-bar line: redraws in place on a TTY, falls back to
@@ -147,7 +157,7 @@ void log_progress(const char* tag, long long current, long long total);
  * @param  fmt  printf-style format
  */
 void log_hint(const char* fmt, ...)
-__attribute__((format(printf, 1, 2)));
+SIAM_LOG_PRINTF_FMT(1, 2);
 
 }  // namespace siam
 
