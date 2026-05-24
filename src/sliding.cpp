@@ -1,5 +1,45 @@
-// Sliding-window driver with Gaussian-blended accumulator, mirroring
-// siam_ort.py. fp32 accumulators; one fold loaded into ORT at a time.
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**  \li \c (\b ORT) Microsoft ONNX Runtime,
+**         <a href="https://onnxruntime.ai">onnxruntime.ai</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    sliding.cpp
+\brief   Sliding-window inference: tile generation, ORT plumbing, fold averaging
+
+Mirrors the Python reference in py/siam_ref.py / siam_ort.py:
+
+  - Build a Gaussian-weighted importance map sized to the patch
+    (matches scipy.ndimage.gaussian_filter(sigma=patch/8) on a delta,
+    normalized so the max is 10x and zero entries are floored to the
+    smallest nonzero weight to avoid voxels with no coverage).
+  - Generate evenly-spaced tile starts per axis at `step_ratio *
+    patch_size` stride, with the last tile snug against the far edge.
+  - Run one ORT session per model fold; per tile, feed in (1, 1, Z, Y, X)
+    fp32 patches, accumulate logits * Gaussian into the accumulator,
+    track per-voxel weight, then divide at the end.
+  - Execution provider selection: CPU (always available), CUDA EP
+    (compile-time SIAMIZE_GPU=cuda + runtime cuDNN/cuBLAS), TensorRT
+    EP (compile-time SIAMIZE_GPU=tensorrt + runtime libnvinfer). The
+    "auto" device silently falls back from CUDA to CPU.
+
+fp32 accumulators throughout; only one fold's session lives in ORT
+at any moment so peak VRAM stays bounded.
+*******************************************************************************/
 
 #include "sliding.h"
 #include "siam.h"
@@ -27,8 +67,12 @@ namespace siam {
 namespace {
 
 #ifdef _WIN32
-// ORT's Session constructor on Windows expects wchar_t* (UTF-16) paths.
-// Convert UTF-8 -> UTF-16 via the Win32 API.
+/*******************************************************************************/
+/*! \fn    std::wstring widen_path(const std::string& s)
+    \brief Convert UTF-8 to UTF-16 for the Windows ORT Session constructor
+    \param  s  UTF-8 path
+    \return    UTF-16 path
+*/
 std::wstring widen_path(const std::string& s) {
     if (s.empty()) {
         return std::wstring();
@@ -48,11 +92,25 @@ std::wstring widen_path(const std::string& s) {
 }
 #endif
 
-// Produce a [Z, Y, X] Gaussian importance map matching scipy.ndimage.gaussian_filter
-// with sigma = patch / 8 acting on a delta, then normalized so max == value_scaling.
-// The simplest exact match is to evaluate the Gaussian closed form (the filter on
-// a delta IS a Gaussian); after normalize-by-max the truncation/edge effects of
-// scipy's filter become irrelevant.
+/*******************************************************************************/
+/*! \fn    std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
+                                               float sigma_scale,
+                                               float value_scaling)
+    \brief Build the per-tile Gaussian importance map
+
+    Equivalent to `scipy.ndimage.gaussian_filter(delta, sigma=patch/8)`
+    -- the filter response to a delta IS a Gaussian, so we evaluate
+    the closed form directly. After normalize-by-max, scipy's
+    truncation and edge handling become irrelevant. Zero entries
+    (well outside the Gaussian's mass) are floored to the smallest
+    nonzero weight so every voxel in the tile contributes some
+    coverage to the accumulator.
+
+    \param  patch          tile shape in (Z, Y, X)
+    \param  sigma_scale    sigma = sigma_scale * patch_size, default 1/8
+    \param  value_scaling  peak after normalization (default 10x)
+    \return                flat (Z*Y*X) importance map
+*/
 std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
                                     float sigma_scale = 1.0f / 8.0f,
                                     float value_scaling = 10.0f) {
@@ -114,6 +172,23 @@ std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
     return g;
 }
 
+/*******************************************************************************/
+/*! \fn    std::vector<int64_t> compute_steps(int64_t image_size,
+                                              int64_t patch,
+                                              float step_ratio)
+    \brief Generate tile start indices along one axis
+
+    Picks the smallest number of evenly-spaced positions whose stride
+    is at most `patch * step_ratio` and which cover the full range
+    `[0, image_size - patch]`. With one tile, no spacing is needed;
+    otherwise the actual stride is recomputed to divide the span
+    exactly. Matches nnUNet's `compute_steps_for_sliding_window`.
+
+    \param  image_size  image extent along this axis
+    \param  patch       patch extent along this axis
+    \param  step_ratio  fraction of patch_size used as the target stride
+    \return             monotonically-increasing tile start indices
+*/
 std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step_ratio) {
     if (image_size < patch) {
         throw std::runtime_error("image smaller than patch (pad first)");
@@ -139,8 +214,44 @@ std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step
     return steps;
 }
 
-}  // namespace
+}  // anonymous namespace
 
+/*******************************************************************************/
+/*! \fn    LogitsVolume sliding_window(const Volume& data,
+                                       const std::vector<std::string>& model_paths,
+                                       std::array<int64_t, 3> patch_size,
+                                       int64_t num_classes,
+                                       int intra_threads,
+                                       float step_ratio,
+                                       bool verbose,
+                                       const std::string& device,
+                                       const std::string& trt_cache_dir,
+                                       const CudaTuning& cuda_tuning)
+    \brief Run sliding-window inference over one canonical volume
+
+    Implementation outline:
+
+      -# Decide which Execution Provider chain to install based on
+         \a device, the compile-time SIAMIZE_GPU value, and runtime
+         provider-library availability. CUDA EP is attempted before
+         CPU on "auto" / "cuda"; TensorRT EP is attempted only when
+         requested explicitly.
+      -# Pre-compute the Gaussian importance map (compute_gaussian)
+         and per-axis tile start indices (compute_steps).
+      -# Allocate the (num_classes, Z, Y, X) accumulator and a
+         per-voxel weight accumulator.
+      -# Loop over folds, creating one ORT session per fold;
+         feed (1, 1, Z, Y, X) fp32 tile tensors into Run(); multiply
+         the per-class outputs by the Gaussian and add into the
+         accumulator. Track per-voxel weight in parallel.
+      -# After all folds, divide the per-channel accumulator by the
+         weight buffer to obtain final logits.
+
+    \param  data, model_paths, patch_size, num_classes, intra_threads,
+            step_ratio, verbose, device, trt_cache_dir, cuda_tuning
+            - see sliding.h for parameter semantics
+    \return Per-class logits at the same grid as \a data
+*/
 LogitsVolume sliding_window(const Volume& data,
                             const std::vector<std::string>& model_paths,
                             std::array<int64_t, 3> patch_size,
