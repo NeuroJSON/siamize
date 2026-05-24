@@ -1,8 +1,50 @@
-// siamize: end-to-end SIAM v0.3 brain segmentation in C++.
-//
-// CLI mirrors the Python siam-pred:
-//   siamize -i input.nii.gz -o output.nii.gz [-M fold_0.onnx[,fold_1.onnx,...]]
-//   Optional: -c auto|cpu|cuda|tensorrt, -G N (GPU id), -t N (threads), -v
+/***************************************************************************//**
+**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**
+**  \author    Qianqian Fang <q.fang at neu.edu>
+**  \copyright Qianqian Fang, 2026
+**
+**  \section sref Reference:
+**  \li \c (\b Valabregue2026) Romain Valabregue, Ikram Khemir, Eric Bardinet,
+**         Francois Rousseau, Guillaume Auzias, Reuben Dorent, "SIAM: Head and
+**         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
+**         Training," arXiv:2605.02737 (2026).
+**         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**
+**  \section slicense License
+**          Apache License 2.0, see LICENSE for details
+*******************************************************************************/
+
+/***************************************************************************//**
+\file    siamize.cpp
+\brief   Command-line entry point: argument parsing + end-to-end pipeline
+
+Implements the `siamize` CLI binary. The pipeline assembled here:
+
+  -# Parse CLI flags (-i/-o/-M/-c/-G/-t/-P/-u/-C/-F/--tpm/--tpm-t/-v ...)
+     into local state. Most flags have a long + short form; see
+     siam::usage() for the canonical help text.
+  -# Resolve model paths via weights::resolve_model_path (which
+     auto-downloads from NeuroJSON on first use).
+  -# Load the input volume:
+     - `.nii` / `.nii.gz`  -> nifti_io::load_nifti_ras
+     - `.jnii` / `.bnii`   -> jnifti_io::load_jnifti_ras
+     Both produce a canonical (Z, Y, X) RAS NiftiImage.
+  -# Pre-network preprocessing: nonzero crop -> spacing resample
+     (Catmull-Rom cubic) -> z-score normalize.
+  -# Sliding-window inference via siam::sliding_window with the
+     selected Execution Provider (CPU / CUDA / TensorRT).
+  -# Post-process:
+     - Labels:   argmax -> un-resample -> un-crop -> uint8 (X,Y,Z)
+     - TPM:      softmax (with optional temperature) -> un-resample
+                 -> un-crop -> float32 4D (X,Y,Z,C)
+  -# Save in the format selected by `-F/--format`:
+     `nii` (NIfTI-1), `jnii` (JSON-text JNIfTI), or `bnii`
+     (BJData binary JNIfTI).
+
+The CLI mirrors the Python siam-pred reference but stays
+single-binary with no Python runtime.
+*******************************************************************************/
 
 #include "siam.h"
 #include "nifti_io.h"
@@ -34,6 +76,17 @@ using siam::Volume;
 
 namespace {
 
+/*******************************************************************************/
+/*! \fn    std::vector<std::string> split_csv(const std::string& s)
+    \brief Split a comma-separated string into a list of non-empty tokens
+
+    Used to parse the `-M / --models` argument, which accepts a
+    comma-separated list of fold specs (each spec is either a path,
+    a basename, or a one-character fold-index shortcut).
+
+    \param  s  the raw input string
+    \return    list of non-empty tokens
+*/
 std::vector<std::string> split_csv(const std::string& s) {
     std::vector<std::string> out;
     std::string acc;
@@ -57,7 +110,17 @@ std::vector<std::string> split_csv(const std::string& s) {
     return out;
 }
 
-// "0".."9" expands to "fold_<d>_fp16.onnx"; anything else passes through.
+/*******************************************************************************/
+/*! \fn    std::string expand_fold_shortcut(const std::string& tok)
+    \brief Expand a single-digit fold shortcut to the canonical fp16 filename
+
+    `"0".."9"` becomes `"fold_<d>_fp16.onnx"`; anything else passes
+    through unchanged. Lets users write `-M 0,1,2,3,4` instead of
+    spelling out the full filenames.
+
+    \param  tok  one model spec token
+    \return      expanded filename if \a tok was a digit, else \a tok verbatim
+*/
 std::string expand_fold_shortcut(const std::string& tok) {
     if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= '9') {
         return "fold_" + tok + "_fp16.onnx";
@@ -66,6 +129,17 @@ std::string expand_fold_shortcut(const std::string& tok) {
     return tok;
 }
 
+/*******************************************************************************/
+/*! \fn    void usage(const char* exe)
+    \brief Print the full CLI help text to stderr
+
+    Documents every flag (short + long), the input/output extensions
+    handled by extension dispatch, the -F/--format options, the
+    execution-provider choices on `-c/--compute`, and a worked
+    examples block. Kept in sync with the README's CLI section.
+
+    \param  exe  argv[0] (typically `siamize`)
+*/
 void usage(const char* exe) {
     std::fprintf(stderr,
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
@@ -170,6 +244,19 @@ void usage(const char* exe) {
 
 }  // namespace
 
+/*******************************************************************************/
+/*! \fn    int main(int argc, char** argv)
+    \brief Program entry point: parse args, run the pipeline, write output
+
+    Walks argv with manual flag handling (no getopt) so the same
+    short+long flag parsing can be lifted into the MEX bridge. The
+    main steps mirror the pipeline outlined in this file's @brief.
+
+    \param  argc  argument count (from the C runtime)
+    \param  argv  argument vector
+    \return       0 on success, 1 on a runtime failure (std::exception),
+                  2 on a bad-CLI error
+*/
 int main(int argc, char** argv) {
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
