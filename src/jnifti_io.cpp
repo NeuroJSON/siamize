@@ -9,26 +9,15 @@
 #include "siam.h"
 
 #include "nlohmann/json.hpp"
+#include "zmat.h"   // declarations only; impl lives in nifti_io.cpp's TU
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-// Forward decls of miniz's zlib (RFC 1950) compress/uncompress entry
-// points. Definitions are in zmat/zmat.h under ZMAT_IMPLEMENTATION,
-// which nifti_io.cpp instantiates. zmat.h wraps these declarations in
-// `extern "C"` so the symbols have C linkage -- match that here.
-extern "C" {
-    typedef unsigned long mz_ulong;
-    int mz_compress2(unsigned char* pDest, mz_ulong* pDest_len,
-                     const unsigned char* pSource, mz_ulong source_len, int level);
-    int mz_uncompress(unsigned char* pDest, mz_ulong* pDest_len,
-                      const unsigned char* pSource, mz_ulong source_len);
-    mz_ulong mz_compressBound(mz_ulong source_len);
-}
 
 namespace siam {
 
@@ -41,108 +30,34 @@ bool ends_with(const std::string& s, const std::string& suffix) {
            && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-std::vector<uint8_t> zlib_compress(const uint8_t* in, size_t n, int level = 6) {
-    mz_ulong cap = mz_compressBound(static_cast<mz_ulong>(n));
-    std::vector<uint8_t> out(cap);
-    mz_ulong dest_len = cap;
-    int rc = mz_compress2(out.data(), &dest_len, in, static_cast<mz_ulong>(n), level);
+// Thin C++ wrapper around zmat's all-in-one driver zmat_run, returning
+// the output in a std::vector and throwing on error. zmat owns the
+// output buffer via malloc; we copy and zmat_free it before returning.
+// zipid: one of zmZlib / zmGzip / zmBase64 (zmat supports more --
+// zmLzma, zmZstd, etc. -- but the JNIfTI spec only mandates zlib here).
+// iscompress: 1 for encode/compress, 0 for decode/decompress.
+std::vector<uint8_t> run_zmat(const uint8_t* in, size_t n, int zipid, int iscompress) {
+    unsigned char* out = nullptr;
+    size_t outlen = 0;
+    int zret = 0;
+    int rc = zmat_run(n, const_cast<unsigned char*>(in), &outlen, &out,
+                      zipid, &zret, iscompress);
 
-    if (rc != 0) {
-        throw std::runtime_error("mz_compress2 failed (rc=" + std::to_string(rc) + ")");
-    }
-
-    out.resize(static_cast<size_t>(dest_len));
-    return out;
-}
-
-std::vector<uint8_t> zlib_decompress(const uint8_t* in, size_t n, size_t expected) {
-    std::vector<uint8_t> out(expected);
-    mz_ulong dest_len = static_cast<mz_ulong>(expected);
-    int rc = mz_uncompress(out.data(), &dest_len, in, static_cast<mz_ulong>(n));
-
-    if (rc != 0) {
-        throw std::runtime_error("mz_uncompress failed (rc=" + std::to_string(rc) + ")");
-    }
-
-    out.resize(static_cast<size_t>(dest_len));
-    return out;
-}
-
-// Standard RFC 4648 base64 encoder.
-std::string base64_encode(const uint8_t* in, size_t n) {
-    static const char tbl[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((n + 2) / 3) * 4);
-    size_t i = 0;
-
-    for (; i + 3 <= n; i += 3) {
-        uint32_t v = (uint32_t(in[i]) << 16) | (uint32_t(in[i + 1]) << 8) | in[i + 2];
-        out.push_back(tbl[(v >> 18) & 63]);
-        out.push_back(tbl[(v >> 12) & 63]);
-        out.push_back(tbl[(v >> 6) & 63]);
-        out.push_back(tbl[v & 63]);
-    }
-
-    if (i < n) {
-        uint32_t v = uint32_t(in[i]) << 16;
-
-        if (i + 1 < n) {
-            v |= uint32_t(in[i + 1]) << 8;
+    if (rc != 0 || out == nullptr) {
+        if (out) {
+            zmat_free(&out);
         }
 
-        out.push_back(tbl[(v >> 18) & 63]);
-        out.push_back(tbl[(v >> 12) & 63]);
-        out.push_back(i + 1 < n ? tbl[(v >> 6) & 63] : '=');
-        out.push_back('=');
+        throw std::runtime_error(
+            std::string("zmat_run failed (zipid=") + std::to_string(zipid)
+            + ", iscompress=" + std::to_string(iscompress)
+            + ", rc=" + std::to_string(rc)
+            + ", zret=" + std::to_string(zret) + ")");
     }
 
-    return out;
-}
-
-std::vector<uint8_t> base64_decode(const std::string& s) {
-    static int8_t lut[128];
-    static bool init = false;
-
-    if (!init) {
-        for (int i = 0; i < 128; ++i) {
-            lut[i] = -1;
-        }
-
-        const char* tbl =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-        for (int i = 0; i < 64; ++i) {
-            lut[static_cast<unsigned char>(tbl[i])] = i;
-        }
-
-        init = true;
-    }
-
-    std::vector<uint8_t> out;
-    out.reserve((s.size() / 4) * 3);
-    uint32_t v = 0;
-    int bits = 0;
-
-    for (char c : s) {
-        if (c == '=' || c == '\n' || c == '\r' || c == ' ' || c == '\t') {
-            continue;
-        }
-
-        if (static_cast<unsigned char>(c) >= 128 || lut[(int)c] < 0) {
-            throw std::runtime_error("invalid base64 character");
-        }
-
-        v = (v << 6) | static_cast<uint32_t>(lut[(int)c]);
-        bits += 6;
-
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<uint8_t>((v >> bits) & 0xFFu));
-        }
-    }
-
-    return out;
+    std::vector<uint8_t> result(out, out + outlen);
+    zmat_free(&out);
+    return result;
 }
 
 // Column-major (X-fastest) -> row-major (last-dim-fastest) transpose.
@@ -218,7 +133,8 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool bina
     // format>1.9 reshape+permute pair recovers it correctly.
     std::vector<T> row = col_to_row_major(data, shape);
     const size_t raw_bytes = n_elem * sizeof(T);
-    auto comp = zlib_compress(reinterpret_cast<const uint8_t*>(row.data()), raw_bytes);
+    auto comp = run_zmat(reinterpret_cast<const uint8_t*>(row.data()), raw_bytes,
+                         zmZlib, /*iscompress=*/1);
 
     json arr = json::object();
     arr["_ArrayType_"]    = jdata_dtype<T>();
@@ -234,7 +150,8 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool bina
         // should be on the .bnii wire.
         arr["_ArrayZipData_"] = json::binary(comp);
     } else {
-        arr["_ArrayZipData_"] = base64_encode(comp.data(), comp.size());
+        auto b64 = run_zmat(comp.data(), comp.size(), zmBase64, /*iscompress=*/1);
+        arr["_ArrayZipData_"] = std::string(b64.begin(), b64.end());
     }
 
     return arr;
@@ -506,12 +423,16 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
         std::vector<uint8_t> comp;
 
         if (zd.is_binary()) {
+            // .bnii: raw zlib bytes already in a BJData byte string.
             const auto& b = zd.get_binary();
             comp.assign(b.begin(), b.end());
         } else if (zd.is_string()) {
-            comp = base64_decode(zd.get<std::string>());
+            // .jnii: base64 ASCII -> raw zlib bytes via zmat.
+            const std::string& s = zd.get<std::string>();
+            comp = run_zmat(reinterpret_cast<const uint8_t*>(s.data()), s.size(),
+                            zmBase64, /*iscompress=*/0);
         } else if (zd.is_array()) {
-            // Some encoders may serialize byte arrays as numeric arrays.
+            // Defensive: a few encoders emit byte payloads as numeric arrays.
             comp.reserve(zd.size());
 
             for (const auto& b : zd) {
@@ -521,7 +442,15 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
             throw std::runtime_error("_ArrayZipData_ has unexpected type");
         }
 
-        return zlib_decompress(comp.data(), comp.size(), raw_bytes);
+        auto raw = run_zmat(comp.data(), comp.size(), zmZlib, /*iscompress=*/0);
+
+        if (raw.size() != raw_bytes) {
+            throw std::runtime_error(
+                "_ArrayZipData_ decompressed to " + std::to_string(raw.size())
+                + " bytes, expected " + std::to_string(raw_bytes));
+        }
+
+        return raw;
     }
 
     // Uncompressed path: _ArrayData_ is a flat numeric array.
