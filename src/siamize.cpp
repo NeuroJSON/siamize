@@ -281,14 +281,18 @@ void usage(const char* exe) {
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
                  "                      wall time; use only on RAM-constrained hosts.\n"
-                 "      --lowmem        force the low-memory preset (--no-arena + -P 192x192x128\n"
-                 "                      + -t auto-cap=8 + --cudnn-max-workspace 0 + \n"
-                 "                      --gpu-mem-limit 6G). The same preset is auto-applied\n"
-                 "                      when available host RAM is < 24 GB or free GPU VRAM\n"
-                 "                      is < 12 GB; pass --lowmem to force it on otherwise-\n"
-                 "                      large hosts (e.g. shared box with limited budget).\n"
-                 "                      Individual flags passed alongside --lowmem are NOT\n"
-                 "                      overridden -- explicit beats the preset.\n"
+                 "      --lowmem        force the full low-memory preset (--no-arena +\n"
+                 "                      -t auto-cap=8 + --cudnn-max-workspace 0 +\n"
+                 "                      --gpu-mem-limit 6G + -P 192x192x128). The -P\n"
+                 "                      shrink REQUIRES an ONNX exported with dynamic\n"
+                 "                      spatial axes (tools/onnx_export/ default since\n"
+                 "                      the dynamic_axes change); pass --lowmem to opt\n"
+                 "                      in only when your weights support it. Without\n"
+                 "                      --lowmem, auto-detect applies the SAFE SUBSET\n"
+                 "                      (everything except -P) whenever available host\n"
+                 "                      RAM is < 24 GB or free GPU VRAM is < 12 GB, so\n"
+                 "                      out-of-the-box behavior never breaks inference.\n"
+                 "                      Flags passed alongside --lowmem are NOT overridden.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
                  "                      file at `-o` is a 4D float32 tissue probability map of\n"
                  "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
@@ -627,7 +631,15 @@ int main(int argc, char** argv) {
     std::vector<std::string> auto_applied;
 
     if (ram_tight) {
-        if (!patch_set) {
+        // Patch shrink is gated on EXPLICIT --lowmem only. Auto-detection
+        // doesn't touch -P because the network only accepts smaller
+        // patches if its ONNX was exported with dynamic spatial axes
+        // (the tools/onnx_export/ default since the dynamic_axes change,
+        // but old uploads / cached files may still be fixed-shape).
+        // --lowmem is the user's assertion that their weights support
+        // variable patch sizes; auto-detect can't make that assertion
+        // and stays at the default -P which always works.
+        if (lowmem_mode && !patch_set) {
             patch = {192, 192, 128};
             auto_applied.push_back("-P 192x192x128");
         }

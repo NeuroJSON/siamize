@@ -101,15 +101,18 @@ function nii = siamize(varargin)
 %                                      RSS on the 18-class network at the
 %                                      cost of ~1.5x wall time.
 %               'lowmem'              logical (default false). True forces
-%                                      the lowmem preset (smaller patch,
-%                                      no arena, smaller thread cap, tight
-%                                      VRAM knobs); mirrors the CLI
-%                                      --lowmem flag. The same preset is
-%                                      auto-applied when available RAM is
-%                                      < 24 GB or GPU VRAM is < 12 GB.
-%                                      Pass 'lowmem', true to force on
-%                                      otherwise-large hosts (e.g. shared
-%                                      box with limited memory budget).
+%                                      the FULL lowmem preset (smaller
+%                                      patch + no arena + smaller thread
+%                                      cap + tight VRAM knobs); mirrors
+%                                      CLI --lowmem. The patch shrink
+%                                      REQUIRES a dynamic-shape ONNX
+%                                      export -- pass 'lowmem', true only
+%                                      when your weights support it.
+%                                      Without 'lowmem', auto-detect
+%                                      applies the SAFE SUBSET (everything
+%                                      except 'patch') when available RAM
+%                                      < 24 GB or VRAM < 12 GB, so the
+%                                      defaults never break inference.
 %               'verbose'             logical (default false)
 %
 %            CUDA EP tuning (only used when compute involves CUDA,

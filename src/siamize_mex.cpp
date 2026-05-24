@@ -582,7 +582,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 
         if (ram_tight) {
-            if (!opts.patch_set) {
+            // Patch shrink is gated on EXPLICIT opts.lowmem only. Auto-
+            // detection doesn't touch opts.patch because the network only
+            // accepts smaller patches if its ONNX was exported with
+            // dynamic spatial axes (an assertion the user must make, not
+            // something we can probe). opts.lowmem mirrors CLI --lowmem
+            // and is the user opting in to the patch shrink.
+            if (opts.lowmem && !opts.patch_set) {
                 opts.patch = {192, 192, 128};
             }
 
