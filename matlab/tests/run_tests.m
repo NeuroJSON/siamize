@@ -67,8 +67,8 @@ tests = {
          @test_opts_name_value_pairs_, ...
          @test_opts_struct_plus_overrides_, ...
          @test_opts_cuda_tuning_passthrough_, ...
-         @test_opts_gpuid_passthrough_, ...
-         @test_opts_tpm_temperature_passthrough_ ...
+         @test_opts_gpu_passthrough_, ...
+         @test_opts_tpm_t_passthrough_ ...
         };
 
 do_exit = any(strcmp(varargin, '--exit'));
@@ -450,24 +450,24 @@ end
 
 function test_opts_struct_(fx)
 global SIAMEX_LAST
-siamize(fx.img, fx.A, 0, struct('device', 'cpu', 'verbose', true));
-assert(strcmp(SIAMEX_LAST.opts.device, 'cpu'));
+siamize(fx.img, fx.A, 0, struct('compute', 'cpu', 'verbose', true));
+assert(strcmp(SIAMEX_LAST.opts.compute, 'cpu'));
 assert(logical(SIAMEX_LAST.opts.verbose));
 end
 
 function test_opts_name_value_pairs_(fx)
 global SIAMEX_LAST
-siamize(fx.img, fx.A, 0, 'device', 'cpu', 'verbose', true);
-assert(strcmp(SIAMEX_LAST.opts.device, 'cpu'));
+siamize(fx.img, fx.A, 0, 'compute', 'cpu', 'verbose', true);
+assert(strcmp(SIAMEX_LAST.opts.compute, 'cpu'));
 assert(logical(SIAMEX_LAST.opts.verbose));
 end
 
 function test_opts_struct_plus_overrides_(fx)
 global SIAMEX_LAST
-defs = struct('device', 'auto', 'verbose', false);
+defs = struct('compute', 'auto', 'verbose', false);
 siamize(fx.img, fx.A, 0, defs, 'verbose', true);
-% 'verbose' override should win; 'device' should stay from struct.
-assert(strcmp(SIAMEX_LAST.opts.device, 'auto'));
+% 'verbose' override should win; 'compute' should stay from struct.
+assert(strcmp(SIAMEX_LAST.opts.compute, 'auto'));
 assert(logical(SIAMEX_LAST.opts.verbose));
 end
 
@@ -484,16 +484,16 @@ assert(strcmp(SIAMEX_LAST.opts.cudnn_algo, 'heuristic'));
 assert(SIAMEX_LAST.opts.gpu_mem_limit == 6 * 1024^3);
 end
 
-function test_opts_gpuid_passthrough_(fx)
+function test_opts_gpu_passthrough_(fx)
 global SIAMEX_LAST
-siamize(fx.img, fx.A, 0, 'gpuid', 2);
-assert(SIAMEX_LAST.opts.gpuid == 2);
+siamize(fx.img, fx.A, 0, 'gpu', 2);
+assert(SIAMEX_LAST.opts.gpu == 2);
 end
 
-function test_opts_tpm_temperature_passthrough_(fx)
+function test_opts_tpm_t_passthrough_(fx)
 global SIAMEX_LAST
-siamize(fx.img, fx.A, 0, 'tpm_temperature', 1.5);
-assert(abs(SIAMEX_LAST.opts.tpm_temperature - 1.5) < 1e-9);
+siamize(fx.img, fx.A, 0, 'tpm_t', 1.5);
+assert(abs(SIAMEX_LAST.opts.tpm_t - 1.5) < 1e-9);
 end
 
 % =============================================================================

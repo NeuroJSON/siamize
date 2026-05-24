@@ -191,7 +191,7 @@ void read_opts(const mxArray* a, Opts& o) {
 
     const mxArray* f;
 
-    if ((f = mxGetField(a, 0, "device"))   && !mxIsEmpty(f)) {
+    if ((f = mxGetField(a, 0, "compute"))  && !mxIsEmpty(f)) {
         o.device = mx_to_string(f);
 
         if (o.device == "trt") {
@@ -199,7 +199,7 @@ void read_opts(const mxArray* a, Opts& o) {
         }
     }
 
-    if ((f = mxGetField(a, 0, "threads"))  && !mxIsEmpty(f)) {
+    if ((f = mxGetField(a, 0, "thread"))   && !mxIsEmpty(f)) {
         o.threads = static_cast<int>(mxGetScalar(f));
     }
 
@@ -268,16 +268,16 @@ void read_opts(const mxArray* a, Opts& o) {
             static_cast<size_t>(mxGetScalar(f));
     }
 
-    if ((f = mxGetField(a, 0, "gpuid")) && !mxIsEmpty(f)) {
+    if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
         o.cuda_tuning.gpuid = static_cast<int>(mxGetScalar(f));
     }
 
-    if ((f = mxGetField(a, 0, "tpm_temperature")) && !mxIsEmpty(f)) {
+    if ((f = mxGetField(a, 0, "tpm_t")) && !mxIsEmpty(f)) {
         o.tpm_temperature = static_cast<float>(mxGetScalar(f));
 
         if (o.tpm_temperature <= 0.0f) {
-            die("siamize:tpm_temperature",
-                "opts.tpm_temperature must be > 0");
+            die("siamize:tpm_t",
+                "opts.tpm_t must be > 0");
         }
     }
 }

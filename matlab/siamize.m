@@ -79,18 +79,20 @@ function [lab, tpm] = siamize(varargin)
 %   opts     optional. Either a struct, a series of 'name', value
 %            pairs, or any mix of structs and 'name', value pairs that
 %            jsonlab's varargin2struct can merge. All keys are case-
-%            insensitive (varargin2struct lowercases). Recognized:
+%            insensitive (varargin2struct lowercases). Recognized
+%            (each name mirrors the corresponding siamize CLI long
+%            flag, with hyphens swapped for underscores):
 %
-%               'device'              'auto' (default), 'cpu', 'cuda', 'tensorrt'
-%               'threads'             int (0 = all available cores, default)
+%               'compute'             'auto' (default), 'cpu', 'cuda', 'tensorrt'
+%               'thread'              int (0 = all available cores, default)
 %               'patch'               [pz, py, px] (default [256 256 192])
 %               'spacing'             double mm (default 0.75)
 %               'classes'             int (default 18, matches SIAM v0.3)
 %               'trt_cache'           char (default ~/.cache/siamize/trt)
 %               'verbose'             logical (default false)
 %
-%            CUDA EP tuning (only used when device involves CUDA, see
-%            the CLI flags --cudnn-* for the same knobs):
+%            CUDA EP tuning (only used when compute involves CUDA,
+%            see the CLI flags --cudnn-* for the same knobs):
 %
 %               'cudnn_max_workspace' 0 or 1 (default 1 = ORT default).
 %                                      Use 0 on tight-VRAM GPUs.
@@ -99,7 +101,7 @@ function [lab, tpm] = siamize(varargin)
 %                                      | 'exhaustive'.
 %               'gpu_mem_limit'       bytes (double, e.g. 6*1024^3 for 6GB).
 %                                      Default 0 = no cap.
-%               'gpuid'               int (0-based CUDA device id; default
+%               'gpu'                 int (0-based CUDA device id; default
 %                                      0 = first visible GPU). Honors any
 %                                      CUDA_VISIBLE_DEVICES filter set in
 %                                      the environment. Use `nvidia-smi`
@@ -108,12 +110,12 @@ function [lab, tpm] = siamize(varargin)
 %            TPM output (4D float32 tissue probability map, softmax
 %            over the 18 fold-averaged class logits):
 %
-%               'tpm_out'             char output path (.nii(.gz) /
+%               'tpm'                 char output path (.nii(.gz) /
 %                                      .jnii / .bnii). When set, the
 %                                      TPM is saved to disk in
 %                                      addition to (or instead of)
 %                                      returning it.
-%               'tpm_temperature'     double (default 1.0). T>1 softens
+%               'tpm_t'               double (default 1.0). T>1 softens
 %                                      the softmax (more graded
 %                                      boundaries, better calibration).
 %
@@ -125,7 +127,7 @@ function [lab, tpm] = siamize(varargin)
 %   tpm      (optional second output) 4D single (float32) of shape
 %            [X, Y, Z, 18] holding the softmax probabilities per voxel
 %            and class. Computed and returned only when the caller
-%            requests two outputs OR when opts.tpm_out is set. Sums
+%            requests two outputs OR when opts.tpm is set. Sums
 %            to 1 per voxel; argmax(tpm, 4)-1 reproduces `labels`.
 %
 % Examples
@@ -137,22 +139,25 @@ function [lab, tpm] = siamize(varargin)
 %
 %   % struct in, file out, full ensemble, verbose, CUDA EP:
 %   nii = loadnifti('input.nii.gz');
-%   siamize(nii, 'labels.jnii', 0:4, 'device', 'cuda', 'verbose', true);
+%   siamize(nii, 'labels.jnii', 0:4, 'compute', 'cuda', 'verbose', true);
 %
 %   % tight-VRAM GPU: shrink cuDNN workspace, dynamic-shape patch:
 %   siamize('in.nii.gz', 'lab.nii.gz', 0:4, ...
-%           'device', 'cuda', 'cudnn_max_workspace', 0, ...
+%           'compute', 'cuda', 'cudnn_max_workspace', 0, ...
 %           'arena_extend', 'same', 'patch', [192 192 128]);
 %
+%   % pick GPU 1 of 3 on a multi-GPU box:
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'gpu', 1);
+%
 %   % save 4D TPM to disk alongside the labelmap:
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'tpm_out', 'tpm.nii.gz');
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'tpm', 'tpm.nii.gz');
 %
 %   % return TPM in-memory (second nargout); no file written:
-%   [lab, tpm] = siamize('in.nii.gz', 0:4, 'tpm_temperature', 1.5);
+%   [lab, tpm] = siamize('in.nii.gz', 0:4, 'tpm_t', 1.5);
 %
-%   % opts struct still works (BC); can mix with name/value overrides:
-%   defs = struct('device', 'cuda', 'verbose', true);
-%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, defs, 'tpm_out', 'tpm.bnii');
+%   % opts struct still works; can mix with name/value overrides:
+%   defs = struct('compute', 'cuda', 'verbose', true);
+%   siamize('in.nii.gz', 'lab.nii.gz', 0:4, defs, 'tpm', 'tpm.bnii');
 %
 %   % pure array, default affine inferred:
 %   lab = siamize(my_volume);
@@ -217,7 +222,7 @@ end
 % Decide whether to request the optional 4D TPM. Compute it iff the
 % caller asked for it via the second nargout or via opts.tpm_out (in
 % which case we save it to disk after).
-tpm_out = jsonopt('tpm_out', '', opts);
+tpm_out = jsonopt('tpm', '', opts);
 want_tpm = (nargout >= 2) || ~isempty(tpm_out);
 
 if want_tpm

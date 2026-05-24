@@ -344,7 +344,7 @@ lab = siamize(my_volume, 0);                       % single fold by shortcut
 lab = siamize(my_volume, '0,2,4', struct('verbose', true));
 
 % explicit affine + output file + ensemble + opts
-siamize(my_volume, A, 'labels.nii.gz', 0:4, struct('device', 'cuda'));
+siamize(my_volume, A, 'labels.nii.gz', 0:4, struct('compute', 'cuda'));
 ```
 
 | First arg | Interpretation |
