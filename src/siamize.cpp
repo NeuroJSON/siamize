@@ -218,7 +218,11 @@ void usage(const char* exe) {
                  "  -P, --patch ZxYxX   patch size, default 256x256x192 (matches SIAM v0.3 plans).\n"
                  "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
                  "  -C, --classes N     number of output classes, default 18 (SIAM v0.3).\n"
-                 "  -v, --verbose       print progress\n"
+                 "  -v, --verbose       print progress (default ON; flag kept for backward\n"
+                 "                      compat with older scripts -- already-verbose runs).\n"
+                 "  -q, --quiet         suppress progress output. Warnings ([warn] ...) and\n"
+                 "                      runtime errors still print. Useful for batch jobs that\n"
+                 "                      capture stderr selectively.\n"
                  "  -h, --help\n"
                  "\n"
                  "Examples\n"
@@ -291,7 +295,12 @@ int main(int argc, char** argv) {
                                          //         using canonical RAS orientation.
     std::string out_format      = "nii"; // nii | jnii | bnii
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
-    bool verbose = false;
+    // Verbose progress is ON by default in the CLI; a multi-minute job
+    // should not look hung. Pass --quiet / -q to silence everything
+    // except warnings ([warn] ...) and errors. The legacy -v / --verbose
+    // flag is kept as a no-op for backward compatibility with old
+    // scripts.
+    bool verbose = true;
     std::array<int64_t, 3> patch = {256, 256, 192};
     float target_spacing = 0.75f;
     int64_t num_classes = 18;
@@ -436,8 +445,12 @@ int main(int argc, char** argv) {
             engine_tuning.gpu_mem_limit_bytes =
                 static_cast<size_t>(std::stoull(s)) * mult;
         } else if (a == "-v" || a == "--verbose") {
+            // Verbose is on by default now; -v is kept as a no-op.
             verbose = true;
             siam::set_verbose(true);
+        } else if (a == "-q" || a == "--quiet") {
+            verbose = false;
+            siam::set_verbose(false);
         } else if (a == "-h" || a == "--help")   {
             usage(argv[0]);
             return 0;
@@ -447,6 +460,11 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+
+    // After parse completes, push the resolved verbose state into the
+    // siam_log global so log_tag/log_cont gate correctly. Verbose
+    // defaults to true (set above); -q / --quiet flips it off.
+    siam::set_verbose(verbose);
 
     if (input_path.empty() || output_path.empty()) {
         usage(argv[0]);
