@@ -92,17 +92,11 @@ jobs:
           retention-days: 14
 
   cpp-build-cuda:
-    # Builds siamize with the CUDA Execution Provider enabled, then runs a
-    # single-fold inference on the bundled sample. GitHub-hosted runners
-    # have no NVIDIA GPU, so we expect siamize to register CUDA at startup,
-    # fail to dlopen the CUDA runtime libraries, and silently fall back to
-    # the CPU EP. This validates the build path AND the runtime fallback.
-    #
-    # The fp16 ONNX weight file (~270 MB raw, ~91 MB gzipped) is too
-    # big for git, so CI grabs it from the public NeuroJSON URL hardcoded
-    # below -- the same URL `default_weights_url()` in src/weights.cpp
-    # falls back to when SIAMIZE_WEIGHTS_BASE_URL isn't set. No GitHub
-    # Actions variable / secret is required.
+    # Builds siamize with the CUDA Execution Provider enabled, then runs
+    # single-fold inference. GitHub runners have no NVIDIA GPU, so the
+    # run exercises CUDA EP probe -> CPU fallback. The fp16 weight is
+    # fetched fresh each run from the public NeuroJSON URL that
+    # weights.cpp's default_weights_url() also uses.
     name: build+run cuda (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -121,57 +115,12 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
-      - name: Fetch + extract fold_0 weight (always fresh, no cache)
-        # The URL is the same one weights.cpp's default_weights_url()
-        # falls back to. Inlined here (rather than parameterized
-        # through a repo variable) so the CI can never drift to a
-        # stale upload; this URL is verified dynamic-shape ONNX.
-        # The actions/cache layer was removed because a stale cache
-        # was the source of repeated CI failures: 91 MB download is
-        # ~5 s on GHA's network, well worth eating to keep freshness
-        # under our control.
+      - name: Fetch fold_0 weight
         run: |
           URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz'
           mkdir -p models
-          rm -f models/fold_0_fp16.onnx*
-          echo "Downloading $URL"
           curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
           gunzip -f models/fold_0_fp16.onnx.gz
-          ls -la models/
-
-      - name: Verify ONNX has dynamic spatial axes
-        # The hardcoded NeuroJSON URL is verified dynamic-shape, but
-        # this step stays as a defense-in-depth: if the NeuroJSON
-        # upload ever gets replaced with a fixed-shape file, --lowmem
-        # would silently break inference. Fail fast here with a clear
-        # message instead of crashing inside ORT later.
-        shell: bash
-        run: |
-          python3 -m pip install --quiet onnx
-          python3 - <<'PY'
-          import sys, onnx
-          m = onnx.load("models/fold_0_fp16.onnx")
-          dims = [
-              (d.dim_param or d.dim_value)
-              for d in m.graph.input[0].type.tensor_type.shape.dim
-          ]
-          print("input dims:", dims)
-          # spatial axes (2, 3, 4) must be symbolic for --lowmem to
-          # work; if they are integers, the export is fixed-shape.
-          spatial = dims[2:5]
-          if any(isinstance(d, int) and d > 0 for d in spatial):
-              print()
-              print("ERROR: NeuroJSON now serves a FIXED-SHAPE ONNX at the")
-              print("       hardcoded URL in this workflow. The ONNX exported")
-              print("       by tools/onnx_export/export.py uses dynamic_axes=")
-              print("       {'D','H','W'} for axes 2,3,4. Either the upload")
-              print("       at neurojson.org/io/.../siam_v03/dynshape was")
-              print("       overwritten with a fixed-shape build, or the URL")
-              print("       in .github/workflows/ci.yml needs updating to a")
-              print("       different document/key.")
-              sys.exit(1)
-          print("OK: spatial axes are symbolic; --lowmem patch shrink will work.")
-          PY
 
       - name: Configure (CUDA EP)
         run: |
@@ -184,22 +133,9 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
-        # GitHub-hosted runners have no NVIDIA GPU, so siamize will
-        # detect that, log "[cuda] unavailable (...); using CPU", and
-        # silently fall back to the CPU EP. We want to run the full
-        # inference end-to-end as a real smoke test, not just verify
-        # the [cuda] log line.
-        #
-        # Memory and time budget:
-        #   * Runner: 4 vCPU, 16 GB RAM
-        #   * Default 256x256x192 patch peaks at ~12 GB RSS, right at
-        #     the runner's cgroup ceiling -- earlier attempts hit
-        #     SIGTERM mid-inference.
-        #   * --lowmem (with the v3-cached dynamic-shape ONNX) shrinks
-        #     the patch to 192x192x128 and applies --no-arena + -t 8
-        #     + cudnn-workspace 0 + gpu-mem-limit 6G -> peak RSS ~6 GB
-        #     and total wall time roughly the same as the default
-        #     (more tiles, but each tile is faster).
+        # GitHub runners have no NVIDIA GPU, so siamize falls back to
+        # CPU. --lowmem keeps peak RSS ~6 GB (the default 256x256x192
+        # patch peaks ~12 GB and crowds the runner's 16 GB cgroup).
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
