@@ -134,16 +134,17 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. --lowmem applies the safe-knob set (--no-arena +
-        # -t cap 8 + cudnn-workspace 0 + gpu-mem-limit 6G) to fit
-        # the runner's 16 GB cgroup. We override --lowmem's patch
-        # shrink with explicit -P 256x256x192 so the test runs the
-        # same 8-tile default patch users would hit on a stock host.
+        # CPU. --no-arena is the only knob we need to fit the
+        # runner's 16 GB cgroup: arena ON + -t 4 auto + default
+        # 256x256x192 patch peaks at ~28 GB; arena OFF drops it to
+        # ~12 GB which fits comfortably. Threads stay at 4 (the
+        # runner's hardware_concurrency) and patch stays at the
+        # user-default 256x256x192 (8 tiles), so the CI test
+        # mirrors a stock host's behavior as closely as possible.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
-              --lowmem \
-              -P 256x256x192 \
+              --no-arena \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
