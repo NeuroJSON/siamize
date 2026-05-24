@@ -134,12 +134,16 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. --lowmem keeps peak RSS ~6 GB (the default 256x256x192
-        # patch peaks ~12 GB and crowds the runner's 16 GB cgroup).
+        # CPU. --lowmem applies the safe-knob set (--no-arena +
+        # -t cap 8 + cudnn-workspace 0 + gpu-mem-limit 6G) to fit
+        # the runner's 16 GB cgroup. We override --lowmem's patch
+        # shrink with explicit -P 256x256x192 so the test runs the
+        # same 8-tile default patch users would hit on a stock host.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
               --lowmem \
+              -P 256x256x192 \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
