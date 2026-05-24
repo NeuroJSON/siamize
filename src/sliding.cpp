@@ -484,7 +484,8 @@ LogitsVolume sliding_window(const Volume& data,
 
                 if (!ep_probed) {
                     use_trt = true;
-                    siam::log_tag("trt", "enabled (cache: %s)", trt_cache.c_str());
+                    siam::log_tag("trt", "enabled (gpuid=%d, cache: %s)",
+                                  engine_tuning.gpuid, trt_cache.c_str());
                     siam::log_cont("first run on a new GPU/TRT version builds engines "
                                    "(~1-5 min/fold)");
                 }
@@ -572,7 +573,8 @@ LogitsVolume sliding_window(const Volume& data,
                     use_cuda = true;
 
                     if (!use_trt) {
-                        siam::log_tag("cuda", "enabled");
+                        siam::log_tag("cuda", "enabled (gpuid=%d)",
+                                      engine_tuning.gpuid);
                     }
                 }
             } catch (const Ort::Exception& e) {
