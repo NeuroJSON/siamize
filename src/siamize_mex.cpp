@@ -55,7 +55,7 @@ Inputs:
              force the safe-defaults preset (smaller patch + no
              arena + smaller thread cap + tight VRAM knobs) on
              otherwise-large hosts. The same preset auto-applies
-             when available RAM is < 24 GB or VRAM < 12 GB.
+             when available RAM is < 12 GB or VRAM < 12 GB.
 
 Output:
 
@@ -76,6 +76,11 @@ with matching options.
 #include "preprocess.h"
 #include "sliding.h"
 #include "weights.h"
+
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -546,6 +551,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 fclose(mf);
             }
         }
+#elif defined(_WIN32)
+        {
+            MEMORYSTATUSEX ms;
+            ms.dwLength = sizeof(ms);
+
+            if (GlobalMemoryStatusEx(&ms)) {
+                avail_ram_mb_l = static_cast<long>(
+                                     ms.ullAvailPhys / (1024ULL * 1024ULL));
+            }
+        }
 #endif
 
         if (gpu_active) {
@@ -577,7 +592,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         }
 
         bool ram_tight  = opts.lowmem
-                          || (avail_ram_mb_l  > 0 && avail_ram_mb_l  < 24 * 1024);
+                          || (avail_ram_mb_l  > 0 && avail_ram_mb_l  < 12 * 1024);
         bool vram_tight = (opts.lowmem && gpu_active)
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 

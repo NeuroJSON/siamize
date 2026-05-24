@@ -56,6 +56,15 @@ single-binary with no Python runtime.
 
 #include <onnxruntime_cxx_api.h>
 
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
+#ifdef __APPLE__
+    #include <sys/sysctl.h>
+    #include <sys/types.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -143,8 +152,32 @@ long available_ram_mb() {
         }
     }
 
-#endif
     return 0;
+#elif defined(_WIN32)
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+
+    if (GlobalMemoryStatusEx(&ms)) {
+        return static_cast<long>(ms.ullAvailPhys / (1024ULL * 1024ULL));
+    }
+
+    return 0;
+#elif defined(__APPLE__)
+    // sysctl HW_MEMSIZE gives total physical -- not "available", but
+    // close enough for the auto-lowmem heuristic; the user can always
+    // pass flags explicitly.
+    int mib[2] = {CTL_HW, HW_MEMSIZE};
+    int64_t bytes = 0;
+    size_t len = sizeof(bytes);
+
+    if (sysctl(mib, 2, &bytes, &len, NULL, 0) == 0 && bytes > 0) {
+        return static_cast<long>(bytes / (1024 * 1024));
+    }
+
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 /*******************************************************************************/
@@ -290,7 +323,7 @@ void usage(const char* exe) {
                  "                      in only when your weights support it. Without\n"
                  "                      --lowmem, auto-detect applies the SAFE SUBSET\n"
                  "                      (everything except -P) whenever available host\n"
-                 "                      RAM is < 24 GB or free GPU VRAM is < 12 GB, so\n"
+                 "                      RAM is < 12 GB or free GPU VRAM is < 12 GB, so\n"
                  "                      out-of-the-box behavior never breaks inference.\n"
                  "                      Flags passed alongside --lowmem are NOT overridden.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
@@ -608,7 +641,7 @@ int main(int argc, char** argv) {
     // against stomping on intent.
     //
     // Thresholds (auto-detect):
-    //   RAM  < 24 GB available  -> CPU-side lowmem defaults
+    //   RAM  < 12 GB available  -> CPU-side lowmem defaults
     //   VRAM < 12 GB available  -> GPU-side lowmem defaults
     //
     // CPU lowmem set:
@@ -624,7 +657,7 @@ int main(int argc, char** argv) {
                                 device == "tensorrt");
     const long avail_vram_mb = gpu_active ? available_vram_mb() : 0;
     const bool ram_tight     = lowmem_mode
-                               || (avail_ram_mb  > 0 && avail_ram_mb  < 24 * 1024);
+                               || (avail_ram_mb  > 0 && avail_ram_mb  < 12 * 1024);
     const bool vram_tight    = (lowmem_mode && gpu_active)
                                || (avail_vram_mb > 0 && avail_vram_mb < 12 * 1024);
 

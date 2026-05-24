@@ -111,7 +111,7 @@ function nii = siamize(varargin)
 %                                      Without 'lowmem', auto-detect
 %                                      applies the SAFE SUBSET (everything
 %                                      except 'patch') when available RAM
-%                                      < 24 GB or VRAM < 12 GB, so the
+%                                      < 12 GB or VRAM < 12 GB, so the
 %                                      defaults never break inference.
 %               'verbose'             logical (default false)
 %
