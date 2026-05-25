@@ -451,7 +451,16 @@ LogitsVolume sliding_window(const Volume& data,
         // the 18-class SIAM network). Pass --no-arena on the CLI (or
         // engine_tuning.cpu_arena = false in the MEX) to opt out
         // when RSS matters more than wall time.
-        if (!will_use_gpu && !engine_tuning.cpu_arena) {
+        //
+        // The CPU arena flag is harmless when CUDA/TRT EPs end up
+        // taking the run (those EPs use their own allocators), so
+        // honour the user's request unconditionally rather than
+        // gating on !will_use_gpu -- otherwise -c auto + --no-arena
+        // silently ignores --no-arena when the CUDA probe succeeds,
+        // and worse, leaves arena ENABLED on the CPU fallback path
+        // when the CUDA probe fails (the arena setting is baked into
+        // SessionOptions before the EP probe runs).
+        if (!engine_tuning.cpu_arena) {
             opts.DisableCpuMemArena();
             opts.DisableMemPattern();
         }
