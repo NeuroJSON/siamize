@@ -187,25 +187,36 @@ long available_ram_mb() {
 }
 
 /*******************************************************************************/
-/*! \fn    long available_vram_mb()
+/*! \fn    long available_vram_mb(int gpuid)
     \brief Best-effort GPU-free-memory probe via nvidia-smi (returns 0 if unknown)
 
-    Spawns `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits`
-    via popen and parses the first integer on its first line. Works on
-    any host with the NVIDIA driver/userland installed (which is the
-    common case for a machine the user is trying to run CUDA on).
-    Returns 0 on any failure -- caller treats 0 as "unknown, skip the
-    VRAM-tight auto-safe path".
+    Spawns `nvidia-smi --id=N --query-gpu=memory.free --format=csv,
+    noheader,nounits` via popen and parses the first integer on its
+    first line. Works on any host with the NVIDIA driver/userland
+    installed. Returns 0 on any failure -- caller treats 0 as
+    "unknown, skip the VRAM-tight auto-safe path".
 
-    \return  free VRAM in MiB on the first visible GPU, or 0 if unknown
+    Targets the specific GPU the user selected via -G/--gpu instead
+    of always GPU 0: on a multi-GPU box the auto-lowmem heuristic
+    must look at the device that will actually run the inference,
+    otherwise (e.g.) the user picks a 24 GB 3090 but the probe sees
+    an 8 GB 2080 at index 0 and caps gpu_mem_limit at 6 GB.
+
+    \param  gpuid  0-based GPU index to query (default 0)
+    \return  free VRAM in MiB on the requested GPU, or 0 if unknown
 */
-long available_vram_mb() {
+long available_vram_mb(int gpuid = 0) {
+    char cmd[256];
 #ifdef _WIN32
-    FILE* pipe = _popen("nvidia-smi --query-gpu=memory.free "
-                        "--format=csv,noheader,nounits 2>NUL", "r");
+    std::snprintf(cmd, sizeof(cmd),
+                  "nvidia-smi --id=%d --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>NUL", gpuid);
+    FILE* pipe = _popen(cmd, "r");
 #else
-    FILE* pipe = popen("nvidia-smi --query-gpu=memory.free "
-                       "--format=csv,noheader,nounits 2>/dev/null", "r");
+    std::snprintf(cmd, sizeof(cmd),
+                  "nvidia-smi --id=%d --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>/dev/null", gpuid);
+    FILE* pipe = popen(cmd, "r");
 #endif
 
     if (!pipe) {
@@ -216,7 +227,7 @@ long available_vram_mb() {
     char buf[64] = {0};
 
     if (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
-        // First line carries the free MB for GPU 0 as a plain int.
+        // First line carries the free MB for the requested GPU as a plain int.
         long parsed = 0;
 
         if (std::sscanf(buf, "%ld", &parsed) == 1 && parsed > 0) {
@@ -742,7 +753,9 @@ int main(int argc, char** argv) {
     const bool gpu_active    = (device == "auto" ||
                                 device == "cuda" ||
                                 device == "tensorrt");
-    const long avail_vram_mb = gpu_active ? available_vram_mb() : 0;
+    const long avail_vram_mb = gpu_active
+                               ? available_vram_mb(engine_tuning.gpuid)
+                               : 0;
     const bool ram_tight     = lowmem_mode
                                || (avail_ram_mb  > 0 && avail_ram_mb  < 14 * 1024);
     const bool vram_tight    = (lowmem_mode && gpu_active)
