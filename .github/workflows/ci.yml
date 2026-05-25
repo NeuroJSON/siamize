@@ -134,22 +134,27 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. Memory budget on the 4 vCPU / 16 GB GHA Ubuntu runner
-        # is tight: only ~14 GB is available to user processes (the
-        # rest is kernel + actions agent), and the default
-        # 256x256x192 patch with arena off peaks at ~13 GB, right
-        # at the cgroup limit. SIGTERM fires before tile 2.
+        # CPU. Memory and shape constraints stack up here:
         #
-        # The smaller -P 224x224x192 patch is still divisible by 32
-        # (the network's total downsampling factor; valid input shape
-        # for the dynamic-shape ONNX), still produces 8 tiles like
-        # the user-default, and reduces per-tile memory by ~24%
-        # (~10 GB peak). End-to-end inference completes in ~7 min.
+        #  - Runner cgroup: ~14 GB available to user processes.
+        #  - Default 256x256x192 patch with arena off peaks ~13 GB
+        #    (newer ORT + dynamic-shape ONNX). SIGTERM at tile 2.
+        #  - Intermediate patches like 224x224x192 are divisible by
+        #    32 but break the network's skip-connection topology
+        #    deep in the encoder (224 = 7*32 halves to 7->3->1
+        #    whereas 256 = 8*32 halves to 8->4->2; the decoder
+        #    upsamples don't match the 7*32 path, producing a
+        #    "broadcast 3 by 4" Add-node failure).
+        #
+        # Net: the only shapes that satisfy BOTH divisibility AND
+        # the network's clean-halving requirement are 256 and 192
+        # in each axis. 256x256x192 OOMs; 192x192x128 (--lowmem)
+        # fits at ~6 GB peak. So we accept the 27-tile / ~600 s
+        # wall as the price of an end-to-end CI test.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
-              --no-arena \
-              -P 224x224x192 \
+              --lowmem \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
