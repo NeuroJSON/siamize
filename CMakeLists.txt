@@ -495,6 +495,37 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
             set(_oct_ld "${_oct_ld} -framework CoreML -framework Foundation")
         endif()
 
+        # OpenMP flag is compiler-dependent. Linux GCC accepts plain
+        # `-fopenmp`; AppleClang rejects it and wants `-Xclang -fopenmp`
+        # plus a dynamic -lomp link (Homebrew libomp). CMake's
+        # FindOpenMP populates OpenMP_CXX_FLAGS with the right
+        # invocation per compiler, so we inject that into CXXFLAGS
+        # (env var read by mkoctfile) rather than hard-coding.
+        #
+        # Linking is platform-different too: on Linux we let mkoctfile
+        # add the dynamic libgomp.so.1 via `-fopenmp` -- libgomp.a's
+        # TLS relocations aren't PIC-compatible for shared libs (the
+        # .mex is a shared lib), so we CAN'T static-link it the way
+        # the CLI does. On macOS we link the static libomp.a from
+        # Homebrew if we found it (no system libomp present).
+        if(OpenMP_CXX_FOUND)
+            if(APPLE)
+                # AppleClang: needs -Xclang -fopenmp via CXXFLAGS plus
+                # a static libomp.a link.
+                set(_oct_cxxflags "${_oct_cxxflags} ${OpenMP_CXX_FLAGS}")
+
+                if(LIBOMP_STATIC_LIB)
+                    set(_oct_ld "${_oct_ld} ${LIBOMP_STATIC_LIB}")
+                endif()
+            else()
+                # Linux GCC: -fopenmp on the compile+link line. mkoctfile
+                # also pulls in dynamic libgomp.so.1 transitively from
+                # this flag, which works for shared-library output where
+                # libgomp.a's TLS relocs would not.
+                list(APPEND _oct_extra_flags "-fopenmp")
+            endif()
+        endif()
+
         add_custom_command(
             OUTPUT ${_oct_out}
             COMMAND ${CMAKE_COMMAND} -E env
@@ -503,7 +534,7 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
                 ${MKOCTFILE} --mex
                 ${_oct_inc}
                 ${_oct_sources}
-                $<$<BOOL:${OpenMP_CXX_FOUND}>:-fopenmp>
+                ${_oct_extra_flags}
                 -Wno-unused -Wno-unknown-pragmas
                 -o ${_oct_out}
             DEPENDS ${_oct_sources}

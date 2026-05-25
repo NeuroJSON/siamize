@@ -1058,6 +1058,19 @@ int main(int argc, char** argv) {
                                || msg.find("cublas")    != std::string::npos
                                || msg.find("CUDA failure") != std::string::npos
                                || msg.find("Exception during initialization") != std::string::npos;
+        // CoreML compile failures: ORT successfully appended the
+        // CoreML EP but Apple's mlcompilerd rejected the generated
+        // .mlpackage. The common cause is op-coverage gaps -- e.g.
+        // rank-5 InstanceNormalization, which CoreML's MLProgram
+        // format supports only at ranks 3-4 (1D/2D). ORT 1.26's
+        // CoreML EP doesn't always partition these out, so the
+        // compile blows up on the whole graph instead of just
+        // pushing the unsupported op to CPU.
+        const bool coreml_compile =
+            msg.find("Error compiling model") != std::string::npos
+            || msg.find("Failed to parse the model specification") != std::string::npos
+            || msg.find("Unable to parse ML Program") != std::string::npos
+            || msg.find("CoreML") != std::string::npos;
 
         if (device == "auto" && oom) {
             siam::log_warn("GPU allocation failed: %s", e.what());
@@ -1091,6 +1104,24 @@ int main(int argc, char** argv) {
             siam::log_cont("  - GPU in compute-prohibited mode (`nvidia-smi -q | grep \"Compute Mode\"`)");
             siam::log_cont("  - another process holding the GPU exclusively");
             siam::log_cont("  - pass `-c cpu` or `-c auto` to switch off GPU");
+            return 4;
+        } else if (device == "auto" && coreml_compile) {
+            siam::log_warn("CoreML model compile failed: %s", e.what());
+            siam::log_hint("-c auto falling back to CPU. Common cause: op-coverage gap.");
+            siam::log_cont("  - rank-5 InstanceNormalization (SIAM v0.3 uses 3D InstanceNorm,");
+            siam::log_cont("    which CoreML's MLProgram format supports only at ranks 3-4)");
+            siam::log_cont("  - 3D ConvTranspose with non-standard stride/output_padding");
+            siam::log_cont("workaround: re-export the ONNX with rank-5 InstanceNorm rewritten");
+            siam::log_cont("as Reshape -> InstanceNorm2D -> Reshape (see tools/onnx_export/)");
+            logits = siam::sliding_window(
+                         resampled, model_paths, patch, num_classes,
+                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+        } else if (coreml_compile) {
+            siam::log_warn("CoreML model compile failed: %s", e.what());
+            siam::log_hint("you passed `-c %s`. The SIAM v0.3 ONNX has ops Core ML's", device.c_str());
+            siam::log_cont("MLProgram format can't currently handle (typically rank-5");
+            siam::log_cont("InstanceNormalization in the encoder stem). Pass `-c cpu` or");
+            siam::log_cont("`-c auto` (auto falls back to CPU after this point).");
             return 4;
         } else {
             siam::log_warn("ORT exception: %s", e.what());

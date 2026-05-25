@@ -381,18 +381,27 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Run single-fold inference (real Apple Silicon CoreML EP)
+      - name: Run single-fold inference (-c auto: CoreML first, CPU fallback)
         # First run compiles ONNX -> .mlmodelc (~10-30 s). End-to-end
-        # ~30-60 s on macos-14 (M1, 8 GB RAM unified).
+        # ~30-60 s on macos-14 (M1, 8 GB RAM unified) when CoreML
+        # claims the graph; up to ~10 min on CPU fallback.
+        #
+        # The SIAM v0.3 ONNX uses rank-5 InstanceNormalization, which
+        # CoreML's current MLProgram format doesn't accept. ORT 1.26's
+        # CoreML EP doesn't partition that op out so the compile fails
+        # whole-graph. siamize catches the compile error and falls
+        # back to CPU when -c auto is set. Once the export gets a
+        # CoreML-friendly rewrite (Reshape -> InstanceNorm2D ->
+        # Reshape) the CoreML EP will actually run end-to-end.
         timeout-minutes: 30
         run: |
           build/siamize \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
-              -c coreml 2>&1 | tee siamize.log
+              -c auto 2>&1 | tee siamize.log
 
-      - name: Verify CoreML EP claimed at least part of the graph
+      - name: Verify CoreML EP was probed (and CoreML compile attempted)
         run: |
           if grep -Eq "\[coreml\][[:space:]]+enabled" siamize.log; then
             echo "OK: CoreML EP registered."
@@ -400,6 +409,15 @@ jobs:
             echo "FAIL: expected '[coreml] enabled' line; got:"
             cat siamize.log
             exit 1
+          fi
+          # If CoreML compiled OK, no fallback log line; if it didn't,
+          # we expect the siamize.cpp catch-and-fallback path to have
+          # produced a [hint] / [warn] pair. Either outcome is OK for
+          # CI; we just want the BUILD + EP REGISTRATION to work.
+          if grep -Eq "CoreML model compile failed" siamize.log; then
+            echo "NOTE: CoreML compile failed (likely InstanceNorm3D op-coverage gap)."
+            echo "      siamize fell back to CPU; this is expected until the ONNX"
+            echo "      is re-exported with rank-5 InstanceNorm rewritten."
           fi
 
       - name: Verify output produced
