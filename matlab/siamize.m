@@ -313,27 +313,27 @@ else
 end
 
 % Attach a JGIFTI-style LabelTable to NIFTIHeader._DataInfo_.LabelTable
-% when emitting a labelmap with a recognized class set (default SIAM
-% v0.3 = 18 classes, or opts.classes='spm' = 6 SPM bins). MATLAB
-% field names can't start with underscore, so the JSON key
-% "_DataInfo_" is stored as the hex-encoded field 'x0x5F_DataInfo_';
-% jsonlab's savejson decodes it back to "_DataInfo_" on serialize.
-% Integer label IDs likewise can't lead with a digit, so each entry
-% key is stored as 'x0x3{0..9}_' / etc (jsonlab decodes back to "0",
-% "1", ...). Viewers that honour the JGIFTI LabelTable spec then
-% render anatomical names + per-tissue colors.
-is_tpm = isfield(opts, 'tpm') && opts.tpm;
-if ~is_tpm
-    tbl = siamize_label_table_(opts);
-    if ~isempty(fieldnames(tbl))
-        if isfield(nii.NIFTIHeader, 'x0x5F_DataInfo_')
-            info = nii.NIFTIHeader.x0x5F_DataInfo_;
-        else
-            info = struct();
-        end
-        info.LabelTable = tbl;
-        nii.NIFTIHeader.x0x5F_DataInfo_ = info;
+% when the class set is recognized (default SIAM v0.3 = 18 classes,
+% or opts.classes='spm' = 6 SPM bins). Applies to BOTH labelmap and
+% TPM output: for labels each integer key is a label ID, for TPM
+% each key indexes a channel of the (X,Y,Z,C) volume; the spec is
+% the same either way. MATLAB field names can't start with
+% underscore, so the JSON key "_DataInfo_" is stored as the hex-
+% encoded field 'x0x5F_DataInfo_'; jsonlab's savejson decodes it
+% back to "_DataInfo_" on serialize. Integer keys likewise can't
+% lead with a digit, so each entry key is stored as 'x0x3{0..9}_'
+% / etc (jsonlab decodes back to "0", "1", ...). Viewers that
+% honour the JGIFTI LabelTable spec render anatomical names +
+% per-tissue colors.
+tbl = siamize_label_table_(opts);
+if ~isempty(fieldnames(tbl))
+    if isfield(nii.NIFTIHeader, 'x0x5F_DataInfo_')
+        info = nii.NIFTIHeader.x0x5F_DataInfo_;
+    else
+        info = struct();
     end
+    info.LabelTable = tbl;
+    nii.NIFTIHeader.x0x5F_DataInfo_ = info;
 end
 
 if ~isempty(outputfile)

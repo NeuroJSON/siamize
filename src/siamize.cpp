@@ -1153,7 +1153,8 @@ int main(int argc, char** argv) {
                                      tpm_up.data(), num_classes_out);
             } else {
                 siam::save_jnifti_tpm(output_path, img_up,
-                                      tpm_up.data(), num_classes_out, out_format);
+                                      tpm_up.data(), num_classes_out,
+                                      out_format, class_set);
             }
         } else {
             // ---- Labels branch (upsample): argmax over logits at
@@ -1370,7 +1371,7 @@ int main(int argc, char** argv) {
             siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out);
         } else {
             siam::save_jnifti_tpm(output_path, img, tpm_canon.data(),
-                                  num_classes_out, out_format);
+                                  num_classes_out, out_format, class_set);
         }
     } else {
         // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------

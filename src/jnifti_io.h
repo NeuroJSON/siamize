@@ -86,17 +86,26 @@ void save_jnifti_labels(const std::string& path,
  * file's voxel axis order before being interleaved into the (X, Y, Z, C)
  * NIfTI volume.
  *
+ * When the class set is recognized (CUSTOM_N with num_classes == 18 =
+ * SIAM v0.3, or SPM) the same JGIFTI-style LabelTable that
+ * save_jnifti_labels attaches is also written for the 4D TPM, this
+ * time keyed by *channel index* (each integer key names the
+ * corresponding C dimension of the (X, Y, Z, C) volume).
+ *
  * @param  path             destination file path
  * @param  src              the input NiftiImage whose header is reused
  * @param  tpm_canon_czyx   channel-slowest TPM in canonical orientation
  * @param  num_classes      number of channels (NIfTI dim[4])
  * @param  format           "jnii" or "bnii"
+ * @param  class_set        semantic label set; controls which preset
+ *                          (if any) goes into NIFTIHeader._DataInfo_.LabelTable
  */
 void save_jnifti_tpm(const std::string& path,
                      const NiftiImage& src,
                      const float* tpm_canon_czyx,
                      int64_t num_classes,
-                     const std::string& format);
+                     const std::string& format,
+                     ClassSet class_set = ClassSet::CUSTOM_N);
 
 /**
  * @brief Load a JNIfTI file (.jnii or .bnii) into a canonical NiftiImage

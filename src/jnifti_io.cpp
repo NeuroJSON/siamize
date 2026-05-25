@@ -941,7 +941,8 @@ void save_jnifti_tpm(const std::string& path,
                      const NiftiImage& src,
                      const float* tpm_canon_czyx,
                      int64_t num_classes,
-                     const std::string& format) {
+                     const std::string& format,
+                     ClassSet class_set) {
     bool binary = (format == "bnii");
 
     if (format != "jnii" && format != "bnii") {
@@ -978,9 +979,24 @@ void save_jnifti_tpm(const std::string& path,
 
     json root;
     root["NIFTIHeader"] = build_header(src, {X, Y, Z, num_classes});
-    root["NIFTIData"]   = jdata_annotated<float>(
-                              data_xyzc.data(),
-                              {X, Y, Z, num_classes}, binary);
+
+    // Attach JGIFTI-style LabelTable for the 4D TPM as well: each
+    // channel of the (X, Y, Z, C) volume corresponds to one entry in
+    // the table. The integer key matches the channel index. Same two
+    // presets as the labelmap path -- SIAM v0.3 18-channel default
+    // and SPM 6-channel for class_set==SPM.
+    json label_table = build_label_table(class_set,
+                                         static_cast<int>(num_classes));
+
+    if (!label_table.empty()) {
+        json data_info = json::object();
+        data_info["LabelTable"] = label_table;
+        root["NIFTIHeader"]["_DataInfo_"] = data_info;
+    }
+
+    root["NIFTIData"] = jdata_annotated<float>(
+                            data_xyzc.data(),
+                            {X, Y, Z, num_classes}, binary);
     write_jnifti_root(path, root, binary);
 }
 
