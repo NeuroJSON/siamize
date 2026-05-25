@@ -134,17 +134,22 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. --no-arena is the only knob we need to fit the
-        # runner's 16 GB cgroup: arena ON + -t 4 auto + default
-        # 256x256x192 patch peaks at ~28 GB; arena OFF drops it to
-        # ~12 GB which fits comfortably. Threads stay at 4 (the
-        # runner's hardware_concurrency) and patch stays at the
-        # user-default 256x256x192 (8 tiles), so the CI test
-        # mirrors a stock host's behavior as closely as possible.
+        # CPU. Memory budget on the 4 vCPU / 16 GB GHA Ubuntu runner
+        # is tight: only ~14 GB is available to user processes (the
+        # rest is kernel + actions agent), and the default
+        # 256x256x192 patch with arena off peaks at ~13 GB, right
+        # at the cgroup limit. SIGTERM fires before tile 2.
+        #
+        # The smaller -P 224x224x192 patch is still divisible by 32
+        # (the network's total downsampling factor; valid input shape
+        # for the dynamic-shape ONNX), still produces 8 tiles like
+        # the user-default, and reduces per-tile memory by ~24%
+        # (~10 GB peak). End-to-end inference completes in ~7 min.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
               --no-arena \
+              -P 224x224x192 \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
