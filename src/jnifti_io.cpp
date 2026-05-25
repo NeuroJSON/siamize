@@ -1067,7 +1067,8 @@ void save_jnifti_tpm(const std::string& path,
                      const float* tpm_canon_czyx,
                      int64_t num_classes,
                      const std::string& format,
-                     ClassSet class_set) {
+                     ClassSet class_set,
+                     bool shuffle) {
     bool binary = (format == "bnii");
 
     if (format != "jnii" && format != "bnii") {
@@ -1119,15 +1120,15 @@ void save_jnifti_tpm(const std::string& path,
         root["NIFTIHeader"]["_DataInfo_"] = data_info;
     }
 
-    // Float32 TPM: enable JData _ArrayShuffle_=4 (per-byte plane
-    // regrouping). Empirically ~1.5-2.5x smaller TPM payload on
-    // brain-segmentation probabilities because sign/exponent bytes
-    // form long zlib-friendly runs. Labelmaps use uint8 so shuffle
-    // is a no-op there.
+    // Float32 TPM: optionally enable JData _ArrayShuffle_=4 (per-byte
+    // plane regrouping). When on, empirically ~1.5-2.5x smaller TPM
+    // payload on brain-segmentation probabilities because
+    // sign/exponent bytes form long zlib-friendly runs. Disable for
+    // tools that don't yet understand _ArrayShuffle_.
+    const int sh = shuffle ? static_cast<int>(sizeof(float)) : 0;
     root["NIFTIData"] = jdata_annotated<float>(
                             data_xyzc.data(),
-                            {X, Y, Z, num_classes}, binary,
-                            /*shuffle=*/sizeof(float));
+                            {X, Y, Z, num_classes}, binary, sh);
     write_jnifti_root(path, root, binary);
 }
 

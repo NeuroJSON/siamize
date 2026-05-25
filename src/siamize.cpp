@@ -322,6 +322,12 @@ void usage(const char* exe) {
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
                  "                      wall time; use only on RAM-constrained hosts.\n"
+                 "      --no-shuffle    disable JData _ArrayShuffle_=4 (byte-shuffle before\n"
+                 "                      zlib) on TPM .jnii/.bnii output. Default ON, yields\n"
+                 "                      1.5-2.5x smaller TPM files at no decode cost for\n"
+                 "                      spec-compliant readers. Pass this when writing for\n"
+                 "                      a reader that doesn't yet understand _ArrayShuffle_\n"
+                 "                      (e.g. older jsonlab versions).\n"
                  "      --lowmem        force the full low-memory preset (--no-arena +\n"
                  "                      -t auto-cap=8 + --cudnn-max-workspace 0 +\n"
                  "                      --gpu-mem-limit 6G + -P 192x192x128). The -P\n"
@@ -441,6 +447,11 @@ int main(int argc, char** argv) {
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
+    bool        tpm_shuffle     = true;  // apply JData _ArrayShuffle_=4 before zlib
+                                         // on TPM jnii/bnii output. Default ON for
+                                         // the 1.5-2.5x size win; pass --no-shuffle
+                                         // for readers that don't yet understand
+                                         // _ArrayShuffle_ (e.g. older jsonlab).
     bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
                                          //         (skip per-channel back-resample),
                                          //         un-cropped to full canonical extent,
@@ -576,6 +587,8 @@ int main(int argc, char** argv) {
         } else if (a == "--no-arena") {
             engine_tuning.cpu_arena = false;
             cpu_arena_set = true;
+        } else if (a == "--no-shuffle") {
+            tpm_shuffle = false;
         } else if (a == "--upsample") {
             upsample_mode = true;
         } else if (a == "--lowmem") {
@@ -810,7 +823,7 @@ int main(int argc, char** argv) {
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s%s",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),
@@ -818,7 +831,8 @@ int main(int argc, char** argv) {
                   upsample_mode ? "  --upsample" : "",
                   engine_tuning.cpu_arena ? "" : "  --no-arena",
                   lowmem_mode ? "  --lowmem" : "",
-                  class_set == ClassSet::SPM ? "  --classes spm" : "");
+                  class_set == ClassSet::SPM ? "  --classes spm" : "",
+                  (tpm_mode && !tpm_shuffle) ? "  --no-shuffle" : "");
 
     // Pre-flight memory check: warn if available RAM is below the
     // expected peak for the current config. We can't trap SIGKILL
@@ -1191,7 +1205,7 @@ int main(int argc, char** argv) {
             } else {
                 siam::save_jnifti_tpm(output_path, img_up,
                                       tpm_up.data(), num_classes_out,
-                                      out_format, class_set);
+                                      out_format, class_set, tpm_shuffle);
             }
         } else {
             // ---- Labels branch (upsample): argmax over logits at
@@ -1408,7 +1422,8 @@ int main(int argc, char** argv) {
             siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out);
         } else {
             siam::save_jnifti_tpm(output_path, img, tpm_canon.data(),
-                                  num_classes_out, out_format, class_set);
+                                  num_classes_out, out_format, class_set,
+                                  tpm_shuffle);
         }
     } else {
         // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------
