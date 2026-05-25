@@ -130,7 +130,7 @@ CUDA runtime libraries are loaded via `dlopen`, so you may need to set
 (pip's `nvidia-*` packages):
 
 ```bash
-NV=$(python3 -c "import os, nvidia; print(os.path.dirname(nvidia.__file__))")
+NV=$(python3 -c "import nvidia; print(nvidia.__path__[0])")
 export LD_LIBRARY_PATH="$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/cudnn/lib:$NV/cufft/lib:$NV/curand/lib:$NV/cuda_nvrtc/lib:$NV/nvjitlink/lib:$LD_LIBRARY_PATH"
 build/siamize -i ... -c cuda ...
 ```
@@ -253,7 +253,7 @@ pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 `
 
 # Prepend the wheel DLL dirs to PATH (Windows equivalent of the
 # LD_LIBRARY_PATH one-liner shown above for Linux).
-$NV = (python -c "import os, nvidia; print(os.path.dirname(nvidia.__file__))")
+$NV = (python -c "import nvidia; print(nvidia.__path__[0])")
 $env:PATH = "$NV\cublas\bin;$NV\cuda_runtime\bin;$NV\cudnn\bin;" `
           + "$NV\cufft\bin;$NV\curand\bin;$NV\cuda_nvrtc\bin;" `
           + "$NV\nvjitlink\bin;" + $env:PATH
