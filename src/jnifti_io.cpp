@@ -273,6 +273,93 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape, bool bina
     \param  dim  output volume shape (3D for labelmaps, 4D for TPM)
     \return      a NIFTIHeader JSON object
 */
+/*******************************************************************************/
+/*! \fn    json build_label_table(ClassSet class_set, int num_classes)
+    \brief Build a JGIFTI-style LabelTable for the labelmap output
+
+    Constructs the per-class anatomical name + RGBA color dictionary
+    that goes into `NIFTIHeader._DataInfo_.LabelTable`. Follows the
+    JGIFTI specification's object form (keyed by stringified integer
+    label IDs) -- see
+    https://github.com/NeuroJSON/jgifti/blob/main/JGIFTI_specification.md
+
+    Two presets are emitted today:
+
+      - SIAM v0.3 (18 classes, when class_set == CUSTOM_N AND
+        num_classes == 18): the SIAM tissue dictionary from
+        label_siamV03_.json (background, GM, WM, CSF, CSFv, cerGM,
+        Thal, Pal, Put, Caud, Accu, Amyg, Hippo, Dura, vascular,
+        Skull, Head, Anomalies).
+      - SPM (6 classes, when class_set == SPM): GM, WM, CSF, Bone,
+        Soft, Air in spm12/tpm/TPM.nii channel order.
+
+    For other class sets we return an empty json::object() and the
+    caller omits LabelTable entirely; viewers will then fall back to
+    their default colormap. RGBA components are normalized floats in
+    [0, 1]; "background"/"Air" entries use alpha=0 (transparent) per
+    the JGIFTI rule for unassigned regions.
+
+    \param  class_set     semantic label set selector
+    \param  num_classes   total class count (only used to decide
+                          whether to emit SIAM v0.3 names)
+    \return  LabelTable JSON object, or empty if the class set is
+             unknown
+*/
+json build_label_table(ClassSet class_set, int num_classes) {
+    // {label-id -> {"Label": name, "RGBA": [r,g,b,a]}}
+    json tbl = json::object();
+
+    auto add = [&](int id, const char* name,
+                   float r, float g, float b, float a) {
+        json entry = json::object();
+        entry["Label"] = name;
+        entry["RGBA"]  = std::vector<float>{r, g, b, a};
+        tbl[std::to_string(id)] = entry;
+    };
+
+    if (class_set == ClassSet::SPM) {
+        // SPM12 6-class TPM order: GM, WM, CSF, Bone, Soft, Air.
+        // Air keeps alpha=0 per JGIFTI "unassigned -> transparent".
+        add(0, "GM",   0.700f, 0.700f, 0.700f, 1.0f);
+        add(1, "WM",   0.950f, 0.950f, 0.950f, 1.0f);
+        add(2, "CSF",  0.000f, 0.600f, 0.900f, 1.0f);
+        add(3, "Bone", 0.900f, 0.850f, 0.550f, 1.0f);
+        add(4, "Soft", 0.950f, 0.750f, 0.650f, 1.0f);
+        add(5, "Air",  0.000f, 0.000f, 0.000f, 0.0f);
+        return tbl;
+    }
+
+    if (class_set == ClassSet::CUSTOM_N && num_classes == 18) {
+        // SIAM v0.3 anatomical dictionary, from label_siamV03_.json.
+        // Background gets alpha=0; deep-gray nuclei get warm hues to
+        // visually separate from cortical GM; CSF / CSFv get blue
+        // variants; skull/head get bone/flesh tones; anomalies get
+        // magenta for high-visibility QC.
+        add( 0, "background", 0.000f, 0.000f, 0.000f, 0.0f);
+        add( 1, "GM",         0.700f, 0.700f, 0.700f, 1.0f);
+        add( 2, "WM",         0.950f, 0.950f, 0.950f, 1.0f);
+        add( 3, "CSF",        0.000f, 0.600f, 0.900f, 1.0f);
+        add( 4, "CSFv",       0.000f, 0.300f, 0.700f, 1.0f);
+        add( 5, "cerGM",      0.550f, 0.550f, 0.550f, 1.0f);
+        add( 6, "Thal",       0.800f, 0.400f, 0.300f, 1.0f);
+        add( 7, "Pal",        0.950f, 0.600f, 0.100f, 1.0f);
+        add( 8, "Put",        0.700f, 0.200f, 0.200f, 1.0f);
+        add( 9, "Caud",       0.950f, 0.850f, 0.200f, 1.0f);
+        add(10, "Accu",       0.550f, 0.350f, 0.200f, 1.0f);
+        add(11, "Amyg",       0.450f, 0.850f, 0.450f, 1.0f);
+        add(12, "Hippo",      0.150f, 0.550f, 0.200f, 1.0f);
+        add(13, "Dura",       0.700f, 0.600f, 0.400f, 1.0f);
+        add(14, "vascular",   0.800f, 0.050f, 0.050f, 1.0f);
+        add(15, "Skull",      0.900f, 0.850f, 0.550f, 1.0f);
+        add(16, "Head",       0.950f, 0.750f, 0.650f, 1.0f);
+        add(17, "Anomalies",  1.000f, 0.000f, 1.000f, 1.0f);
+        return tbl;
+    }
+
+    // Unknown class set / count -> caller omits LabelTable.
+    return json::object();
+}
+
 json build_header(const NiftiImage& src, const std::vector<int64_t>& dim) {
     json h = json::object();
     h["NIIHeaderSize"] = 348;
@@ -777,7 +864,9 @@ std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vecto
 void save_jnifti_labels(const std::string& path,
                         const NiftiImage& src,
                         const uint8_t* labels_zyx,
-                        const std::string& format) {
+                        const std::string& format,
+                        ClassSet class_set,
+                        int num_classes) {
     bool binary = (format == "bnii");
 
     if (format != "jnii" && format != "bnii") {
@@ -805,8 +894,21 @@ void save_jnifti_labels(const std::string& path,
 
     json root;
     root["NIFTIHeader"] = build_header(src, {X, Y, Z});
-    root["NIFTIData"]   = jdata_annotated<uint8_t>(
-                              data_xyz.data(), {X, Y, Z}, binary);
+
+    // Attach JGIFTI-style LabelTable at NIFTIHeader._DataInfo_.LabelTable
+    // when the class set is recognized (SIAM v0.3 18-class or SPM 6-class).
+    // Viewers that honour the JGIFTI LabelTable spec will then render
+    // anatomical names + per-tissue colors instead of a default colormap.
+    json label_table = build_label_table(class_set, num_classes);
+
+    if (!label_table.empty()) {
+        json data_info = json::object();
+        data_info["LabelTable"] = label_table;
+        root["NIFTIHeader"]["_DataInfo_"] = data_info;
+    }
+
+    root["NIFTIData"] = jdata_annotated<uint8_t>(
+                            data_xyz.data(), {X, Y, Z}, binary);
     write_jnifti_root(path, root, binary);
 }
 

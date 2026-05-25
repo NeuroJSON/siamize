@@ -87,52 +87,10 @@ using siam::Volume;
 
 namespace {
 
-/*
- * SIAM v0.3 (18 classes) -> SPM12 (6 TPM channels) bin mapping.
- *
- *   SPM output order (matches spm12/tpm/TPM.nii):
- *     0 = GM, 1 = WM, 2 = CSF, 3 = Bone, 4 = Soft tissue, 5 = Air
- *
- *   SIAM v0.3 label dictionary (from label_siamV03_.json):
- *      0 background, 1 GM, 2 WM, 3 CSF, 4 CSFv, 5 cerGM, 6 Thal,
- *      7 Pal, 8 Put, 9 Caud, 10 Accu, 11 Amyg, 12 Hippo, 13 Dura,
- *      14 vascular, 15 Skull, 16 Head, 17 Anomalies.
- *
- *   Deep gray nuclei (Thal/Pal/Put/Caud/Accu/Amyg/Hippo) all fold
- *   into GM (SPM's gray-matter TPM lumps cortical + subcortical
- *   gray; SIAM split them for finer anatomy). Anomalies (17) fold
- *   into GM as the closest tissue match for intra-parenchymal
- *   lesions. All 18 classes map to one of the 6 bins, so the SIAM
- *   softmax's per-voxel sum of 1.0 is preserved through the merge --
- *   no renormalization needed.
- */
-static constexpr int8_t SIAM18_TO_SPM6[18] = {
-    5,   // 0  background -> Air
-    0,   // 1  GM         -> GM
-    1,   // 2  WM         -> WM
-    2,   // 3  CSF        -> CSF
-    2,   // 4  CSFv       -> CSF
-    0,   // 5  cerGM      -> GM
-    0,   // 6  Thal       -> GM
-    0,   // 7  Pal        -> GM
-    0,   // 8  Put        -> GM
-    0,   // 9  Caud       -> GM
-    0,   // 10 Accu       -> GM
-    0,   // 11 Amyg       -> GM
-    0,   // 12 Hippo      -> GM
-    3,   // 13 Dura       -> Bone
-    4,   // 14 vascular   -> Soft
-    3,   // 15 Skull      -> Bone
-    4,   // 16 Head       -> Soft
-    0,   // 17 Anomalies  -> GM
-};
-static constexpr int64_t SPM6_NUM_CLASSES = 6;
-static constexpr int8_t  SPM6_AIR_CHANNEL = 5;   // background equivalent in SPM order
-
-enum class ClassSet {
-    CUSTOM_N,   // -C N: pass through N output channels (default mode)
-    SPM,        // --classes spm: SIAM 18 -> SPM 6 merge
-};
+using siam::ClassSet;
+using siam::SIAM18_TO_SPM6;
+using siam::SPM6_NUM_CLASSES;
+using siam::SPM6_AIR_CHANNEL;
 
 
 /*******************************************************************************/
@@ -1283,7 +1241,8 @@ int main(int argc, char** argv) {
                 siam::save_nifti_labels(output_path, img_up, labels_up.data());
             } else {
                 siam::save_jnifti_labels(output_path, img_up, labels_up.data(),
-                                         out_format);
+                                         out_format, class_set,
+                                         static_cast<int>(num_classes));
             }
         }
 
@@ -1497,7 +1456,8 @@ int main(int argc, char** argv) {
             siam::save_nifti_labels(output_path, img, labels_canon.data());
         } else {
             siam::save_jnifti_labels(output_path, img, labels_canon.data(),
-                                     out_format);
+                                     out_format, class_set,
+                                     static_cast<int>(num_classes));
         }
     }
 

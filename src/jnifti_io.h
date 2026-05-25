@@ -51,15 +51,26 @@ namespace siam {
  * byte stream, and writes either a text-JSON (.jnii, base64-encoded
  * payload) or BJData binary (.bnii, raw-byte payload) container.
  *
+ * When the class set is known (CUSTOM_N with num_classes == 18 = SIAM
+ * v0.3, or SPM) a JGIFTI-style LabelTable is attached at
+ * `NIFTIHeader._DataInfo_.LabelTable` with anatomical names + RGBA
+ * colors per label. Unknown class sets omit the LabelTable.
+ *
  * @param  path        destination file path
  * @param  src         the input NiftiImage that supplied the affine and axis order
  * @param  labels_zyx  canonical-axis (Z, Y, X) labelmap, length cZ*cY*cX bytes
  * @param  format      "jnii" for text JSON or "bnii" for binary BJData
+ * @param  class_set   semantic label set (CUSTOM_N default = SIAM v0.3, or SPM)
+ * @param  num_classes total class count; only used to decide whether to
+ *                     attach the SIAM v0.3 LabelTable (i.e. == 18) when
+ *                     class_set is CUSTOM_N. Ignored for SPM (always 6).
  */
 void save_jnifti_labels(const std::string& path,
                         const NiftiImage& src,
                         const uint8_t* labels_zyx,
-                        const std::string& format);
+                        const std::string& format,
+                        ClassSet class_set = ClassSet::CUSTOM_N,
+                        int num_classes = 18);
 
 /**
  * @brief Save a 4D float32 tissue probability map (TPM) as JNIfTI

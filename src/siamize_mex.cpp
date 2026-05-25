@@ -278,7 +278,9 @@ struct Opts {
     int threads = 0;                                   /**< 0 = std::thread::hardware_concurrency() */
     std::array<int64_t, 3> patch = {256, 256, 192};    /**< sliding-window patch (Z, Y, X) */
     float spacing = 0.75f;                             /**< target isotropic voxel size, mm */
-    int64_t classes = 18;                              /**< number of SIAM output classes */
+    int64_t classes = 18;                              /**< inference output channels (network's logits) */
+    int64_t classes_out = 18;                          /**< saved output channels (differs for SPM) */
+    siam::ClassSet class_set = siam::ClassSet::CUSTOM_N; /**< 'spm' triggers SIAM-18 -> SPM-6 merge */
     std::string trt_cache;                             /**< TensorRT engine cache directory */
     bool verbose = false;                              /**< progress messages to stderr */
     siam::EngineTuning engine_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
@@ -355,7 +357,24 @@ void read_opts(const mxArray* a, Opts& o) {
     }
 
     if ((f = mxGetField(a, 0, "classes"))  && !mxIsEmpty(f)) {
-        o.classes = static_cast<int64_t>(mxGetScalar(f));
+        // Accept either a numeric scalar (e.g. opts.classes = 18) or
+        // the string 'spm' (opts.classes = 'spm') for the SIAM 18 ->
+        // SPM 6 remap. Mirrors the CLI's --classes N|spm.
+        if (mxIsChar(f)) {
+            std::string s = mx_to_string(f);
+
+            if (s == "spm" || s == "SPM") {
+                o.class_set   = siam::ClassSet::SPM;
+                o.classes     = 18;                          // still infer all 18 SIAM channels
+                o.classes_out = siam::SPM6_NUM_CLASSES;      // merge to 6 SPM bins on output
+            } else {
+                die("siamize:opts",
+                    "opts.classes string must be 'spm' (got '" + s + "')");
+            }
+        } else {
+            o.classes     = static_cast<int64_t>(mxGetScalar(f));
+            o.classes_out = o.classes;
+        }
     }
 
     if ((f = mxGetField(a, 0, "trt_cache")) && !mxIsEmpty(f)) {
@@ -753,10 +772,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
 
         if (opts.tpm) {
-            // ---- TPM mode: softmax -> un-crop -> reorient -> 4D float32 ---
+            // ---- TPM mode: softmax -> (optional SPM merge) ->
+            //               un-crop -> reorient -> 4D float32 ----
+            // See siamize.cpp for the rationale on the per-voxel
+            // SPM merge running in-place inside the softmax loop.
+            const bool spm = (opts.class_set == siam::ClassSet::SPM);
             const float inv_T = 1.0f / opts.tpm_temperature;
             const int64_t N = cZ * cY * cX;
 
+            #pragma omp parallel for schedule(static)
             for (int64_t i = 0; i < N; ++i) {
                 float m = logits_back.channel_ptr(0)[i] * inv_T;
 
@@ -781,14 +805,31 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 for (int64_t c = 0; c < opts.classes; ++c) {
                     logits_back.channel_ptr(c)[i] *= invs;
                 }
+
+                if (spm) {
+                    float spm_bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                    for (int64_t c = 0; c < opts.classes; ++c) {
+                        spm_bin[siam::SIAM18_TO_SPM6[c]] += logits_back.channel_ptr(c)[i];
+                    }
+
+                    for (int64_t b = 0; b < siam::SPM6_NUM_CLASSES; ++b) {
+                        logits_back.channel_ptr(b)[i] = spm_bin[b];
+                    }
+                }
             }
 
-            // Un-crop into canonical (C, Zc, Yc, Xc); outside bbox = [1,0,...]
+            // Un-crop into canonical (C, Zc, Yc, Xc); outside bbox =
+            // [1, 0, ...] in default (background-first) ordering, or
+            // [0, 0, 0, 0, 0, 1] in SPM ordering (Air at channel 5).
+            const int64_t out_classes  = opts.classes_out;
+            const int64_t bg_chan_tpm  = spm ? siam::SPM6_AIR_CHANNEL : 0;
             std::vector<float> tpm_canon(
-                static_cast<size_t>(opts.classes) * Zc * Yc * Xc, 0.0f);
-            std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);
+                static_cast<size_t>(out_classes) * Zc * Yc * Xc, 0.0f);
+            std::fill_n(tpm_canon.data() + bg_chan_tpm * Zc * Yc * Xc,
+                        Zc * Yc * Xc, 1.0f);
 
-            for (int64_t c = 0; c < opts.classes; ++c) {
+            for (int64_t c = 0; c < out_classes; ++c) {
                 const float* src = logits_back.channel_ptr(c);
                 float* dst_chan = tpm_canon.data() + c * Zc * Yc * Xc;
 
@@ -810,14 +851,14 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 static_cast<mwSize>(X),
                 static_cast<mwSize>(Y),
                 static_cast<mwSize>(Z),
-                static_cast<mwSize>(opts.classes),
+                static_cast<mwSize>(out_classes),
             };
             plhs[0] = mxCreateNumericArray(4, tdims, mxSINGLE_CLASS, mxREAL);
             float* tpm_ptr = static_cast<float*>(mxGetData(plhs[0]));
             const int64_t per_chan_out = X * Y * Z;
             const int64_t per_chan_in  = Zc * Yc * Xc;
 
-            for (int64_t c = 0; c < opts.classes; ++c) {
+            for (int64_t c = 0; c < out_classes; ++c) {
                 siam::copy_reorient_from_canonical<float, float>(
                     tpm_canon.data() + c * per_chan_in,
                     Zc, Yc, Xc,
@@ -826,21 +867,59 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             }
         } else {
             // ---- Labels mode: argmax -> un-crop -> reorient -> 3D uint8 ---
-            std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
+            // --classes spm: see siamize.cpp for why argmax-on-logits
+            // doesn't commute with the SPM merge. Use exp-sum-per-bin
+            // and argmax that; skip the divide-by-Z since argmax is
+            // scale invariant.
+            const bool spm_labels = (opts.class_set == siam::ClassSet::SPM);
+            const uint8_t bg_label = spm_labels
+                                     ? static_cast<uint8_t>(siam::SPM6_AIR_CHANNEL)
+                                     : static_cast<uint8_t>(0);
+            std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, bg_label);
 
+            #pragma omp parallel for schedule(static)
             for (int64_t z = 0; z < cZ; ++z) {
                 for (int64_t y = 0; y < cY; ++y) {
                     for (int64_t x = 0; x < cX; ++x) {
                         int64_t i = z * cY * cX + y * cX + x;
                         int best = 0;
-                        float bestv = logits_back.channel_ptr(0)[i];
 
-                        for (int64_t c = 1; c < opts.classes; ++c) {
-                            float v = logits_back.channel_ptr(c)[i];
+                        if (spm_labels) {
+                            float M = logits_back.channel_ptr(0)[i];
 
-                            if (v > bestv) {
-                                bestv = v;
-                                best = static_cast<int>(c);
+                            for (int64_t c = 1; c < opts.classes; ++c) {
+                                float v = logits_back.channel_ptr(c)[i];
+
+                                if (v > M) {
+                                    M = v;
+                                }
+                            }
+
+                            float bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                            for (int64_t c = 0; c < opts.classes; ++c) {
+                                bin[siam::SIAM18_TO_SPM6[c]] +=
+                                    std::exp(logits_back.channel_ptr(c)[i] - M);
+                            }
+
+                            float bestv = bin[0];
+
+                            for (int64_t b = 1; b < siam::SPM6_NUM_CLASSES; ++b) {
+                                if (bin[b] > bestv) {
+                                    bestv = bin[b];
+                                    best = static_cast<int>(b);
+                                }
+                            }
+                        } else {
+                            float bestv = logits_back.channel_ptr(0)[i];
+
+                            for (int64_t c = 1; c < opts.classes; ++c) {
+                                float v = logits_back.channel_ptr(c)[i];
+
+                                if (v > bestv) {
+                                    bestv = v;
+                                    best = static_cast<int>(c);
+                                }
                             }
                         }
 
@@ -850,7 +929,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             }
 
             std::vector<uint8_t> labels_canon(
-                static_cast<size_t>(Zc) * Yc * Xc, 0);
+                static_cast<size_t>(Zc) * Yc * Xc, bg_label);
 
             for (int64_t z = 0; z < cZ; ++z) {
                 for (int64_t y = 0; y < cY; ++y) {

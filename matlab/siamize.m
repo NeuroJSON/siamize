@@ -92,7 +92,14 @@ function nii = siamize(varargin)
 %                                      an explicit count to override.
 %               'patch'               [pz, py, px] (default [256 256 192])
 %               'spacing'             double mm (default 0.75)
-%               'classes'             int (default 18, matches SIAM v0.3)
+%               'classes'             int or char (default 18). Pass an integer
+%                                      to drive a non-SIAM model with that many
+%                                      output channels. Pass 'spm' to remap
+%                                      SIAM v0.3's 18 classes into SPM12's 6
+%                                      TPM channels (GM, WM, CSF, Bone, Soft,
+%                                      Air -- in that channel order); works for
+%                                      both label and TPM output. Anomalies
+%                                      (SIAM class 17) fold into GM.
 %               'trt_cache'           char (default ~/.cache/siamize/trt)
 %               'arena'               logical (default true). False disables
 %                                      ORT's CPU memory arena + memory-
@@ -151,13 +158,20 @@ function nii = siamize(varargin)
 %                            The working affine is written into
 %                            .NIFTIHeader.Affine for round-tripping.
 %             .NIFTIData     the segmentation result, either
-%                              uint8 [X, Y, Z]        when opts.tpm=false
-%                              single [X, Y, Z, 18]   when opts.tpm=true
-%            Labels: integers 0..17 per SIAM v0.3 (0=background, 1=GM,
-%            2=WM, 3=CSF, ..., 17=Anomalies).
-%            TPM: per-class softmax probabilities; sums to 1 per
-%            voxel, and argmax over the 4th axis (minus 1) reproduces
-%            the label volume you'd get with opts.tpm=false.
+%                              uint8 [X, Y, Z]         when opts.tpm=false
+%                              single [X, Y, Z, C]     when opts.tpm=true
+%            where C = 18 in the default class set, or C = 6 when
+%            opts.classes='spm' is set.
+%            Default labels: integers 0..17 per SIAM v0.3 (0=background,
+%            1=GM, 2=WM, 3=CSF, ..., 17=Anomalies).
+%            SPM labels (opts.classes='spm'): integers 0..5 in SPM12
+%            order (0=GM, 1=WM, 2=CSF, 3=Bone, 4=Soft, 5=Air).
+%            Default TPM: per-class softmax probabilities over 18
+%            channels, sums to 1 per voxel; argmax along the 4th axis
+%            (minus 1) reproduces the default label volume.
+%            SPM TPM (opts.classes='spm'): probabilities over 6 SPM12
+%            channels in spm12/tpm/TPM.nii order (GM, WM, CSF, Bone,
+%            Soft, Air); also sums to 1 per voxel.
 %            Always returned; also written to outputfile if one was
 %            provided.
 %
@@ -298,6 +312,30 @@ else
     nii.NIFTIHeader.Affine = affine;
 end
 
+% Attach a JGIFTI-style LabelTable to NIFTIHeader._DataInfo_.LabelTable
+% when emitting a labelmap with a recognized class set (default SIAM
+% v0.3 = 18 classes, or opts.classes='spm' = 6 SPM bins). MATLAB
+% field names can't start with underscore, so the JSON key
+% "_DataInfo_" is stored as the hex-encoded field 'x0x5F_DataInfo_';
+% jsonlab's savejson decodes it back to "_DataInfo_" on serialize.
+% Integer label IDs likewise can't lead with a digit, so each entry
+% key is stored as 'x0x3{0..9}_' / etc (jsonlab decodes back to "0",
+% "1", ...). Viewers that honour the JGIFTI LabelTable spec then
+% render anatomical names + per-tissue colors.
+is_tpm = isfield(opts, 'tpm') && opts.tpm;
+if ~is_tpm
+    tbl = siamize_label_table_(opts);
+    if ~isempty(fieldnames(tbl))
+        if isfield(nii.NIFTIHeader, 'x0x5F_DataInfo_')
+            info = nii.NIFTIHeader.x0x5F_DataInfo_;
+        else
+            info = struct();
+        end
+        info.LabelTable = tbl;
+        nii.NIFTIHeader.x0x5F_DataInfo_ = info;
+    end
+end
+
 if ~isempty(outputfile)
     siamize_write_output_(nii, outputfile);
 end
@@ -416,6 +454,60 @@ end
 %     nothing (empty opts):                  siamize(in, out, 0)
 opts_args = rest(2:end);
 opts = varargin2struct(opts_args{:});
+end
+
+function tbl = siamize_label_table_(opts)
+% SIAMIZE_LABEL_TABLE_  Build a JGIFTI-style LabelTable struct.
+%   Returns an object-form LabelTable (struct keyed by hex-encoded
+%   integer label IDs that jsonlab decodes back to "0", "1", ... on
+%   serialize). Two presets are supported today:
+%     - SIAM v0.3 18-class default (no opts.classes, or
+%       opts.classes==18): full anatomical dictionary from
+%       label_siamV03_.json with FreeSurfer-inspired colors.
+%     - SPM 6-class (opts.classes=='spm'): GM, WM, CSF, Bone, Soft,
+%       Air in spm12/tpm/TPM.nii order.
+%   Returns an empty struct() for any other class set; the caller
+%   should then omit LabelTable so viewers fall back to defaults.
+%   Per JGIFTI rules, the background/Air entry uses alpha=0
+%   (transparent) to mark it as unassigned.
+
+if isfield(opts, 'classes') && ischar(opts.classes) ...
+        && strcmpi(opts.classes, 'spm')
+    names  = {'GM', 'WM', 'CSF', 'Bone', 'Soft', 'Air'};
+    colors = {[0.700 0.700 0.700 1.0]; ...
+              [0.950 0.950 0.950 1.0]; ...
+              [0.000 0.600 0.900 1.0]; ...
+              [0.900 0.850 0.550 1.0]; ...
+              [0.950 0.750 0.650 1.0]; ...
+              [0.000 0.000 0.000 0.0]};
+    ids = 0:5;
+elseif ~isfield(opts, 'classes') ...
+        || (isnumeric(opts.classes) && opts.classes == 18)
+    names  = {'background', 'GM', 'WM', 'CSF', 'CSFv', 'cerGM', ...
+              'Thal', 'Pal', 'Put', 'Caud', 'Accu', 'Amyg', 'Hippo', ...
+              'Dura', 'vascular', 'Skull', 'Head', 'Anomalies'};
+    colors = {[0.000 0.000 0.000 0.0]; ...
+              [0.700 0.700 0.700 1.0]; [0.950 0.950 0.950 1.0]; ...
+              [0.000 0.600 0.900 1.0]; [0.000 0.300 0.700 1.0]; ...
+              [0.550 0.550 0.550 1.0]; [0.800 0.400 0.300 1.0]; ...
+              [0.950 0.600 0.100 1.0]; [0.700 0.200 0.200 1.0]; ...
+              [0.950 0.850 0.200 1.0]; [0.550 0.350 0.200 1.0]; ...
+              [0.450 0.850 0.450 1.0]; [0.150 0.550 0.200 1.0]; ...
+              [0.700 0.600 0.400 1.0]; [0.800 0.050 0.050 1.0]; ...
+              [0.900 0.850 0.550 1.0]; [0.950 0.750 0.650 1.0]; ...
+              [1.000 0.000 1.000 1.0]};
+    ids = 0:17;
+else
+    tbl = struct();
+    return;
+end
+
+tbl = struct();
+for k = 1:numel(ids)
+    key = encodevarname(num2str(ids(k)));
+    entry = struct('Label', names{k}, 'RGBA', single(colors{k}));
+    tbl.(key) = entry;
+end
 end
 
 function siamize_write_output_(nii, outputfile)

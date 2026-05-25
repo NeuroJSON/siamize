@@ -191,6 +191,60 @@ struct NiftiImage {
     int datatype_orig = 0;                          /**< NIfTI datatype code of the input file */
 };
 
+/**
+ * \enum  ClassSet
+ * \brief Output-class semantics selector
+ *
+ * Distinguishes between "pass through N network output channels"
+ * (the default) and "remap SIAM v0.3's 18 classes into SPM12's 6
+ * TPM channels" (--classes spm / opts.classes = 'spm'). The merge
+ * applies after the standard softmax and produces either:
+ *
+ *  - --tpm:  a 6-channel float32 TPM in SPM12 channel order
+ *            (GM, WM, CSF, Bone, Soft, Air -- matches
+ *            spm12/tpm/TPM.nii).
+ *  - labels: a uint8 labelmap with values 0..5 in the same order.
+ */
+enum class ClassSet {
+    CUSTOM_N,   /**< pass through N channels (default) */
+    SPM,        /**< SIAM 18 -> SPM 6 merge after softmax */
+};
+
+/**
+ * \brief SIAM v0.3 (18 classes) -> SPM12 (6 TPM channels) LUT
+ *
+ * SPM output order (matches spm12/tpm/TPM.nii):
+ *   0=GM, 1=WM, 2=CSF, 3=Bone, 4=Soft, 5=Air
+ *
+ * Deep gray nuclei (Thal/Pal/Put/Caud/Accu/Amyg/Hippo) fold into
+ * GM. Anomalies (SIAM 17) also fold into GM as the closest tissue
+ * match for intra-parenchymal lesions. All 18 classes map to one
+ * of the 6 bins, so the SIAM softmax's per-voxel sum of 1.0 is
+ * preserved through the merge -- no renormalization needed.
+ */
+constexpr int8_t SIAM18_TO_SPM6[18] = {
+    5,   // 0  background -> Air
+    0,   // 1  GM         -> GM
+    1,   // 2  WM         -> WM
+    2,   // 3  CSF        -> CSF
+    2,   // 4  CSFv       -> CSF
+    0,   // 5  cerGM      -> GM
+    0,   // 6  Thal       -> GM
+    0,   // 7  Pal        -> GM
+    0,   // 8  Put        -> GM
+    0,   // 9  Caud       -> GM
+    0,   // 10 Accu       -> GM
+    0,   // 11 Amyg       -> GM
+    0,   // 12 Hippo      -> GM
+    3,   // 13 Dura       -> Bone
+    4,   // 14 vascular   -> Soft
+    3,   // 15 Skull      -> Bone
+    4,   // 16 Head       -> Soft
+    0,   // 17 Anomalies  -> GM
+};
+constexpr int64_t SPM6_NUM_CLASSES = 6;
+constexpr int8_t  SPM6_AIR_CHANNEL = 5;   /**< background equivalent in SPM order */
+
 }  // namespace siam
 
 #endif  // SIAMIZE_SIAM_H
