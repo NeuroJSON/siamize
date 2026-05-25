@@ -88,6 +88,7 @@ with matching options.
 #include <cinttypes>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -513,6 +514,23 @@ void read_opts(const mxArray* a, Opts& o) {
     \param  prhs  input mxArray vector (length = nrhs)
 */
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+    // See siamize.cpp's main() for the rationale -- align CUDA's GPU
+    // enumeration with what `nvidia-smi -L` prints so that opts.gpu/-G N
+    // selects the same card the user sees in nvidia-smi. Default
+    // FASTEST_FIRST silently routes the request to whichever card CUDA
+    // ranked highest, which on heterogeneous boxes (e.g. RTX 2080 +
+    // A100) doesn't match nvidia-smi's PCI ordering. overwrite=0 keeps
+    // an explicit user setting in the launching shell.
+#ifndef _WIN32
+    setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+#else
+    // Windows: setenv doesn't exist; use _putenv_s which UNCONDITIONALLY
+    // overwrites, so check first.
+    if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
+        _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+    }
+#endif
+
     if (nrhs < 3) {
         die("siamize:nrhs",
             "Usage: labels = siamize(img, affine, models, [opts])\n"

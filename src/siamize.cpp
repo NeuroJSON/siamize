@@ -454,6 +454,21 @@ void usage(const char* exe) {
                   2 on a bad-CLI error
 */
 int main(int argc, char** argv) {
+    // Default CUDA_DEVICE_ORDER=PCI_BUS_ID so siamize's -G N matches the
+    // index a user sees in `nvidia-smi -L`. The CUDA runtime's default
+    // is FASTEST_FIRST, which sorts GPUs by perf class (compute capability,
+    // mem bandwidth) -- meaning on a heterogeneous box like a workstation
+    // with both an RTX 2080 (faster-ranked in CUDA's heuristic because of
+    // tensor cores) AND an A100, the A100 may NOT be CUDA device 1 the way
+    // it appears in `nvidia-smi -L`. The default flipped indices silently
+    // route `-G 1` to whichever card CUDA ranked second, not the card the
+    // user expected. PCI_BUS_ID is the same enumeration nvidia-smi prints,
+    // so users can map directly between the two.
+    //
+    // We use setenv with overwrite=0 so an explicit user choice
+    // (CUDA_DEVICE_ORDER=FASTEST_FIRST in the environment) still wins.
+    setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
