@@ -339,6 +339,98 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  cpp-build-coreml:
+    # Builds siamize with the CoreML Execution Provider enabled and
+    # actually runs end-to-end inference on a real Apple Silicon runner
+    # (M-class CPU + Metal GPU + Neural Engine). Unlike cpp-build-cuda
+    # where GHA has no NVIDIA GPU, GHA's macos-14 runner DOES expose
+    # the full Apple Silicon stack to CoreML, so this is the "GPU
+    # smoke" leg for macOS.
+    name: build+run coreml (macos-14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenMP
+        run: |
+          brew install libomp
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Fetch C++ deps (CPU ORT -- macOS dylib already includes CoreML EP)
+        run: scripts/fetch_deps.sh
+
+      - name: Fetch fold_0 weight (FIXED-shape, CoreML's preferred fusion path)
+        # Core ML's RequireStaticInputShapes=1 path gets the best fusion
+        # + ANE coverage when the ONNX has fixed spatial dims. Pull the
+        # matching fixshape build of the fp16 ONNX from the NeuroJSON
+        # server (same one default_weights_url() resolves for -c coreml).
+        run: |
+          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=fixshape&file=fold_0_fp16.onnx.gz'
+          mkdir -p models
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
+          gunzip -f models/fold_0_fp16.onnx.gz
+          ls -la models/
+
+      - name: Configure (CoreML EP)
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSIAMIZE_STATIC_LINK=ON \
+              -DSIAMIZE_GPU=coreml
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run single-fold inference (real Apple Silicon CoreML EP)
+        # First run compiles ONNX -> .mlmodelc (~10-30 s). End-to-end
+        # ~30-60 s on macos-14 (M1, 8 GB RAM unified).
+        timeout-minutes: 30
+        run: |
+          build/siamize \
+              -i tests/sub-01_T1w.nii.gz \
+              -o pred_ci.nii.gz \
+              -M models/fold_0_fp16.onnx \
+              -c coreml 2>&1 | tee siamize.log
+
+      - name: Verify CoreML EP claimed at least part of the graph
+        run: |
+          if grep -Eq "\[coreml\][[:space:]]+enabled" siamize.log; then
+            echo "OK: CoreML EP registered."
+          else
+            echo "FAIL: expected '[coreml] enabled' line; got:"
+            cat siamize.log
+            exit 1
+          fi
+
+      - name: Verify output produced
+        run: |
+          test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
+          ls -lh pred_ci.nii.gz
+
+      - name: Package
+        shell: bash
+        run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
+          BUNDLE="siamize-${VER}-macos-arm64-coreml"
+          # package.sh's 'cuda' / 'tensorrt' modes pull GPU-specific libs;
+          # the macOS CoreML bundle is just the CPU package (CoreML EP is
+          # statically baked into libonnxruntime.dylib on macOS).
+          scripts/package.sh cpu "$BUNDLE"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: ${{ env.BUNDLE }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
   mex-cuda-smoke:
     # Compile-only smoke test for `make cudaoct` / `make cudamex`. The
     # GHA runner has no NVIDIA GPU and no CUDA runtime libs, so we can
@@ -387,6 +479,53 @@ jobs:
               fi
           done
           echo "OK: CUDA-EP probe strings present in matlab/siamex.mex"
+
+  mex-coreml-smoke:
+    # macOS-only compile + strings-grep test for `make coremloct`.
+    # The macos-14 runner DOES have a real CoreML stack, but we keep
+    # this leg lightweight (compile + symbol probe only) since the
+    # heavier end-to-end MEX-load test would require MATLAB on Apple
+    # Silicon, which isn't part of the matlab-actions/setup-matlab
+    # macos-14 support yet. Validates SIAMIZE_HAS_COREML propagates
+    # to the MEX -- same kind of regression as dee8b1d but for the
+    # CoreML path.
+    name: mex-coreml-smoke (octave)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Octave + libomp via Homebrew
+        run: |
+          brew install octave libomp
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Fetch C++ deps (CPU ORT)
+        run: scripts/fetch_deps.sh
+
+      - name: Build `make coremloct`
+        run: make coremloct
+
+      - name: Verify MEX exists
+        run: |
+          ls -la matlab/siamex.mex
+          test -s matlab/siamex.mex
+
+      - name: Verify CoreML EP code paths compiled in
+        run: |
+          # Strings emitted by sliding.cpp's `#ifdef SIAMIZE_HAS_COREML`
+          # block. Their presence proves the CoreML EP probe code reached
+          # the linker; their absence means SIAMIZE_HAS_COREML didn't
+          # propagate through the Octave MEX's CXXFLAGS path.
+          for needle in "probing CoreML EP" "MLComputeUnits" \
+                        "ModelCacheDirectory" "RequireStaticInputShapes"; do
+              if ! strings matlab/siamex.mex | grep -qF "$needle"; then
+                  echo "FAIL: '$needle' not found in matlab/siamex.mex" >&2
+                  exit 1
+              fi
+          done
+          echo "OK: CoreML-EP probe strings present in matlab/siamex.mex"
 
   python-smoke:
     runs-on: ubuntu-22.04
