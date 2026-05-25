@@ -115,29 +115,19 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
-      - name: Fetch fold_0 weight (fixed-shape, CI-only)
-        # CI deliberately uses a FIXED-shape (256,256,192) ONNX export
-        # rather than the dynamic-shape build that weights.cpp's
-        # default_weights_url() serves. The dynamic-shape build had
-        # measurable but small perf overhead on huo (~1.23x slower) yet
-        # on the GHA 16 GB runner specifically the transient memory
-        # peaks pushed past the cgroup limit even with --no-arena;
-        # SIGTERM mid-inference. The fixed-shape build matches what
-        # CI was using at the last green 8-tile / 222 s run (commit
-        # c006293) and stays well under the runner's memory ceiling.
-        # If you need to test --lowmem / dynamic-patch behavior, do
-        # it from a local checkout or update this URL to the
-        # dynamic-shape upload.
+      - name: Fetch fold_0 weight
+        # Pulls the same dynamic-shape ONNX export that weights.cpp's
+        # default_weights_url() serves to end users, so CI exercises
+        # the canonical inference path (variable patch sizes via
+        # dynamic_axes={D,H,W}). The 14 GB GHA cgroup can't fit the
+        # default 256x256x192 patch with the dynamic-shape memory
+        # profile, so the run step below uses --lowmem to drop the
+        # patch to 192x192x128 (27 tiles).
         run: |
-          URL='https://neurojson.org/siamize/weights/siam_v03/fold_0_fp16.onnx.7z'
+          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz'
           mkdir -p models
-          if ! command -v 7z >/dev/null; then
-              sudo apt-get update -qq
-              sudo apt-get install -y --no-install-recommends p7zip-full
-          fi
-          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
-          7z e -y -omodels models/fold_0_fp16.onnx.7z >/dev/null
-          rm -f models/fold_0_fp16.onnx.7z
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
+          gunzip -f models/fold_0_fp16.onnx.gz
           ls -la models/
 
       - name: Configure (CUDA EP)
@@ -152,14 +142,14 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. With the fixed-shape ONNX fetched above, default
-        # 256x256x192 + --no-arena fits comfortably on the runner
-        # (the c006293 historical baseline was 222 s on this exact
-        # shape). 8 tiles, ~10 GB peak RSS, end-to-end completes.
+        # CPU. The dynamic-shape ONNX + 14 GB GHA cgroup needs --lowmem
+        # to drop the patch from 256x256x192 to 192x192x128 (27 tiles
+        # rather than 8); --no-arena is implied by the --lowmem
+        # preset. End-to-end completes in ~10 min.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
-              --no-arena \
+              --lowmem \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
