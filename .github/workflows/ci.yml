@@ -115,12 +115,30 @@ jobs:
           ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
-      - name: Fetch fold_0 weight
+      - name: Fetch fold_0 weight (fixed-shape, CI-only)
+        # CI deliberately uses a FIXED-shape (256,256,192) ONNX export
+        # rather than the dynamic-shape build that weights.cpp's
+        # default_weights_url() serves. The dynamic-shape build had
+        # measurable but small perf overhead on huo (~1.23x slower) yet
+        # on the GHA 16 GB runner specifically the transient memory
+        # peaks pushed past the cgroup limit even with --no-arena;
+        # SIGTERM mid-inference. The fixed-shape build matches what
+        # CI was using at the last green 8-tile / 222 s run (commit
+        # c006293) and stays well under the runner's memory ceiling.
+        # If you need to test --lowmem / dynamic-patch behavior, do
+        # it from a local checkout or update this URL to the
+        # dynamic-shape upload.
         run: |
-          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz'
+          URL='https://neurojson.org/siamize/weights/siam_v03/fold_0_fp16.onnx.7z'
           mkdir -p models
-          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
-          gunzip -f models/fold_0_fp16.onnx.gz
+          if ! command -v 7z >/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends p7zip-full
+          fi
+          curl -fsSL "$URL" -o models/fold_0_fp16.onnx.7z
+          7z e -y -omodels models/fold_0_fp16.onnx.7z >/dev/null
+          rm -f models/fold_0_fp16.onnx.7z
+          ls -la models/
 
       - name: Configure (CUDA EP)
         run: |
@@ -134,27 +152,14 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. Memory and shape constraints stack up here:
-        #
-        #  - Runner cgroup: ~14 GB available to user processes.
-        #  - Default 256x256x192 patch with arena off peaks ~13 GB
-        #    (newer ORT + dynamic-shape ONNX). SIGTERM at tile 2.
-        #  - Intermediate patches like 224x224x192 are divisible by
-        #    32 but break the network's skip-connection topology
-        #    deep in the encoder (224 = 7*32 halves to 7->3->1
-        #    whereas 256 = 8*32 halves to 8->4->2; the decoder
-        #    upsamples don't match the 7*32 path, producing a
-        #    "broadcast 3 by 4" Add-node failure).
-        #
-        # Net: the only shapes that satisfy BOTH divisibility AND
-        # the network's clean-halving requirement are 256 and 192
-        # in each axis. 256x256x192 OOMs; 192x192x128 (--lowmem)
-        # fits at ~6 GB peak. So we accept the 27-tile / ~600 s
-        # wall as the price of an end-to-end CI test.
+        # CPU. With the fixed-shape ONNX fetched above, default
+        # 256x256x192 + --no-arena fits comfortably on the runner
+        # (the c006293 historical baseline was 222 s on this exact
+        # shape). 8 tiles, ~10 GB peak RSS, end-to-end completes.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
-              --lowmem \
+              --no-arena \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
