@@ -177,7 +177,11 @@ if(OpenMP_CXX_FOUND)
         if(GOMP_STATIC_LIB)
             message(STATUS "libgomp static: ${GOMP_STATIC_LIB}")
             target_compile_options(siamize PRIVATE ${_omp_compile_opts})
-            target_link_libraries(siamize PRIVATE ${GOMP_STATIC_LIB} pthread)
+            # libgomp.a's target.o has unresolved refs to dlopen/dlclose
+            # (it dlopens plugin-host runtimes lazily). Modern ld won't
+            # add transitive DSO deps automatically, so we list libdl
+            # explicitly here. pthread is also a hard dep of libgomp.
+            target_link_libraries(siamize PRIVATE ${GOMP_STATIC_LIB} pthread dl)
             set(_omp_static_linked TRUE)
         else()
             message(WARNING "libgomp.a not found; OpenMP will link dynamically.")
