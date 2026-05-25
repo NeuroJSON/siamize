@@ -87,6 +87,54 @@ using siam::Volume;
 
 namespace {
 
+/*
+ * SIAM v0.3 (18 classes) -> SPM12 (6 TPM channels) bin mapping.
+ *
+ *   SPM output order (matches spm12/tpm/TPM.nii):
+ *     0 = GM, 1 = WM, 2 = CSF, 3 = Bone, 4 = Soft tissue, 5 = Air
+ *
+ *   SIAM v0.3 label dictionary (from label_siamV03_.json):
+ *      0 background, 1 GM, 2 WM, 3 CSF, 4 CSFv, 5 cerGM, 6 Thal,
+ *      7 Pal, 8 Put, 9 Caud, 10 Accu, 11 Amyg, 12 Hippo, 13 Dura,
+ *      14 vascular, 15 Skull, 16 Head, 17 Anomalies.
+ *
+ *   Deep gray nuclei (Thal/Pal/Put/Caud/Accu/Amyg/Hippo) all fold
+ *   into GM (SPM's gray-matter TPM lumps cortical + subcortical
+ *   gray; SIAM split them for finer anatomy). Anomalies (17) fold
+ *   into GM as the closest tissue match for intra-parenchymal
+ *   lesions. All 18 classes map to one of the 6 bins, so the SIAM
+ *   softmax's per-voxel sum of 1.0 is preserved through the merge --
+ *   no renormalization needed.
+ */
+static constexpr int8_t SIAM18_TO_SPM6[18] = {
+    5,   // 0  background -> Air
+    0,   // 1  GM         -> GM
+    1,   // 2  WM         -> WM
+    2,   // 3  CSF        -> CSF
+    2,   // 4  CSFv       -> CSF
+    0,   // 5  cerGM      -> GM
+    0,   // 6  Thal       -> GM
+    0,   // 7  Pal        -> GM
+    0,   // 8  Put        -> GM
+    0,   // 9  Caud       -> GM
+    0,   // 10 Accu       -> GM
+    0,   // 11 Amyg       -> GM
+    0,   // 12 Hippo      -> GM
+    3,   // 13 Dura       -> Bone
+    4,   // 14 vascular   -> Soft
+    3,   // 15 Skull      -> Bone
+    4,   // 16 Head       -> Soft
+    0,   // 17 Anomalies  -> GM
+};
+static constexpr int64_t SPM6_NUM_CLASSES = 6;
+static constexpr int8_t  SPM6_AIR_CHANNEL = 5;   // background equivalent in SPM order
+
+enum class ClassSet {
+    CUSTOM_N,   // -C N: pass through N output channels (default mode)
+    SPM,        // --classes spm: SIAM 18 -> SPM 6 merge
+};
+
+
 /*******************************************************************************/
 /*! \fn    std::vector<std::string> split_csv(const std::string& s)
     \brief Split a comma-separated string into a list of non-empty tokens
@@ -356,7 +404,14 @@ void usage(const char* exe) {
                  "                      working memory scales with this size cubed -- on tight\n"
                  "                      RAM (e.g. 32 GB hosts) try 192x192x128 or 128x128x96.\n"
                  "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
-                 "  -C, --classes N     number of output classes, default 18 (SIAM v0.3).\n"
+                 "  -C, --classes N|spm number of output classes (default 18 = SIAM v0.3).\n"
+                 "                      Pass an integer to drive a non-SIAM model with N\n"
+                 "                      output channels. Pass 'spm' to remap SIAM v0.3's\n"
+                 "                      18 classes into SPM12's 6 TPM channels (GM, WM,\n"
+                 "                      CSF, Bone, Soft, Air). Works with both labelmap\n"
+                 "                      (argmax -> 0..5 in that order) and --tpm output\n"
+                 "                      (4D float32 in spm12/tpm/TPM.nii channel order).\n"
+                 "                      Anomalies (SIAM class 17) fold into GM.\n"
                  "  -v, --verbose       print progress (default ON; flag kept for backward\n"
                  "                      compat with older scripts -- already-verbose runs).\n"
                  "  -q, --quiet         suppress progress output. Warnings ([warn] ...) and\n"
@@ -448,7 +503,9 @@ int main(int argc, char** argv) {
     bool verbose = true;
     std::array<int64_t, 3> patch = {256, 256, 192};
     float target_spacing = 0.75f;
-    int64_t num_classes = 18;
+    int64_t num_classes     = 18;   // inference output channels (network's logits)
+    int64_t num_classes_out = 18;   // saved output channels (may differ for --classes spm)
+    ClassSet class_set = ClassSet::CUSTOM_N;
     siam::EngineTuning engine_tuning;
 
     // Per-flag "user explicitly set this" trackers. Used by the post-
@@ -502,7 +559,24 @@ int main(int argc, char** argv) {
         } else if (a == "-u" || a == "--spacing") {
             target_spacing = std::stof(need());
         } else if (a == "-C" || a == "--classes") {
-            num_classes = std::stoll(need());
+            std::string s = need();
+
+            if (s == "spm" || s == "SPM") {
+                class_set       = ClassSet::SPM;
+                num_classes     = 18;                  // still infer all 18 SIAM channels
+                num_classes_out = SPM6_NUM_CLASSES;    // merge to 6 SPM bins on output
+            } else {
+                try {
+                    num_classes = std::stoll(s);
+                } catch (...) {
+                    std::fprintf(stderr,
+                                 "--classes must be a positive integer or 'spm' (got '%s')\n",
+                                 s.c_str());
+                    return 2;
+                }
+
+                num_classes_out = num_classes;
+            }
         } else if (a == "-P" || a == "--patch") {
             std::string p = need();
             char x;
@@ -778,14 +852,15 @@ int main(int argc, char** argv) {
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s",
+                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),
                   tpm_mode ? "  --tpm" : "",
                   upsample_mode ? "  --upsample" : "",
                   engine_tuning.cpu_arena ? "" : "  --no-arena",
-                  lowmem_mode ? "  --lowmem" : "");
+                  lowmem_mode ? "  --lowmem" : "",
+                  class_set == ClassSet::SPM ? "  --classes spm" : "");
 
     // Pre-flight memory check: warn if available RAM is below the
     // expected peak for the current config. We can't trap SIGKILL
@@ -1023,6 +1098,10 @@ int main(int argc, char** argv) {
                               num_classes);
             }
 
+            if (class_set == ClassSet::SPM) {
+                siam::log_cont("merge -> SPM6 (GM, WM, CSF, Bone, Soft, Air)");
+            }
+
             const float inv_T = 1.0f / tpm_temperature;
             const int64_t N_net = lzN * lyN * lxN;
 
@@ -1032,6 +1111,18 @@ int main(int argc, char** argv) {
             // 64-core box it tops out around the 10-12x mark before
             // memory bandwidth saturates (the channel-major layout
             // forces num_classes scattered loads per voxel).
+            //
+            // --classes spm: after the standard 18-channel softmax,
+            // merge into SPM12's 6 TPM bins in-place. We gather all
+            // 18 probabilities into a stack-local spm[6] scratch
+            // first, THEN overwrite logits channels 0..5 -- doing it
+            // in two passes avoids the channel-aliasing trap where
+            // e.g. SPM bin 0 (GM) reads logits[5] but SPM bin 5 (Air)
+            // already overwrote logits[5] with logits[0]'s prior
+            // value. Channels 6..17 of logits become stale after the
+            // merge; the bbox-copy loop below only iterates over
+            // num_classes_out (6 in SPM mode) so they're never read.
+            const bool spm = (class_set == ClassSet::SPM);
             #pragma omp parallel for schedule(static)
             for (int64_t i = 0; i < N_net; ++i) {
                 float m = logits.channel_ptr(0)[i] * inv_T;
@@ -1057,13 +1148,30 @@ int main(int argc, char** argv) {
                 for (int64_t c = 0; c < num_classes; ++c) {
                     logits.channel_ptr(c)[i] *= invs;
                 }
+
+                if (spm) {
+                    float spm_bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                    for (int64_t c = 0; c < num_classes; ++c) {
+                        spm_bin[SIAM18_TO_SPM6[c]] += logits.channel_ptr(c)[i];
+                    }
+
+                    for (int64_t b = 0; b < SPM6_NUM_CLASSES; ++b) {
+                        logits.channel_ptr(b)[i] = spm_bin[b];
+                    }
+                }
             }
 
-            std::vector<float> tpm_up(static_cast<size_t>(num_classes) * voxel_count_up, 0.0f);
-            // background channel (c=0) starts at 1.0 everywhere
-            std::fill_n(tpm_up.data(), voxel_count_up, 1.0f);
+            std::vector<float> tpm_up(static_cast<size_t>(num_classes_out) * voxel_count_up, 0.0f);
+            // Background channel starts at 1.0 outside the bbox so
+            // voxels we never write keep p(background)=1, p(other)=0.
+            // SPM ordering puts Air (background) at index 5; the
+            // default 18-class ordering keeps background at index 0.
+            const int64_t bg_channel = (class_set == ClassSet::SPM) ? SPM6_AIR_CHANNEL : 0;
+            std::fill_n(tpm_up.data() + bg_channel * voxel_count_up,
+                        voxel_count_up, 1.0f);
 
-            for (int64_t c = 0; c < num_classes; ++c) {
+            for (int64_t c = 0; c < num_classes_out; ++c) {
                 const float* src = logits.channel_ptr(c);
                 float* dst_chan = tpm_up.data() + c * voxel_count_up;
 
@@ -1084,35 +1192,82 @@ int main(int argc, char** argv) {
 
             if (out_format == "nii") {
                 siam::save_nifti_tpm(output_path, img_up,
-                                     tpm_up.data(), num_classes);
+                                     tpm_up.data(), num_classes_out);
             } else {
                 siam::save_jnifti_tpm(output_path, img_up,
-                                      tpm_up.data(), num_classes, out_format);
+                                      tpm_up.data(), num_classes_out, out_format);
             }
         } else {
             // ---- Labels branch (upsample): argmax over logits at
             //      network resolution, then pad into a full canonical
-            //      buffer (zeros outside the bbox = background class).
-            std::vector<uint8_t> labels_up(static_cast<size_t>(voxel_count_up), 0);
+            //      buffer (zeros outside the bbox = background class
+            //      = label 0 = Air in SPM order, also background).
+            //
+            // --classes spm: argmax-on-logits is invalid because
+            // merging probabilities across SIAM bins doesn't commute
+            // with argmax on raw logits (e.g. if Thal(6) has the
+            // highest logit but cortical GM(1) + cerGM(5) + Hippo(12)
+            // jointly sum to higher GM probability, the right answer
+            // is GM). Compute per-bin score = sum_{c in bin} exp(logit_c
+            // - max_logit) and argmax that. Skip the divide-by-Z step
+            // since argmax is invariant under per-voxel scaling.
+            // Outside-bbox default: 0 in the standard 18-class ordering
+            // (label 0 = background), but in SPM ordering label 0 = GM,
+            // so outside-bbox voxels need label 5 (Air) instead.
+            const uint8_t bg_label =
+                (class_set == ClassSet::SPM)
+                ? static_cast<uint8_t>(SPM6_AIR_CHANNEL)
+                : static_cast<uint8_t>(0);
+            std::vector<uint8_t> labels_up(static_cast<size_t>(voxel_count_up), bg_label);
+            const bool spm = (class_set == ClassSet::SPM);
 
+            #pragma omp parallel for schedule(static) collapse(2)
             for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
-                const int64_t lz = z - bbox_lo_up[0];
-
                 for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
+                    const int64_t lz = z - bbox_lo_up[0];
                     const int64_t ly = y - bbox_lo_up[1];
 
                     for (int64_t x = bbox_lo_up[2]; x < bbox_hi_up[2]; ++x) {
                         const int64_t lx = x - bbox_lo_up[2];
                         const int64_t i_net = lz * lyN * lxN + ly * lxN + lx;
                         int best = 0;
-                        float bestv = logits.channel_ptr(0)[i_net];
 
-                        for (int64_t c = 1; c < num_classes; ++c) {
-                            float v = logits.channel_ptr(c)[i_net];
+                        if (spm) {
+                            float M = logits.channel_ptr(0)[i_net];
 
-                            if (v > bestv) {
-                                bestv = v;
-                                best = static_cast<int>(c);
+                            for (int64_t c = 1; c < num_classes; ++c) {
+                                float v = logits.channel_ptr(c)[i_net];
+
+                                if (v > M) {
+                                    M = v;
+                                }
+                            }
+
+                            float bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                            for (int64_t c = 0; c < num_classes; ++c) {
+                                bin[SIAM18_TO_SPM6[c]] +=
+                                    std::exp(logits.channel_ptr(c)[i_net] - M);
+                            }
+
+                            float bestv = bin[0];
+
+                            for (int64_t b = 1; b < SPM6_NUM_CLASSES; ++b) {
+                                if (bin[b] > bestv) {
+                                    bestv = bin[b];
+                                    best = static_cast<int>(b);
+                                }
+                            }
+                        } else {
+                            float bestv = logits.channel_ptr(0)[i_net];
+
+                            for (int64_t c = 1; c < num_classes; ++c) {
+                                float v = logits.channel_ptr(c)[i_net];
+
+                                if (v > bestv) {
+                                    bestv = v;
+                                    best = static_cast<int>(c);
+                                }
                             }
                         }
 
@@ -1175,11 +1330,17 @@ int main(int argc, char** argv) {
                           num_classes);
         }
 
+        if (class_set == ClassSet::SPM) {
+            siam::log_cont("merge -> SPM6 (GM, WM, CSF, Bone, Soft, Air)");
+        }
+
         const float inv_T = 1.0f / tpm_temperature;
         const int64_t N = cZ * cY * cX;
 
-        // See the parallel-softmax comment in the upsample branch above;
-        // the loop body is identical and same parallelization applies.
+        // See the parallel-softmax + SPM merge comments in the
+        // upsample branch above; the loop body is identical and
+        // same parallelization + merge logic applies.
+        const bool spm = (class_set == ClassSet::SPM);
         #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < N; ++i) {
             // numerically stable softmax over the C channel logits
@@ -1206,14 +1367,30 @@ int main(int argc, char** argv) {
             for (int64_t c = 0; c < num_classes; ++c) {
                 logits_back.channel_ptr(c)[i] *= invs;
             }
+
+            if (spm) {
+                float spm_bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    spm_bin[SIAM18_TO_SPM6[c]] += logits_back.channel_ptr(c)[i];
+                }
+
+                for (int64_t b = 0; b < SPM6_NUM_CLASSES; ++b) {
+                    logits_back.channel_ptr(b)[i] = spm_bin[b];
+                }
+            }
         }
 
         // Un-crop to canonical shape. Outside the bbox we want
-        // p(background)=1 and p(other)=0.
-        std::vector<float> tpm_canon(static_cast<size_t>(num_classes) * Zc * Yc * Xc, 0.0f);
-        std::fill_n(tpm_canon.data(), Zc * Yc * Xc, 1.0f);  // background = 1 everywhere
+        // p(background)=1 and p(other)=0. SPM ordering puts Air
+        // (background) at channel 5; default 18-class ordering keeps
+        // background at channel 0.
+        std::vector<float> tpm_canon(static_cast<size_t>(num_classes_out) * Zc * Yc * Xc, 0.0f);
+        const int64_t bg_channel_canon = (class_set == ClassSet::SPM) ? SPM6_AIR_CHANNEL : 0;
+        std::fill_n(tpm_canon.data() + bg_channel_canon * Zc * Yc * Xc,
+                    Zc * Yc * Xc, 1.0f);
 
-        for (int64_t c = 0; c < num_classes; ++c) {
+        for (int64_t c = 0; c < num_classes_out; ++c) {
             const float* src = logits_back.channel_ptr(c);
             float* dst_chan = tpm_canon.data() + c * Zc * Yc * Xc;
 
@@ -1231,28 +1408,63 @@ int main(int argc, char** argv) {
 
         logits_back = LogitsVolume{};
         if (out_format == "nii") {
-            siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes);
+            siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out);
         } else {
             siam::save_jnifti_tpm(output_path, img, tpm_canon.data(),
-                                  num_classes, out_format);
+                                  num_classes_out, out_format);
         }
     } else {
         // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------
+        // --classes spm: see the SPM-aware labels path in the upsample
+        // branch above for why argmax-on-logits is insufficient and we
+        // use exp-sum-per-bin (skip divide-by-Z since argmax is scale
+        // invariant).
         std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
+        const bool spm_labels = (class_set == ClassSet::SPM);
 
+        #pragma omp parallel for schedule(static)
         for (int64_t z = 0; z < cZ; ++z) {
             for (int64_t y = 0; y < cY; ++y) {
                 for (int64_t x = 0; x < cX; ++x) {
                     int64_t i = z * cY * cX + y * cX + x;
                     int best = 0;
-                    float bestv = logits_back.channel_ptr(0)[i];
 
-                    for (int64_t c = 1; c < num_classes; ++c) {
-                        float v = logits_back.channel_ptr(c)[i];
+                    if (spm_labels) {
+                        float M = logits_back.channel_ptr(0)[i];
 
-                        if (v > bestv) {
-                            bestv = v;
-                            best = static_cast<int>(c);
+                        for (int64_t c = 1; c < num_classes; ++c) {
+                            float v = logits_back.channel_ptr(c)[i];
+
+                            if (v > M) {
+                                M = v;
+                            }
+                        }
+
+                        float bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
+                        for (int64_t c = 0; c < num_classes; ++c) {
+                            bin[SIAM18_TO_SPM6[c]] +=
+                                std::exp(logits_back.channel_ptr(c)[i] - M);
+                        }
+
+                        float bestv = bin[0];
+
+                        for (int64_t b = 1; b < SPM6_NUM_CLASSES; ++b) {
+                            if (bin[b] > bestv) {
+                                bestv = bin[b];
+                                best = static_cast<int>(b);
+                            }
+                        }
+                    } else {
+                        float bestv = logits_back.channel_ptr(0)[i];
+
+                        for (int64_t c = 1; c < num_classes; ++c) {
+                            float v = logits_back.channel_ptr(c)[i];
+
+                            if (v > bestv) {
+                                bestv = v;
+                                best = static_cast<int>(c);
+                            }
                         }
                     }
 
@@ -1263,7 +1475,13 @@ int main(int argc, char** argv) {
 
         logits_back = LogitsVolume{};
 
-        std::vector<uint8_t> labels_canon(static_cast<size_t>(Zc) * Yc * Xc, 0);
+        // See note in upsample labels branch: SPM ordering puts Air
+        // at label 5, so outside-bbox needs label 5 (not 0 = GM).
+        const uint8_t bg_label_canon =
+            (class_set == ClassSet::SPM)
+            ? static_cast<uint8_t>(SPM6_AIR_CHANNEL)
+            : static_cast<uint8_t>(0);
+        std::vector<uint8_t> labels_canon(static_cast<size_t>(Zc) * Yc * Xc, bg_label_canon);
 
         for (int64_t z = 0; z < cZ; ++z) {
             for (int64_t y = 0; y < cY; ++y) {
