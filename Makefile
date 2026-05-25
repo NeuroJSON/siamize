@@ -46,6 +46,7 @@ ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
+        cudaoct cudamex \
         ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
         doc doc-clean
 
@@ -105,6 +106,24 @@ mex-matlab: ort-cpu
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DSIAMIZE_BUILD_MATLAB_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
 	@echo "[make mex-matlab] built $(BUILD_DIR)/siamex.mex<a64|maca64|w64>"
+
+# CUDA-enabled MEX variants: same as mex-octave / mex-matlab but
+# fetch the GPU-flavor ORT (libonnxruntime_providers_cuda.so) and
+# pass -DSIAMIZE_GPU=cuda so sliding.cpp's CUDA EP probe is compiled
+# in. At MATLAB / Octave runtime the user still has to set
+# LD_LIBRARY_PATH to include CUDA + cuDNN (same recipe as the CLI;
+# see README "Required shared libraries by exact filename").
+cudaoct: ort-gpu
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_GPU=cuda -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make cudaoct] built $(BUILD_DIR)/siamex.mex (CUDA-enabled Octave MEX)"
+
+cudamex: ort-gpu
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_GPU=cuda -DSIAMIZE_BUILD_MATLAB_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make cudamex] built $(BUILD_DIR)/siamex.mex<a64|maca64|w64> (CUDA-enabled MATLAB MEX)"
 
 mex-test:
 	octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"

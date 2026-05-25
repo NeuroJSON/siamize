@@ -303,6 +303,17 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
         )
         target_include_directories(siamize_mex PRIVATE ${_siamize_mex_includes})
         target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
+        # Propagate SIAMIZE_HAS_CUDA / SIAMIZE_HAS_TENSORRT to the MEX
+        # exactly as we do for the CLI -- sliding.cpp's EP probe blocks
+        # are gated on these and #ifdef'd out otherwise. Combined with
+        # ort-gpu (fetched by `make cudamex`) this gives the MATLAB MEX
+        # the same -c cuda / -c tensorrt paths as siamize(1).
+        if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_CUDA)
+        endif()
+        if(SIAMIZE_GPU STREQUAL "tensorrt")
+            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_TENSORRT)
+        endif()
         # FindMatlab.cmake's matlab_add_mex() uses target_link_libraries
         # in the plain (non-keyword) form. CMake forbids mixing plain and
         # keyword signatures on the same target, so we follow suit here.
@@ -422,10 +433,21 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         # uses MATLAB_MEX_FILE to route through mexPrintf instead of
         # stderr; without it the Octave MEX would silently print to
         # the launching terminal rather than the command window.
+        # Same SIAMIZE_HAS_CUDA / SIAMIZE_HAS_TENSORRT propagation as the
+        # MATLAB MEX target above, but via CXXFLAGS since mkoctfile does
+        # not honor target_compile_definitions.
+        set(_oct_cxxflags "-std=c++17 -O2 -fPIC -DMATLAB_MEX_FILE")
+        if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_CUDA")
+        endif()
+        if(SIAMIZE_GPU STREQUAL "tensorrt")
+            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_TENSORRT")
+        endif()
+
         add_custom_command(
             OUTPUT ${_oct_out}
             COMMAND ${CMAKE_COMMAND} -E env
-                "CXXFLAGS=-std=c++17 -O2 -fPIC -DMATLAB_MEX_FILE"
+                "CXXFLAGS=${_oct_cxxflags}"
                 "LDFLAGS=${_oct_ld}"
                 ${MKOCTFILE} --mex
                 ${_oct_inc}
