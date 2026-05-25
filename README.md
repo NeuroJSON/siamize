@@ -171,6 +171,56 @@ and cuDNN's license forbids third-party redistribution.
 | `libcudnn` (cuDNN 9 for ORT 1.26) | ❌ | NVIDIA cuDNN 9 installer, or `pip install "nvidia-cudnn-cu12==9.*"` |
 | `libcufft`, `libcurand`, `cuda_nvrtc`, `nvjitlink` | ❌ | CUDA Toolkit, or matching `nvidia-*-cu12` pip wheels |
 
+##### Required shared libraries by exact filename
+
+ORT 1.26's CUDA EP plugin (`libonnxruntime_providers_cuda.so`) is
+dlopen'd at runtime. It in turn pulls in the following dependencies
+*at the exact major version*:
+
+| Library (Linux) | Library (Windows) | Provided by |
+|---|---|---|
+| `libcudart.so.12` | `cudart64_12.dll` | CUDA 12 runtime |
+| `libcublas.so.12` | `cublas64_12.dll` | CUDA 12 |
+| `libcublasLt.so.12` | `cublasLt64_12.dll` | CUDA 12 |
+| `libcufft.so.11` | `cufft64_11.dll` | CUDA 12 (cuFFT is independently versioned) |
+| `libcurand.so.10` | `curand64_10.dll` | CUDA 12 (cuRAND ditto) |
+| `libcudnn.so.9` | `cudnn64_9.dll` | cuDNN 9 |
+| `libcudnn_ops.so.9` | `cudnn_ops64_9.dll` | cuDNN 9 |
+| `libcudnn_cnn.so.9` | `cudnn_cnn64_9.dll` | cuDNN 9 |
+| `libcudnn_engines_precompiled.so.9` | `cudnn_engines_precompiled64_9.dll` | cuDNN 9 |
+| `libnvrtc.so.12` | `nvrtc64_120_0.dll` | CUDA 12 nvrtc |
+| `libnvJitLink.so.12` | `nvJitLink_120_0.dll` | CUDA 12 nvjitlink |
+
+If any one of these is missing or its loader path is wrong, siamize's
+`-c auto` probe falls back to CPU and the `[warn] ORT:` line names
+the *first* missing file — e.g.:
+
+```
+[warn]     ORT: Failed to load library .../libonnxruntime_providers_cuda.so
+           with error: libcublasLt.so.12: cannot open shared object file
+[cuda]     unavailable (...); using CPU
+```
+
+Means cuBLAS isn't on `LD_LIBRARY_PATH`. The CUDA EP plugin loaded;
+the *transitive* cuBLAS dependency didn't. Add cuBLAS's directory to
+`LD_LIBRARY_PATH` (per the pip-wheels or `CUDA_HOME` one-liners
+above) and re-run. The probe will then surface the *next* missing
+library, if any — fix iteratively until `-c auto` reports
+`[cuda]     enabled (gpuid=0)`.
+
+To preflight before running siamize, `ldd` the CUDA EP plugin:
+
+```bash
+ldd third_party/onnxruntime/lib/libonnxruntime_providers_cuda.so | grep -E "not found|=>"
+# every line should resolve; any "not found" entry names a missing lib
+```
+
+On Windows, use `dumpbin /dependents` (Visual Studio Developer Prompt):
+
+```cmd
+dumpbin /dependents third_party\onnxruntime\lib\onnxruntime_providers_cuda.dll
+```
+
 ##### Windows: pointing siamize.exe at the CUDA runtime DLLs
 
 On Windows the loader uses `PATH` (not `LD_LIBRARY_PATH`) to find DLLs.
