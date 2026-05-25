@@ -73,29 +73,32 @@ copy_trt_eps() {
 }
 
 copy_mex() {
+    # MEX outputs land in matlab/ next to siamize.m since 869ddc5
+    # (CMakeLists's RUNTIME/LIBRARY_OUTPUT_DIRECTORY override). Pick
+    # whichever extension the current build produced.
     case "${os}" in
         linux)
-            # Octave produces siamex.mex, MATLAB produces siamex.mexa64;
-            # ship whichever the current build emitted.
-            if   [ -f build/siamex.mexa64 ]; then cp build/siamex.mexa64 "${stagedir}/"
-            elif [ -f build/siamex.mex   ]; then cp build/siamex.mex   "${stagedir}/"
-            else echo "[package] no MEX file found in build/"; exit 1
+            if   [ -f matlab/siamex.mexa64 ]; then cp matlab/siamex.mexa64 "${stagedir}/"
+            elif [ -f matlab/siamex.mex   ]; then cp matlab/siamex.mex   "${stagedir}/"
+            else echo "[package] no MEX file found in matlab/"; exit 1
             fi
             cp "${ort_lib_dir}/libonnxruntime.so.1.26.0" \
                "${stagedir}/libonnxruntime.so.1"
             ;;
         macos)
-            if   [ -f build/siamex.mexmaca64 ]; then cp build/siamex.mexmaca64 "${stagedir}/"
-            elif [ -f build/siamex.mexmaci64 ]; then cp build/siamex.mexmaci64 "${stagedir}/"
-            elif [ -f build/siamex.mex       ]; then cp build/siamex.mex       "${stagedir}/"
-            else echo "[package] no MEX file found in build/"; exit 1
+            if   [ -f matlab/siamex.mexmaca64 ]; then cp matlab/siamex.mexmaca64 "${stagedir}/"
+            elif [ -f matlab/siamex.mexmaci64 ]; then cp matlab/siamex.mexmaci64 "${stagedir}/"
+            elif [ -f matlab/siamex.mex       ]; then cp matlab/siamex.mex       "${stagedir}/"
+            else echo "[package] no MEX file found in matlab/"; exit 1
             fi
             cp "${ort_lib_dir}/libonnxruntime.1.26.0.dylib" \
                "${stagedir}/libonnxruntime.1.dylib"
             ;;
         windows)
-            cp build/Release/siamex.mexw64 "${stagedir}/"
-            cp build/Release/onnxruntime.dll "${stagedir}/"
+            cp matlab/siamex.mexw64 "${stagedir}/"
+            # The MEX POST_BUILD step copies onnxruntime.dll next to the
+            # .mexw64, so it lives in matlab/ now (not build/Release/).
+            cp matlab/onnxruntime.dll "${stagedir}/"
             ;;
     esac
     cp matlab/siamize.m "${stagedir}/"
