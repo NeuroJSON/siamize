@@ -233,15 +233,22 @@ std::string default_cache_dir() {
     \brief Resolve the NeuroJSON URL prefix for auto-fetched weights
     \return  URL prefix (env-overridable; see weights.h)
 */
-std::string default_weights_url() {
+std::string default_weights_url(bool fixshape) {
     const char* env = std::getenv("SIAMIZE_WEIGHTS_BASE_URL");
 
     if (env && *env) {
         return env;
     }
 
-    return "https://neurojson.org/io/stat.cgi?action=get&db=siam_v03"
-           "&doc=dynshape&size=95360591&file=";
+    // doc=dynshape: ONNX with dynamic_axes={D,H,W} (default). Works with
+    // any patch size; preferred for CUDA / TensorRT / CPU.
+    // doc=fixshape: ONNX with shape locked to 256x256x192. Required for
+    // the CoreML EP's RequireStaticInputShapes=1 fast path (much better
+    // op fusion on Apple Silicon).
+    const char* doc = fixshape ? "fixshape" : "dynshape";
+    return std::string(
+               "https://neurojson.org/io/stat.cgi?action=get&db=siam_v03"
+               "&doc=") + doc + "&file=";
 }
 
 /*******************************************************************************/
@@ -260,7 +267,8 @@ std::string default_weights_url() {
     \return          absolute path to the resolved .onnx file
     \throws std::runtime_error if none of the lookup stages produces a file
 */
-std::string resolve_model_path(const std::string& spec, bool verbose) {
+std::string resolve_model_path(const std::string& spec, bool verbose,
+                               bool fixshape) {
     namespace fs = std::filesystem;
 
     if (spec.empty()) {
@@ -274,8 +282,15 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
         return spec;
     }
 
-    // 2. Look up <cache_dir>/<basename>.
+    // 2. Look up <cache_dir>/<basename>. Fixshape weights live under
+    //    <cache_dir>/fixshape/ so they don't collide with the default
+    //    dynamic-shape weights (same basename fold_0_fp16.onnx).
     fs::path cache = default_cache_dir();
+
+    if (fixshape) {
+        cache /= "fixshape";
+    }
+
     fs::path base = fs::path(spec).filename();
     fs::path cached = cache / base;
 
@@ -289,7 +304,7 @@ std::string resolve_model_path(const std::string& spec, bool verbose) {
     //    first; decompress via zmat's bundled miniz (no external tool).
     //    Fall back to the raw uncompressed URL if the .gz form 404s.
     fs::create_directories(cache, ec);
-    std::string url_base = default_weights_url();
+    std::string url_base = default_weights_url(fixshape);
     std::string verbose_curl = verbose ? "-#" : "-s";
 
     // url_base is expected to end with the parameter that takes the

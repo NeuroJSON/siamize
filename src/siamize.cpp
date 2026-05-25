@@ -304,10 +304,20 @@ void usage(const char* exe) {
                  "                      (default $HOME/.cache/siamize/models/) and auto-downloaded\n"
                  "                      from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
-                 "                      auto tries CUDA (if compiled in) then falls back to CPU.\n"
+                 "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
+                 "                      coreml uses Apple Silicon CPU + Metal GPU + ANE via the ORT\n"
+                 "                      CoreML EP (macOS only; requires -DSIAMIZE_GPU=coreml).\n"
                  "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
                  "                         Engines are GPU- and TRT-version-specific; cached on first run.\n"
+                 "      --coreml-units U   CoreML compute target: all (default; CPU+GPU+ANE, Core ML\n"
+                 "                         routes per op), cpune (CPU + Neural Engine only),\n"
+                 "                         cpugpu (CPU + Metal GPU only), cpu (CPU only, debug).\n"
+                 "      --coreml-cache-dir P  CoreML model-compile cache (default ~/.cache/siamize/coreml).\n"
+                 "                         First-run compile of ONNX -> .mlmodelc takes ~10-30 s; cached after.\n"
+                 "      --coreml-static-shapes 0|1  RequireStaticInputShapes for CoreML EP. Default 1;\n"
+                 "                         pair with the fixed-shape ONNX bundle for best fusion. Set 0\n"
+                 "                         when using the dynamic-shape ONNX (e.g. with --lowmem).\n"
                  "      --cudnn-max-workspace 0|1  CUDA EP: 0 picks small-workspace cuDNN algos.\n"
                  "                         Use 0 on tight-VRAM GPUs (e.g. 8 GB laptop cards) that\n"
                  "                         OOM at the default workspace ceiling. Default 1 (ORT default).\n"
@@ -551,14 +561,36 @@ int main(int argc, char** argv) {
             }
 
             if (device != "auto" && device != "cpu" && device != "cuda"
-                    && device != "tensorrt") {
+                    && device != "tensorrt" && device != "coreml") {
                 std::fprintf(stderr,
-                             "-c/--compute must be auto|cpu|cuda|tensorrt (got '%s')\n",
+                             "-c/--compute must be auto|cpu|cuda|tensorrt|coreml (got '%s')\n",
                              device.c_str());
                 return 2;
             }
         } else if (a == "--trt-cache-dir") {
             trt_cache_dir = need();
+        } else if (a == "--coreml-units") {
+            std::string s = need();
+
+            if (s == "all") {
+                engine_tuning.coreml_units = siam::CoreMLUnits::ALL;
+            } else if (s == "cpune" || s == "ane") {
+                engine_tuning.coreml_units = siam::CoreMLUnits::CPU_AND_ANE;
+            } else if (s == "cpugpu" || s == "gpu") {
+                engine_tuning.coreml_units = siam::CoreMLUnits::CPU_AND_GPU;
+            } else if (s == "cpu") {
+                engine_tuning.coreml_units = siam::CoreMLUnits::CPU_ONLY;
+            } else {
+                std::fprintf(stderr,
+                             "--coreml-units must be all|cpune|cpugpu|cpu (got '%s')\n",
+                             s.c_str());
+                return 2;
+            }
+        } else if (a == "--coreml-cache-dir") {
+            engine_tuning.coreml_cache_dir = need();
+        } else if (a == "--coreml-static-shapes") {
+            std::string s = need();
+            engine_tuning.coreml_static_shapes = (s != "0" && s != "false");
         } else if (a == "-t" || a == "--thread") {
             threads = std::stoi(need());
             threads_set = true;
@@ -969,9 +1001,25 @@ int main(int argc, char** argv) {
     // [resample] and [infer] in the verbose log -- a user typo on the
     // input path still fails fast above, and the network download (if
     // any) happens just before it's needed.
+    // Fetch the fixed-shape ONNX bundle when CoreML EP is active with
+    // RequireStaticInputShapes=1 (Core ML's preferred fusion path).
+    // The default dynamic-shape weights work everywhere else (CUDA,
+    // TensorRT, CPU) and remain the right choice if the user opted
+    // into --coreml-static-shapes 0. On non-CoreML builds, `auto`
+    // never targets CoreML so we always keep the dynamic-shape path
+    // -- avoids breaking --lowmem's -P shrink on CUDA / CPU runs.
+    bool fetch_fixshape = false;
+#ifdef SIAMIZE_HAS_COREML
+    fetch_fixshape = (device == "coreml" || device == "auto")
+                     && engine_tuning.coreml_static_shapes;
+#else
+    fetch_fixshape = (device == "coreml")  // user override even without build support; rejects later
+                     && engine_tuning.coreml_static_shapes;
+#endif
+
     for (auto& m : model_paths) {
         try {
-            m = siam::resolve_model_path(m, verbose);
+            m = siam::resolve_model_path(m, verbose, fetch_fixshape);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "siamize: %s\n", e.what());
             return 3;

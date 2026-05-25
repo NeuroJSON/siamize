@@ -36,8 +36,17 @@ is not found." OFF)
 # onnxruntime-gpu prebuilt (fetched via ORT_BUILD=gpu scripts/fetch_deps.sh)
 # and a runtime CUDA + cuDNN install. At runtime the binary tries CUDA first
 # and falls back to CPU if libcudart / libcudnn cannot be loaded.
-set(SIAMIZE_GPU "none" CACHE STRING "GPU backend: none, cuda")
-set_property(CACHE SIAMIZE_GPU PROPERTY STRINGS none cuda)
+set(SIAMIZE_GPU "none" CACHE STRING
+    "Hardware-acceleration backend: none, cuda, tensorrt, coreml. \
+'cuda' uses the ORT CUDA EP (NVIDIA GPUs). 'tensorrt' layers the \
+ORT TensorRT EP on top of CUDA. 'coreml' uses the ORT CoreML EP \
+on Apple Silicon (CPU + Metal GPU + Neural Engine, selectable via \
+--coreml-units). 'coreml' is macOS-only.")
+set_property(CACHE SIAMIZE_GPU PROPERTY STRINGS none cuda tensorrt coreml)
+if(SIAMIZE_GPU STREQUAL "coreml" AND NOT APPLE)
+    message(FATAL_ERROR
+        "SIAMIZE_GPU=coreml is macOS-only (CoreML EP needs the CoreML.framework).")
+endif()
 
 # ---- platform detection -----------------------------------------------------
 if(WIN32)
@@ -154,6 +163,16 @@ if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
 endif()
 if(SIAMIZE_GPU STREQUAL "tensorrt")
     target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_TENSORRT)
+endif()
+# CoreML EP is statically baked into ORT's macOS dylib (no separate
+# provider plugin .so to fetch). We only need the system frameworks
+# CoreML uses underneath at runtime, plus the SIAMIZE_HAS_COREML define
+# that gates sliding.cpp's CoreML probe block.
+if(SIAMIZE_GPU STREQUAL "coreml")
+    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_COREML)
+    target_link_libraries(siamize PRIVATE
+        "-framework CoreML"
+        "-framework Foundation")
 endif()
 
 # OpenMP linkage
@@ -330,6 +349,12 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
         if(SIAMIZE_GPU STREQUAL "tensorrt")
             target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_TENSORRT)
         endif()
+        if(SIAMIZE_GPU STREQUAL "coreml")
+            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_COREML)
+            target_link_libraries(siamize_mex
+                "-framework CoreML"
+                "-framework Foundation")
+        endif()
         # FindMatlab.cmake's matlab_add_mex() uses target_link_libraries
         # in the plain (non-keyword) form. CMake forbids mixing plain and
         # keyword signatures on the same target, so we follow suit here.
@@ -461,6 +486,13 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         endif()
         if(SIAMIZE_GPU STREQUAL "tensorrt")
             set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_TENSORRT")
+        endif()
+        # CoreML: add the define so sliding.cpp's CoreML probe compiles
+        # in, and append the macOS framework link flags to LDFLAGS so
+        # mkoctfile passes them to clang.
+        if(SIAMIZE_GPU STREQUAL "coreml")
+            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_COREML")
+            set(_oct_ld "${_oct_ld} -framework CoreML -framework Foundation")
         endif()
 
         add_custom_command(

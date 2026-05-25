@@ -75,7 +75,7 @@ std::string default_cache_dir();
  *
  * @return the URL prefix (or its override)
  */
-std::string default_weights_url();
+std::string default_weights_url(bool fixshape = false);
 
 /**
  * @brief Resolve a model spec to an existing local file path, fetching if needed
@@ -93,11 +93,16 @@ std::string default_weights_url();
  * file. Use \a verbose to surface per-step progress messages on
  * stderr.
  *
- * @param  spec     fold spec: filename, digit shortcut, or full path
- * @param  verbose  true to print progress to stderr
- * @return          absolute path to the resolved .onnx file
+ * @param  spec      fold spec: filename, digit shortcut, or full path
+ * @param  verbose   true to print progress to stderr
+ * @param  fixshape  true to fetch the fixed-shape weight variant
+ *                   (CoreML EP with RequireStaticInputShapes=1 wants
+ *                   this). Cached under <cache_dir>/fixshape/ to keep
+ *                   it separate from the default dynamic-shape cache.
+ * @return           absolute path to the resolved .onnx file
  */
-std::string resolve_model_path(const std::string& spec, bool verbose);
+std::string resolve_model_path(const std::string& spec, bool verbose,
+                               bool fixshape = false);
 
 }  // namespace siam
 

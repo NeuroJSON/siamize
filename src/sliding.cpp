@@ -56,6 +56,7 @@ at any moment so peak VRAM stays bounded.
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -311,11 +312,17 @@ LogitsVolume sliding_window(const Volume& data,
         throw std::runtime_error("no model paths provided");
     }
 
-    const bool trt_required  = (device == "tensorrt");
-    const bool trt_try       = trt_required;
-    const bool cuda_required = (device == "cuda");
-    const bool cuda_try      = (device == "cuda" || device == "auto"
-                                || device == "tensorrt");
+    const bool trt_required    = (device == "tensorrt");
+    const bool trt_try         = trt_required;
+    const bool cuda_required   = (device == "cuda");
+    const bool cuda_try        = (device == "cuda" || device == "auto"
+                                  || device == "tensorrt");
+    // CoreML EP (macOS / Apple Silicon). On a CoreML-enabled build,
+    // -c auto prefers CoreML over CPU. On a CUDA-enabled build that
+    // doesn't include CoreML, -c auto picks CUDA. Both can't be on at
+    // once (no current host has both NVIDIA + Apple Silicon).
+    const bool coreml_required = (device == "coreml");
+    const bool coreml_try      = (device == "coreml" || device == "auto");
 
 #ifndef SIAMIZE_HAS_CUDA
 
@@ -333,6 +340,15 @@ LogitsVolume sliding_window(const Volume& data,
         throw std::runtime_error(
             "device=tensorrt requested but siamize was built without TensorRT. "
             "Rebuild with -DSIAMIZE_GPU=tensorrt.");
+    }
+
+#endif
+#ifndef SIAMIZE_HAS_COREML
+
+    if (coreml_required) {
+        throw std::runtime_error(
+            "device=coreml requested but siamize was built without CoreML "
+            "support. Rebuild on macOS with -DSIAMIZE_GPU=coreml.");
     }
 
 #endif
@@ -359,6 +375,37 @@ LogitsVolume sliding_window(const Volume& data,
             if (trt_required) {
                 throw std::runtime_error(
                     "failed to create TRT engine cache dir " + trt_cache + ": " + e.what());
+            }
+        }
+    }
+
+#endif
+
+    // Resolve the CoreML model-compile cache directory (used only when
+    // CoreML EP is enabled). Core ML translates the ONNX graph to a
+    // .mlmodelc bundle at session creation; the first invocation pays
+    // 10-30 s for that compile and subsequent invocations hit the cache.
+    std::string coreml_cache = engine_tuning.coreml_cache_dir;
+
+    if (coreml_try && coreml_cache.empty()) {
+        const char* home = std::getenv("HOME");
+
+        if (home == nullptr) {
+            home = ".";
+        }
+
+        coreml_cache = std::string(home) + "/.cache/siamize/coreml";
+    }
+
+#ifdef SIAMIZE_HAS_COREML
+
+    if (coreml_try) {
+        try {
+            std::filesystem::create_directories(coreml_cache);
+        } catch (const std::exception& e) {
+            if (coreml_required) {
+                throw std::runtime_error(
+                    "failed to create CoreML cache dir " + coreml_cache + ": " + e.what());
             }
         }
     }
@@ -428,9 +475,10 @@ LogitsVolume sliding_window(const Volume& data,
     // Decide on the execution providers once. On the first fold, try to
     // register TRT (if requested) then CUDA (if available). Remember the
     // outcome for subsequent folds.
-    bool use_trt   = false;
-    bool use_cuda  = false;
-    bool ep_probed = false;
+    bool use_trt    = false;
+    bool use_cuda   = false;
+    bool use_coreml = false;
+    bool ep_probed  = false;
 
     for (size_t fi = 0; fi < model_paths.size(); ++fi) {
         Ort::SessionOptions opts;
@@ -599,6 +647,92 @@ LogitsVolume sliding_window(const Volume& data,
                 // CPU fallback path: keep the arena enabled. See the
                 // note at the top of this loop for the profiling
                 // analysis behind that choice.
+            }
+        }
+
+#endif
+#ifdef SIAMIZE_HAS_COREML
+
+        // CoreML EP (macOS / Apple Silicon). The EP is statically baked
+        // into ORT's macOS dylib -- no provider-plugin .so to dlopen,
+        // unlike CUDA / TensorRT. We register via the v2 string-options
+        // interface so we can pass MLComputeUnits, ModelCacheDirectory,
+        // etc. Failures fall back to CPU when device == "auto"; an
+        // explicit -c coreml re-raises.
+        if (coreml_try && (!ep_probed || use_coreml)) {
+            if (!ep_probed) {
+                siam::log_tag("coreml", "probing CoreML EP...");
+            }
+
+            try {
+                std::unordered_map<std::string, std::string> co_opts;
+
+                switch (engine_tuning.coreml_units) {
+                    case CoreMLUnits::CPU_ONLY:
+                        co_opts["MLComputeUnits"] = "CPUOnly"; break;
+
+                    case CoreMLUnits::CPU_AND_GPU:
+                        co_opts["MLComputeUnits"] = "CPUAndGPU"; break;
+
+                    case CoreMLUnits::CPU_AND_ANE:
+                        co_opts["MLComputeUnits"] = "CPUAndNeuralEngine"; break;
+
+                    case CoreMLUnits::ALL:
+                    default:
+                        co_opts["MLComputeUnits"] = "ALL"; break;
+                }
+
+                // MLProgram is the modern Core ML format (macOS 13+):
+                // supports 3-D Conv / ConvTranspose / InstanceNorm and
+                // accepts fp16 weights natively. NeuralNetwork is the
+                // legacy format and would reject this network.
+                co_opts["ModelFormat"] = "MLProgram";
+
+                // First-run cache. Core ML compiles the ONNX into a
+                // hardware-specialized .mlmodelc bundle here. Cache hit
+                // on subsequent runs skips the 10-30 s compile.
+                co_opts["ModelCacheDirectory"] = coreml_cache;
+
+                // RequireStaticInputShapes=1 lets Core ML fuse more
+                // aggressively and avoids per-shape recompiles -- pair
+                // with the fixed-shape ONNX bundle. =0 is required for
+                // the dynamic-shape ONNX (--lowmem patch shrink).
+                co_opts["RequireStaticInputShapes"] =
+                    engine_tuning.coreml_static_shapes ? "1" : "0";
+
+                // EnableOnSubgraphs=1 lets Core ML claim subgraphs it
+                // can fuse and pushes the rest to the CPU EP. Without
+                // it, a single unsupported op forces the whole graph
+                // back to CPU.
+                co_opts["EnableOnSubgraphs"] = "1";
+
+                opts.AppendExecutionProvider("CoreML", co_opts);
+
+                if (!ep_probed) {
+                    use_coreml = true;
+                    const char* units_str =
+                        engine_tuning.coreml_units == CoreMLUnits::CPU_ONLY    ? "cpu" :
+                        engine_tuning.coreml_units == CoreMLUnits::CPU_AND_GPU ? "cpugpu" :
+                        engine_tuning.coreml_units == CoreMLUnits::CPU_AND_ANE ? "cpune" :
+                        "all";
+                    siam::log_tag("coreml",
+                                  "enabled (units=%s, cache=%s, static_shapes=%s)",
+                                  units_str, coreml_cache.c_str(),
+                                  engine_tuning.coreml_static_shapes ? "yes" : "no");
+                    siam::log_cont("first run compiles ONNX -> .mlmodelc "
+                                   "(~10-30 s, cached after)");
+                }
+            } catch (const Ort::Exception& e) {
+                if (coreml_required) {
+                    throw;   // user explicitly asked for CoreML
+                }
+
+                if (!ep_probed) {
+                    siam::log_tag("coreml", "unavailable (%s); using CPU",
+                                  e.what());
+                }
+
+                use_coreml = false;
             }
         }
 

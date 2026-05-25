@@ -55,6 +55,22 @@ namespace siam {
  * regression, see sliding.cpp for the profiling notes).
  * All fields are optional; defaults mean "let ORT decide".
  */
+/**
+ * \enum  CoreMLUnits
+ * \brief Which Apple Silicon hardware the CoreML EP targets
+ *
+ * Maps 1:1 to ORT's CoreML EP "MLComputeUnits" option. Default ALL
+ * lets Core ML route per-op across CPU + Metal GPU + Neural Engine
+ * (ANE). On a 3D U-Net the ANE typically claims the conv-heavy
+ * decoder stages and the GPU/CPU handle the rest.
+ */
+enum class CoreMLUnits {
+    ALL,           /**< CPU + Metal GPU + Neural Engine, Core ML routes per op (default) */
+    CPU_AND_ANE,   /**< CPU + Neural Engine only (no Metal GPU) */
+    CPU_AND_GPU,   /**< CPU + Metal GPU only (no Neural Engine) */
+    CPU_ONLY,      /**< CPU only (debug; no Core ML acceleration) */
+};
+
 struct EngineTuning {
     int cudnn_max_workspace = 1;     /**< 0 = pick small-workspace cuDNN algos */
     int arena_same_as_req   = 0;     /**< 1 = kSameAsRequested arena extend strategy
@@ -65,6 +81,14 @@ struct EngineTuning {
     bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */
+
+    // CoreML EP knobs (macOS only). Inert on Linux / Windows builds.
+    CoreMLUnits coreml_units = CoreMLUnits::ALL;  /**< hardware target */
+    std::string coreml_cache_dir;                  /**< empty => $HOME/.cache/siamize/coreml */
+    bool coreml_static_shapes = true;              /**< Pass MLProgram + RequireStaticInputShapes=1
+                                                        when paired with the fixed-shape ONNX
+                                                        (recommended); set false for the
+                                                        dynamic-shape ONNX (more CPU fallbacks). */
 };
 
 /**
@@ -84,8 +108,8 @@ struct EngineTuning {
  * @param  intra_threads  forwarded to ORT's SessionOptions::SetIntraOpNumThreads
  * @param  step_ratio     tile stride as a fraction of patch_size (typ. 0.5)
  * @param  verbose        prints per-tile progress to stderr when true
- * @param  device         "auto" (CUDA-if-available, CPU otherwise),
- *                        "cpu", "cuda", or "tensorrt"
+ * @param  device         "auto" (CoreML on macOS, else CUDA-if-available, else CPU),
+ *                        "cpu", "cuda", "tensorrt", or "coreml"
  * @param  trt_cache_dir  TensorRT engine cache directory (only used
  *                        when \a device == "tensorrt"); empty resolves
  *                        to `$HOME/.cache/siamize/trt`

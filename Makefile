@@ -46,7 +46,7 @@ ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
-        cudaoct cudamex \
+        cudaoct cudamex coreml coremloct coremlmex \
         ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
         doc doc-clean
 
@@ -71,6 +71,18 @@ tensorrt: ort-gpu
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
 	@echo
 	@echo "[make tensorrt] built $(BUILD_DIR)/siamize with TensorRT + CUDA EPs."
+
+# macOS-only. CoreML EP is statically baked into ORT 1.26's macOS dylib
+# (no separate provider plugin to fetch), so we use the standard CPU
+# ORT bundle. -DSIAMIZE_GPU=coreml turns on the SIAMIZE_HAS_COREML
+# define and links the CoreML / Foundation frameworks. Runtime selects
+# CPU / GPU / Neural Engine via --coreml-units (default 'all').
+coreml: ort-cpu
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DSIAMIZE_GPU=coreml
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo
+	@echo "[make coreml] built $(BUILD_DIR)/siamize with CoreML EP."
+	@echo "First run compiles the ONNX -> .mlmodelc (~10-30 s, cached)."
 
 # ---- ORT prebuilt management ------------------------------------------------
 
@@ -124,6 +136,21 @@ cudamex: ort-gpu
 	    -DSIAMIZE_GPU=cuda -DSIAMIZE_BUILD_MATLAB_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
 	@echo "[make cudamex] built matlab/siamex.mex<a64|maca64|w64> (CUDA-enabled MATLAB MEX)"
+
+# macOS-only. Like cudaoct / cudamex but builds the CoreML MEX
+# (Apple Silicon CPU + GPU + ANE). Uses the standard CPU ORT bundle
+# since CoreML EP is statically baked into ORT's macOS dylib.
+coremloct: ort-cpu
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_GPU=coreml -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make coremloct] built matlab/siamex.mex (CoreML-enabled Octave MEX)"
+
+coremlmex: ort-cpu
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_GPU=coreml -DSIAMIZE_BUILD_MATLAB_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make coremlmex] built matlab/siamex.mex<maca64|maci64> (CoreML-enabled MATLAB MEX)"
 
 mex-test:
 	octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"

@@ -574,8 +574,20 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             models.push_back("fold_0_fp16.onnx");
         }
 
+        // Same CoreML-fixshape gating as siamize.cpp. The MEX inherits
+        // opts.device and opts.engine_tuning.coreml_static_shapes from
+        // the caller's struct, so the decision propagates identically.
+        bool fetch_fixshape_mex = false;
+#ifdef SIAMIZE_HAS_COREML
+        fetch_fixshape_mex = (opts.device == "coreml" || opts.device == "auto")
+                             && opts.engine_tuning.coreml_static_shapes;
+#else
+        fetch_fixshape_mex = (opts.device == "coreml")
+                             && opts.engine_tuning.coreml_static_shapes;
+#endif
+
         for (auto& m : models) {
-            m = siam::resolve_model_path(m, opts.verbose);
+            m = siam::resolve_model_path(m, opts.verbose, fetch_fixshape_mex);
         }
 
         // ----- Lowmem preset (manual or auto-detected) ---------------------
