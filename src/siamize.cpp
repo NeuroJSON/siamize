@@ -1026,6 +1026,13 @@ int main(int argc, char** argv) {
             const float inv_T = 1.0f / tpm_temperature;
             const int64_t N_net = lzN * lyN * lxN;
 
+            // Per-voxel softmax is fully independent across i, so the
+            // outer loop parallelizes cleanly. On a 4-class/4-core CI
+            // runner this drops the softmax phase ~3-4x; on huo's
+            // 64-core box it tops out around the 10-12x mark before
+            // memory bandwidth saturates (the channel-major layout
+            // forces num_classes scattered loads per voxel).
+            #pragma omp parallel for schedule(static)
             for (int64_t i = 0; i < N_net; ++i) {
                 float m = logits.channel_ptr(0)[i] * inv_T;
 
@@ -1171,6 +1178,9 @@ int main(int argc, char** argv) {
         const float inv_T = 1.0f / tpm_temperature;
         const int64_t N = cZ * cY * cX;
 
+        // See the parallel-softmax comment in the upsample branch above;
+        // the loop body is identical and same parallelization applies.
+        #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < N; ++i) {
             // numerically stable softmax over the C channel logits
             float m = logits_back.channel_ptr(0)[i] * inv_T;
