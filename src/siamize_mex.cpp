@@ -664,7 +664,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
             if (ram_tight || vram_tight) {
                 const char* source = opts.lowmem ? "opts.lowmem=true"
-                                                 : "memory-tight host detected";
+                                     : "memory-tight host detected";
                 siam::log_hint("lowmem preset applied (%s)", source);
             }
         }
@@ -781,6 +781,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             const int64_t N = cZ * cY * cX;
 
             #pragma omp parallel for schedule(static)
+
             for (int64_t i = 0; i < N; ++i) {
                 float m = logits_back.channel_ptr(0)[i] * inv_T;
 
@@ -878,6 +879,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, bg_label);
 
             #pragma omp parallel for schedule(static)
+
             for (int64_t z = 0; z < cZ; ++z) {
                 for (int64_t y = 0; y < cY; ++y) {
                     for (int64_t x = 0; x < cX; ++x) {

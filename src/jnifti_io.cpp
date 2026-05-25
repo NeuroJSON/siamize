@@ -192,11 +192,21 @@ std::vector<T> col_to_row_major(const T* col, const std::vector<int64_t>& shape)
     set (uint16, uint32, etc.) via decode_nifti_data().
 */
 template <typename T> std::string jdata_dtype();
-template <> std::string jdata_dtype<uint8_t>()  { return "uint8";  }
-template <> std::string jdata_dtype<int16_t>()  { return "int16";  }
-template <> std::string jdata_dtype<int32_t>()  { return "int32";  }
-template <> std::string jdata_dtype<float>()    { return "single"; }
-template <> std::string jdata_dtype<double>()   { return "double"; }
+template <> std::string jdata_dtype<uint8_t>()  {
+    return "uint8";
+}
+template <> std::string jdata_dtype<int16_t>()  {
+    return "int16";
+}
+template <> std::string jdata_dtype<int32_t>()  {
+    return "int32";
+}
+template <> std::string jdata_dtype<float>()    {
+    return "single";
+}
+template <> std::string jdata_dtype<double>()   {
+    return "double";
+}
 
 /*******************************************************************************/
 /*! \fn    void byte_shuffle(uint8_t* dst, const uint8_t* src,
@@ -334,7 +344,7 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
     arr["_ArrayType_"]    = jdata_dtype<T>();
     arr["_ArraySize_"]    = shape;
     arr["_ArrayZipType_"] = "zlib";
-    arr["_ArrayZipSize_"] = std::vector<int64_t>{1, static_cast<int64_t>(n_elem)};
+    arr["_ArrayZipSize_"] = std::vector<int64_t> {1, static_cast<int64_t>(n_elem)};
 
     if (do_shuffle) {
         arr["_ArrayShuffle_"] = shuffle;
@@ -407,10 +417,10 @@ json build_label_table(ClassSet class_set, int num_classes) {
     json tbl = json::object();
 
     auto add = [&](int id, const char* name,
-                   float r, float g, float b, float a) {
+    float r, float g, float b, float a) {
         json entry = json::object();
         entry["Label"] = name;
-        entry["RGBA"]  = std::vector<float>{r, g, b, a};
+        entry["RGBA"]  = std::vector<float> {r, g, b, a};
         tbl[std::to_string(id)] = entry;
     };
 
@@ -482,7 +492,7 @@ json build_header(const NiftiImage& src, const std::vector<int64_t>& dim) {
                          + A[1 * 4 + c] * A[1 * 4 + c]
                          + A[2 * 4 + c] * A[2 * 4 + c]);
     };
-    h["VoxelSize"] = std::vector<float>{
+    h["VoxelSize"] = std::vector<float> {
         static_cast<float>(col_norm(0)),
         static_cast<float>(col_norm(1)),
         static_cast<float>(col_norm(2))
@@ -774,9 +784,13 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
     }
 
     auto type_bytes = [&]() -> size_t {
-        if (dtype == "uint8"  || dtype == "int8")    { return 1; }
+        if (dtype == "uint8"  || dtype == "int8")    {
+            return 1;
+        }
 
-        if (dtype == "int16"  || dtype == "uint16")  { return 2; }
+        if (dtype == "int16"  || dtype == "uint16")  {
+            return 2;
+        }
 
         if (dtype == "int32"  || dtype == "uint32"
                 || dtype == "single" || dtype == "float32") {
@@ -813,7 +827,7 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
             // .jnii: base64 ASCII -> raw zlib bytes via zmat.
             const std::string& s = zd.get<std::string>();
             comp = zmat_xform(reinterpret_cast<const uint8_t*>(s.data()), s.size(),
-                            zmBase64, /*iscompress=*/0);
+                              zmBase64, /*iscompress=*/0);
         } else if (zd.is_array()) {
             // Defensive: a few encoders emit byte payloads as numeric arrays.
             comp.reserve(zd.size());
@@ -879,7 +893,7 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
     // Walk the JSON array and write per-element values into `raw`. Handle
     // each supported dtype explicitly so we get exact wire-format
     // marshalling (no implicit type promotion through json::get<double>()).
-    auto write_one = [&](size_t i, const json& v) {
+    auto write_one = [&](size_t i, const json & v) {
         if (dtype == "uint8") {
             raw[i] = v.get<uint8_t>();
         } else if (dtype == "int8") {
@@ -1128,7 +1142,7 @@ void save_jnifti_tpm(const std::string& path,
     const int sh = shuffle ? static_cast<int>(sizeof(float)) : 0;
     root["NIFTIData"] = jdata_annotated<float>(
                             data_xyzc.data(),
-                            {X, Y, Z, num_classes}, binary, sh);
+    {X, Y, Z, num_classes}, binary, sh);
     write_jnifti_root(path, root, binary);
 }
 
@@ -1178,15 +1192,23 @@ NiftiImage load_jnifti_ras(const std::string& path) {
 
     std::vector<float> col_f;
 
-    if      (dtype == "uint8")            { col_f = to_float_col_major<uint8_t>(row_bytes.data(), shape); }
-    else if (dtype == "int8")             { col_f = to_float_col_major<int8_t>(row_bytes.data(), shape); }
-    else if (dtype == "int16")            { col_f = to_float_col_major<int16_t>(row_bytes.data(), shape); }
-    else if (dtype == "uint16")           { col_f = to_float_col_major<uint16_t>(row_bytes.data(), shape); }
-    else if (dtype == "int32")            { col_f = to_float_col_major<int32_t>(row_bytes.data(), shape); }
-    else if (dtype == "uint32")           { col_f = to_float_col_major<uint32_t>(row_bytes.data(), shape); }
-    else if (dtype == "single" || dtype == "float32") { col_f = to_float_col_major<float>(row_bytes.data(), shape); }
-    else if (dtype == "double" || dtype == "float64") { col_f = to_float_col_major<double>(row_bytes.data(), shape); }
-    else {
+    if      (dtype == "uint8")            {
+        col_f = to_float_col_major<uint8_t>(row_bytes.data(), shape);
+    } else if (dtype == "int8")             {
+        col_f = to_float_col_major<int8_t>(row_bytes.data(), shape);
+    } else if (dtype == "int16")            {
+        col_f = to_float_col_major<int16_t>(row_bytes.data(), shape);
+    } else if (dtype == "uint16")           {
+        col_f = to_float_col_major<uint16_t>(row_bytes.data(), shape);
+    } else if (dtype == "int32")            {
+        col_f = to_float_col_major<int32_t>(row_bytes.data(), shape);
+    } else if (dtype == "uint32")           {
+        col_f = to_float_col_major<uint32_t>(row_bytes.data(), shape);
+    } else if (dtype == "single" || dtype == "float32") {
+        col_f = to_float_col_major<float>(row_bytes.data(), shape);
+    } else if (dtype == "double" || dtype == "float64") {
+        col_f = to_float_col_major<double>(row_bytes.data(), shape);
+    } else {
         throw std::runtime_error("unsupported _ArrayType_ in JNIfTI input: " + dtype);
     }
 

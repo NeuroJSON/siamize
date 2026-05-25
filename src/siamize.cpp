@@ -449,22 +449,22 @@ int main(int argc, char** argv) {
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
     bool        tpm_shuffle     = false; // apply JData _ArrayShuffle_=4 before zlib
-                                         // on TPM jnii/bnii output. Default OFF for
-                                         // interop with readers that don't yet
-                                         // understand _ArrayShuffle_ (e.g. current
-                                         // jsonlab); pass --shuffle to opt in to
-                                         // the 1.5-2.5x size win for spec-compliant
-                                         // readers (siamize itself, future jsonlab).
+    // on TPM jnii/bnii output. Default OFF for
+    // interop with readers that don't yet
+    // understand _ArrayShuffle_ (e.g. current
+    // jsonlab); pass --shuffle to opt in to
+    // the 1.5-2.5x size win for spec-compliant
+    // readers (siamize itself, future jsonlab).
     bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
-                                         //         (skip per-channel back-resample),
-                                         //         un-cropped to full canonical extent,
-                                         //         using canonical RAS orientation.
+    //         (skip per-channel back-resample),
+    //         un-cropped to full canonical extent,
+    //         using canonical RAS orientation.
     bool        lowmem_mode     = false; // true => force the lowmem default preset
-                                         //         (smaller patch, no arena, smaller
-                                         //         thread cap, tight VRAM knobs). Same
-                                         //         preset that auto-detection applies on
-                                         //         a memory-tight host -- this flag just
-                                         //         opts in regardless of detection.
+    //         (smaller patch, no arena, smaller
+    //         thread cap, tight VRAM knobs). Same
+    //         preset that auto-detection applies on
+    //         a memory-tight host -- this flag just
+    //         opts in regardless of detection.
     std::string out_format      = "nii"; // nii | jnii | bnii
     int threads = 0;     // 0 = auto: std::thread::hardware_concurrency()
     // Verbose progress is ON by default in the CLI; a multi-minute job
@@ -692,7 +692,7 @@ int main(int argc, char** argv) {
     // file per https://neurojson.org/jnifti , not an opaque binary
     // blob with the wrong extension.
     if (!format_set) {
-        auto path_ends_with_ci = [](const std::string& s, const std::string& suf) {
+        auto path_ends_with_ci = [](const std::string & s, const std::string & suf) {
             if (s.size() < suf.size()) {
                 return false;
             }
@@ -768,6 +768,7 @@ int main(int argc, char** argv) {
             engine_tuning.cpu_arena = false;
             auto_applied.push_back("--no-arena");
         }
+
         // -t auto-cap reduction is handled in the threads-resolution
         // block below (uses ram_tight to pick 8 instead of 16).
     }
@@ -807,7 +808,7 @@ int main(int argc, char** argv) {
 
     if (!auto_applied.empty()) {
         const char* source = lowmem_mode ? "--lowmem requested"
-                                         : "memory-tight host detected";
+                             : "memory-tight host detected";
         siam::log_hint("lowmem preset applied (%s; RAM %ld MB%s%s%s):",
                        source,
                        avail_ram_mb,
@@ -876,7 +877,7 @@ int main(int argc, char** argv) {
 
     // Input dispatch: .jnii / .bnii go through the JNIfTI reader, anything
     // else (typically .nii / .nii.gz) through the NIfTI-1 reader.
-    auto ends_with_ci = [](const std::string& s, const std::string& suf) {
+    auto ends_with_ci = [](const std::string & s, const std::string & suf) {
         if (s.size() < suf.size()) {
             return false;
         }
@@ -1033,8 +1034,8 @@ int main(int argc, char** argv) {
 
         for (int i = 0; i < 3; ++i) {
             bbox_lo_up[i] = static_cast<int64_t>(std::llround(
-                                static_cast<double>(crop.bbox[i][0]) *
-                                spacing_zyx[i] / new_spacing[i]));
+                    static_cast<double>(crop.bbox[i][0]) *
+                    spacing_zyx[i] / new_spacing[i]));
         }
 
         // Clamp the high end so round-off from compute_new_shape never
@@ -1136,6 +1137,7 @@ int main(int argc, char** argv) {
             // num_classes_out (6 in SPM mode) so they're never read.
             const bool spm = (class_set == ClassSet::SPM);
             #pragma omp parallel for schedule(static)
+
             for (int64_t i = 0; i < N_net; ++i) {
                 float m = logits.channel_ptr(0)[i] * inv_T;
 
@@ -1235,6 +1237,7 @@ int main(int argc, char** argv) {
             const bool spm = (class_set == ClassSet::SPM);
 
             #pragma omp parallel for schedule(static) collapse(2)
+
             for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
                 for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
                     const int64_t lz = z - bbox_lo_up[0];
@@ -1356,6 +1359,7 @@ int main(int argc, char** argv) {
         // same parallelization + merge logic applies.
         const bool spm = (class_set == ClassSet::SPM);
         #pragma omp parallel for schedule(static)
+
         for (int64_t i = 0; i < N; ++i) {
             // numerically stable softmax over the C channel logits
             float m = logits_back.channel_ptr(0)[i] * inv_T;
@@ -1421,6 +1425,7 @@ int main(int argc, char** argv) {
         }
 
         logits_back = LogitsVolume{};
+
         if (out_format == "nii") {
             siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out);
         } else {
@@ -1438,6 +1443,7 @@ int main(int argc, char** argv) {
         const bool spm_labels = (class_set == ClassSet::SPM);
 
         #pragma omp parallel for schedule(static)
+
         for (int64_t z = 0; z < cZ; ++z) {
             for (int64_t y = 0; y < cY; ++y) {
                 for (int64_t x = 0; x < cX; ++x) {

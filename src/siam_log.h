@@ -52,10 +52,10 @@ to enable progress output.
 // no direct equivalent (its /analyze adds something similar but not as
 // a function attribute), so the macro expands to nothing there.
 #if defined(__GNUC__) || defined(__clang__)
-    #define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx) \
-        __attribute__((format(printf, fmt_idx, args_idx)))
+#define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx) \
+    __attribute__((format(printf, fmt_idx, args_idx)))
 #else
-    #define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx)
+#define SIAM_LOG_PRINTF_FMT(fmt_idx, args_idx)
 #endif
 
 namespace siam {
