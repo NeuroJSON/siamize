@@ -725,6 +725,17 @@ the published SIAM v0.3 weights without modification.
   implemented in `src/jnifti_io.cpp` on top of the vendored
   nlohmann/json header described above.
 
+- **[JGIFTI specification](https://github.com/NeuroJSON/jgifti)** by
+  Qianqian Fang — defines the JSON encoding of GIFTI surface and
+  segmentation metadata, also part of the NeuroJSON project. siamize
+  borrows JGIFTI's `LabelTable` schema (object form keyed by
+  stringified integer label IDs, each entry holding `Label` +
+  `RGBA`) to attach anatomical names + per-tissue colors to the
+  `.jnii` / `.bnii` labelmap output at
+  `NIFTIHeader._DataInfo_.LabelTable`. Two presets are emitted: the
+  full SIAM v0.3 18-class dictionary, and the SPM12 6-class TPM
+  dictionary when `--classes spm` is set.
+
 ### Test data
 
 The bundled test image `tests/sub-01_T1w.nii.gz` is the `sub-01` anatomical

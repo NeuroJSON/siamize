@@ -16,6 +16,11 @@
 **         <a href="https://neurojson.org/jdata">https://neurojson.org/jdata</a>
 **  \li \c (\b BJData) The Binary JData specification, Q. Fang, NeuroJSON project.
 **         <a href="https://neurojson.org/bjdata">https://neurojson.org/bjdata</a>
+**  \li \c (\b JGIFTI) The JGIFTI specification, Q. Fang, NeuroJSON project.
+**         Defines the LabelTable JSON schema used by save_jnifti_labels
+**         to attach anatomical name + RGBA color metadata at
+**         NIFTIHeader._DataInfo_.LabelTable.
+**         <a href="https://github.com/NeuroJSON/jgifti">https://github.com/NeuroJSON/jgifti</a>
 **
 **  \section slicense License
 **          Apache License 2.0, see LICENSE for details

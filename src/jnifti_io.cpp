@@ -10,6 +10,10 @@
 **         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
 **         Training," arXiv:2605.02737 (2026).
 **         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
+**  \li \c (\b JGIFTI) The JGIFTI specification, Q. Fang, NeuroJSON project.
+**         Defines the LabelTable schema attached at
+**         NIFTIHeader._DataInfo_.LabelTable for labelmap output.
+**         <a href="https://github.com/NeuroJSON/jgifti">https://github.com/NeuroJSON/jgifti</a>
 **  \li \c (\b JNIfTI) The JNIfTI specification, Q. Fang, NeuroJSON project.
 **         <a href="https://neurojson.org/jnifti">https://neurojson.org/jnifti</a>
 **  \li \c (\b JData) The JData specification, Q. Fang, NeuroJSON project.
