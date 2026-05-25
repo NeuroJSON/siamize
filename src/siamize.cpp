@@ -467,7 +467,15 @@ int main(int argc, char** argv) {
     //
     // We use setenv with overwrite=0 so an explicit user choice
     // (CUDA_DEVICE_ORDER=FASTEST_FIRST in the environment) still wins.
+    // Windows lacks POSIX setenv; use _putenv_s after an explicit
+    // "is it already set?" check so we match the overwrite=0 semantics.
+#ifndef _WIN32
     setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+#else
+    if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
+        _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+    }
+#endif
 
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
