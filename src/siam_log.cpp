@@ -127,6 +127,14 @@ void format_padded_tag(char* out, size_t outsz, const char* tag, bool use_color)
 void emit(const char* s) {
 #ifdef MATLAB_MEX_FILE
     mexPrintf("%s", s);
+    // MATLAB buffers mexPrintf output until the MEX function returns
+    // (Octave doesn't, but the call is cheap on Octave anyway). A
+    // drawnow forces the Command Window to flush the buffer so the
+    // user sees [tile] / [resample] / etc. live during the run
+    // instead of all at once at the end. mexEvalString is safe to
+    // call from any MEX context; siam_log helpers are only invoked
+    // from the main thread (not inside OMP parallel regions).
+    mexEvalString("drawnow;");
 #else
     std::fputs(s, stderr);
 #endif
@@ -273,6 +281,7 @@ void log_progress(const char* tag, long long current, long long total) {
     std::snprintf(line, sizeof(line), "%s[%s] %lld/%lld (%.0f%%)\n",
                   head, bar, current, total, pct);
     mexPrintf("%s", line);
+    mexEvalString("drawnow;");   // flush; see emit() above for rationale
 #else
 
     if (SIAM_ISATTY_STDERR()) {

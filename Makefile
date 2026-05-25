@@ -100,12 +100,12 @@ ort-gpu:
 mex-octave: ort-cpu
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DSIAMIZE_BUILD_OCTAVE_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
-	@echo "[make mex-octave] built $(BUILD_DIR)/siamex.mex"
+	@echo "[make mex-octave] built matlab/siamex.mex"
 
 mex-matlab: ort-cpu
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DSIAMIZE_BUILD_MATLAB_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
-	@echo "[make mex-matlab] built $(BUILD_DIR)/siamex.mex<a64|maca64|w64>"
+	@echo "[make mex-matlab] built matlab/siamex.mex<a64|maca64|w64>"
 
 # CUDA-enabled MEX variants: same as mex-octave / mex-matlab but
 # fetch the GPU-flavor ORT (libonnxruntime_providers_cuda.so) and
@@ -117,13 +117,13 @@ cudaoct: ort-gpu
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 	    -DSIAMIZE_GPU=cuda -DSIAMIZE_BUILD_OCTAVE_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
-	@echo "[make cudaoct] built $(BUILD_DIR)/siamex.mex (CUDA-enabled Octave MEX)"
+	@echo "[make cudaoct] built matlab/siamex.mex (CUDA-enabled Octave MEX)"
 
 cudamex: ort-gpu
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 	    -DSIAMIZE_GPU=cuda -DSIAMIZE_BUILD_MATLAB_MEX=ON
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
-	@echo "[make cudamex] built $(BUILD_DIR)/siamex.mex<a64|maca64|w64> (CUDA-enabled MATLAB MEX)"
+	@echo "[make cudamex] built matlab/siamex.mex<a64|maca64|w64> (CUDA-enabled MATLAB MEX)"
 
 mex-test:
 	octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"

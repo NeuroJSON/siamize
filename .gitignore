@@ -3,6 +3,15 @@ build/
 *.o
 *.a
 
+# MEX outputs dropped next to matlab/siamize.m by `make mex-matlab`,
+# `make mex-octave`, `make cudamex`, and `make cudaoct`. These are
+# per-host binaries; users build them locally.
+matlab/siamex.mex
+matlab/siamex.mexa64
+matlab/siamex.mexmaca64
+matlab/siamex.mexmaci64
+matlab/siamex.mexw64
+
 # Fetched dependencies (pulled by scripts/fetch_deps.sh on demand)
 third_party/
 

@@ -209,17 +209,17 @@ jobs:
             os: ubuntu-22.04
             kind: octave
             cmake_flag: -DSIAMIZE_BUILD_OCTAVE_MEX=ON
-            mex_file: build/siamex.mex
+            mex_file: matlab/siamex.mex
           - label: linux-matlab
             os: ubuntu-22.04
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
-            mex_file: build/siamex.mexa64
+            mex_file: matlab/siamex.mexa64
           - label: windows-matlab
             os: windows-latest
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
-            mex_file: build/Release/siamex.mexw64
+            mex_file: matlab/siamex.mexw64
 
     steps:
       - uses: actions/checkout@v4
@@ -274,7 +274,7 @@ jobs:
         run: |
           # Call siamex (the low-level MEX) with zero args to trigger the
           # C++ "Usage:" error. Proves the .mex loaded + reached mexFunction.
-          octave-cli --no-gui --eval "addpath('build'); \
+          octave-cli --no-gui --eval "addpath('matlab'); \
             try; siamex(); catch err; \
               if isempty(strfind(err.message, 'Usage:')); error('unexpected: %s', err.message); end; \
               fprintf('MEX loaded and reached argument check\\n'); \
@@ -294,10 +294,11 @@ jobs:
         uses: matlab-actions/run-command@v2
         with:
           command: |
-            addpath(fullfile(pwd, 'build'));
-            % cd into build/Release on Windows so the MEX picks up neighboring
-            % onnxruntime.dll via the EXE search rule.
-            if ispc; cd(fullfile('build', 'Release')); end
+            addpath(fullfile(pwd, 'matlab'));
+            % cd into matlab/ on Windows so the MEX picks up the
+            % onnxruntime.dll the POST_BUILD step copied there via the
+            % EXE search rule. On Linux the rpath handles it.
+            if ispc; cd('matlab'); end
             try
               siamex();
               error('siamex() with no args should have thrown');
@@ -337,6 +338,55 @@ jobs:
           path: ${{ env.BUNDLE }}.zip
           if-no-files-found: error
           retention-days: 14
+
+  mex-cuda-smoke:
+    # Compile-only smoke test for `make cudaoct` / `make cudamex`. The
+    # GHA runner has no NVIDIA GPU and no CUDA runtime libs, so we can
+    # NOT loadlibrary the resulting MEX -- libonnxruntime_providers_cuda
+    # .so would dlopen and fail. Instead we just verify the build
+    # succeeds AND the produced .mex contains the CUDA-EP-probe strings
+    # that `sliding.cpp`'s `#ifdef SIAMIZE_HAS_CUDA` block emits. That
+    # catches the kind of regression where SIAMIZE_HAS_CUDA fails to
+    # propagate to the MEX (which was the bug fixed in dee8b1d).
+    name: mex-cuda-smoke (octave)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Octave
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends octave liboctave-dev
+
+      - name: Fetch C++ deps (GPU ORT prebuilt)
+        env:
+          ORT_BUILD: gpu
+        run: scripts/fetch_deps.sh
+
+      - name: Build `make cudaoct`
+        run: make cudaoct
+
+      - name: Verify MEX exists
+        run: |
+          ls -la matlab/siamex.mex
+          test -s matlab/siamex.mex
+
+      - name: Verify CUDA-EP code paths compiled in
+        run: |
+          # Strings emitted by sliding.cpp's `#ifdef SIAMIZE_HAS_CUDA`
+          # block. Their presence proves the CUDA EP probe code reached
+          # the linker; their absence means SIAMIZE_HAS_CUDA didn't
+          # propagate (the dee8b1d bug).
+          for needle in "probing CUDA EP" "cudnn_conv_use_max_workspace" \
+                        "cudnn_conv_algo_search"; do
+              if ! strings matlab/siamex.mex | grep -qF "$needle"; then
+                  echo "FAIL: '$needle' not found in matlab/siamex.mex" >&2
+                  exit 1
+              fi
+          done
+          echo "OK: CUDA-EP probe strings present in matlab/siamex.mex"
 
   python-smoke:
     runs-on: ubuntu-22.04

@@ -150,6 +150,20 @@ function nii = siamize(varargin)
 %                                      the softmax (more graded
 %                                      boundaries, better calibration).
 %                                      Only meaningful when 'tpm' is true.
+%               'upsample'            logical (default false). When true,
+%                                      siamize returns the labelmap / TPM
+%                                      at the network's internal
+%                                      inference resolution (0.75 mm by
+%                                      default, or whatever 'spacing' is
+%                                      set to) on the FULL canonical-RAS
+%                                      grid, instead of resampling back
+%                                      to the input voxel grid. The
+%                                      output nii.NIFTIHeader.Affine is
+%                                      updated to describe the new grid;
+%                                      the orientation is canonical RAS
+%                                      (X-major), independent of the
+%                                      input file's storage order.
+%                                      Mirrors the CLI's --upsample flag.
 %
 %   nii      jnifti struct with two fields:
 %             .NIFTIHeader   cloned from the input's NIFTIHeader when
@@ -291,25 +305,45 @@ if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
     end
 end
 
-% siamex returns a single ndarray whose dtype/rank depends on opts.tpm:
-%   opts.tpm = false (default) -> 3D uint8 labels
-%   opts.tpm = true            -> 4D float32 tissue probability map
-data = siamex(img, affine, resolved, opts);
+% siamex returns:
+%   - first output: ndarray whose dtype/rank depends on opts.tpm:
+%       opts.tpm = false (default) -> 3D uint8 labels
+%       opts.tpm = true            -> 4D float32 tissue probability map
+%   - second output (only emitted when opts.upsample is true): the 4x4
+%       affine for the upsampled canonical-RAS grid. Without
+%       opts.upsample the output sits on the input grid, so the input
+%       affine is correct and only one output is requested.
+upsample = isfield(opts, 'upsample') && opts.upsample;
+if upsample
+    [data, affine_up] = siamex(img, affine, resolved, opts);
+else
+    data = siamex(img, affine, resolved, opts);
+end
 
 % Wrap as a jnifti struct so the caller gets a header alongside the
 % data. The header is cloned from the input's NIFTIHeader when
 % available (file/jnifti/readnifti input); otherwise jnifticreate
 % synthesizes a minimal one. The working affine is written in for
-% consistency.
+% consistency. In opts.upsample mode the output sits on the larger
+% canonical-RAS grid, so we overwrite with the affine the MEX
+% returned for that grid (the input affine no longer applies).
 if isstruct(src) && isfield(src, 'NIFTIHeader')
     nii = src;
     nii.NIFTIData = data;
     if isfield(nii.NIFTIHeader, 'Affine')
-        nii.NIFTIHeader.Affine = affine;
+        if upsample
+            nii.NIFTIHeader.Affine = affine_up;
+        else
+            nii.NIFTIHeader.Affine = affine;
+        end
     end
 else
     nii = jnifticreate(data);
-    nii.NIFTIHeader.Affine = affine;
+    if upsample
+        nii.NIFTIHeader.Affine = affine_up;
+    else
+        nii.NIFTIHeader.Affine = affine;
+    end
 end
 
 % Attach a JGIFTI-style LabelTable to NIFTIHeader._DataInfo_.LabelTable

@@ -301,6 +301,22 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
             SRC ${_siamize_mex_sources}
             OUTPUT_NAME siamex
         )
+        # Drop the .mex* next to matlab/siamize.m so the wrapper finds it
+        # without a manual addpath. siamize.m's auto-addpath block looks
+        # in `here = fileparts(mfilename('fullpath'))` and only adds the
+        # path if siamex.<mexext> exists there.
+        set_target_properties(siamize_mex PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/matlab"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/matlab"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_SOURCE_DIR}/matlab"
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_SOURCE_DIR}/matlab"
+            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/matlab"
+            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_SOURCE_DIR}/matlab"
+            LIBRARY_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_SOURCE_DIR}/matlab"
+            LIBRARY_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_SOURCE_DIR}/matlab"
+            LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/matlab"
+            LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_SOURCE_DIR}/matlab"
+        )
         target_include_directories(siamize_mex PRIVATE ${_siamize_mex_includes})
         target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
         # Propagate SIAMIZE_HAS_CUDA / SIAMIZE_HAS_TENSORRT to the MEX
@@ -388,7 +404,10 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
     find_program(MKOCTFILE NAMES mkoctfile)
     if(MKOCTFILE)
         message(STATUS "Octave mkoctfile found: ${MKOCTFILE}")
-        set(_oct_out ${CMAKE_BINARY_DIR}/siamex.mex)
+        # Drop the .mex next to matlab/siamize.m for the same auto-
+        # addpath reason as the MATLAB MEX above. matlab/siamize.m
+        # locates siamex.<mexext> via `mfilename('fullpath')`.
+        set(_oct_out ${CMAKE_SOURCE_DIR}/matlab/siamex.mex)
         set(_oct_sources "")
         foreach(s IN LISTS _siamize_mex_sources)
             list(APPEND _oct_sources ${CMAKE_SOURCE_DIR}/${s})

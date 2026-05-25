@@ -85,6 +85,7 @@ with matching options.
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -282,10 +283,20 @@ struct Opts {
     int64_t classes_out = 18;                          /**< saved output channels (differs for SPM) */
     siam::ClassSet class_set = siam::ClassSet::CUSTOM_N; /**< 'spm' triggers SIAM-18 -> SPM-6 merge */
     std::string trt_cache;                             /**< TensorRT engine cache directory */
-    bool verbose = false;                              /**< progress messages to stderr */
+    bool verbose = true;                               /**< progress messages to the MATLAB / Octave
+                                                            Command Window. Default ON to mirror the CLI
+                                                            (see siamize.cpp commit 0d4c8a3); pass
+                                                            opts.verbose = false to silence. */
     siam::EngineTuning engine_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
     bool  tpm = false;                                 /**< true -> emit 4D float32 TPM, false -> 3D labels */
     float tpm_temperature = 1.0f;                      /**< softmax temperature for the TPM */
+    bool  upsample = false;                            /**< true -> return output at internal inference
+                                                            resolution (0.75 mm by default), canonical RAS
+                                                            orientation, full canonical extent (no
+                                                            per-channel back-resample). Mirrors CLI
+                                                            --upsample. The MEX's second output arg
+                                                            carries the corresponding 4x4 affine; the
+                                                            wrapper writes it to nii.NIFTIHeader.Affine. */
     bool  lowmem = false;                              /**< true -> force the lowmem preset
                                                             (smaller patch, no arena, smaller
                                                             thread cap, tight VRAM knobs).
@@ -459,6 +470,16 @@ void read_opts(const mxArray* a, Opts& o) {
     if ((f = mxGetField(a, 0, "tpm")) && !mxIsEmpty(f)) {
         // Accept numeric (0/1) or logical scalar; nonzero -> true.
         o.tpm = (mxGetScalar(f) != 0.0);
+    }
+
+    if ((f = mxGetField(a, 0, "upsample")) && !mxIsEmpty(f)) {
+        // Mirrors CLI --upsample: return output at internal
+        // inference resolution (canonical RAS, no back-resample to
+        // input grid). When set, the MEX populates plhs[1] with the
+        // 4x4 affine of the upsampled grid; the wrapper writes it
+        // into nii.NIFTIHeader.Affine so downstream tools see the
+        // correct spatial metadata.
+        o.upsample = (mxGetScalar(f) != 0.0);
     }
 
     if ((f = mxGetField(a, 0, "tpm_t")) && !mxIsEmpty(f)) {
@@ -752,6 +773,232 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         const int64_t cZ = crop.bbox[0][1] - crop.bbox[0][0];
         const int64_t cY = crop.bbox[1][1] - crop.bbox[1][0];
         const int64_t cX = crop.bbox[2][1] - crop.bbox[2][0];
+
+        // ---- Upsample branch: skip back-resample, return output at the
+        //      internal inference resolution (canonical RAS, full canonical
+        //      extent). Mirrors siamize.cpp --upsample. Output is in MATLAB
+        //      column-major (X, Y, Z[, C]); the 4x4 affine for the new grid
+        //      goes to plhs[1] for the wrapper to install in
+        //      nii.NIFTIHeader.Affine.
+        if (opts.upsample) {
+            // Full canonical shape at the inference spacing. compute_new_shape
+            // takes (Z, Y, X) shape + (Z, Y, X) input spacing + (Z, Y, X)
+            // target spacing -- same convention used for the cropped resample
+            // above.
+            const std::array<float, 3> target_zyx = {
+                opts.spacing, opts.spacing, opts.spacing
+            };
+            auto full_up_shape = siam::compute_new_shape(
+                                     shape_canon, spacing_zyx_in, target_zyx);
+
+            // bbox_lo_up: where the (cropped, network-resampled) region sits
+            // inside the full upsampled canonical grid. Per-axis floor of
+            // bbox_lo scaled by input_spacing / target_spacing.
+            std::array<int64_t, 3> bbox_lo_up{};
+            for (int i = 0; i < 3; ++i) {
+                bbox_lo_up[i] = static_cast<int64_t>(std::llround(
+                        static_cast<double>(crop.bbox[i][0]) *
+                        spacing_zyx_in[i] / target_zyx[i]));
+            }
+
+            const std::array<int64_t, 3> net_extent = {
+                logits.spat[0], logits.spat[1], logits.spat[2]
+            };
+            std::array<int64_t, 3> bbox_hi_up{};
+            for (int i = 0; i < 3; ++i) {
+                bbox_hi_up[i] = std::min(bbox_lo_up[i] + net_extent[i],
+                                         full_up_shape[i]);
+            }
+
+            // Upsampled-grid affine. Columns indexed by world-axis (X, Y, Z =
+            // i=0..2); zooms_canon there is in world-axis order, the REVERSE
+            // of spacing_zyx_in (which is canonical voxel order Z, Y, X).
+            const std::array<float, 3> zooms_canon = {
+                spacing_zyx_in[2], spacing_zyx_in[1], spacing_zyx_in[0]
+            };
+            std::array<float, 16> A_up{};
+            A_up[15] = 1.0f;
+            for (int r = 0; r < 3; ++r) {
+                float origin_shift = 0.0f;
+                for (int i = 0; i < 3; ++i) {
+                    const float scale = opts.spacing / zooms_canon[i];
+                    A_up[r * 4 + i] = affine_canon[r * 4 + i] * scale;
+                    origin_shift += affine_canon[r * 4 + i] * 0.5f * (scale - 1.0f);
+                }
+                A_up[r * 4 + 3] = affine_canon[r * 4 + 3] + origin_shift;
+            }
+
+            siam::log_tag("upsample",
+                          "full canonical at %.3f mm  (Z,Y,X) (%" PRId64 ",%"
+                          PRId64 ",%" PRId64 ")  bbox lo (%" PRId64 ",%"
+                          PRId64 ",%" PRId64 ")",
+                          opts.spacing,
+                          full_up_shape[0], full_up_shape[1], full_up_shape[2],
+                          bbox_lo_up[0], bbox_lo_up[1], bbox_lo_up[2]);
+
+            const int64_t Zup = full_up_shape[0];
+            const int64_t Yup = full_up_shape[1];
+            const int64_t Xup = full_up_shape[2];
+            const int64_t plane_up = Yup * Xup;
+
+            const int64_t lzN = logits.spat[0];
+            const int64_t lyN = logits.spat[1];
+            const int64_t lxN = logits.spat[2];
+
+            if (opts.tpm) {
+                // softmax + optional SPM merge at network resolution.
+                // See the non-upsample TPM branch below for the rationale on
+                // the per-voxel scratch buffer pattern; same logic applies.
+                const bool spm = (opts.class_set == siam::ClassSet::SPM);
+                const float inv_T = 1.0f / opts.tpm_temperature;
+                const int64_t N_net = lzN * lyN * lxN;
+
+                #pragma omp parallel for schedule(static)
+                for (int64_t i = 0; i < N_net; ++i) {
+                    float m = logits.channel_ptr(0)[i] * inv_T;
+                    for (int64_t c = 1; c < opts.classes; ++c) {
+                        float v = logits.channel_ptr(c)[i] * inv_T;
+                        if (v > m) m = v;
+                    }
+                    float s = 0.0f;
+                    for (int64_t c = 0; c < opts.classes; ++c) {
+                        float e = std::exp(logits.channel_ptr(c)[i] * inv_T - m);
+                        logits.channel_ptr(c)[i] = e;
+                        s += e;
+                    }
+                    float invs = 1.0f / s;
+                    for (int64_t c = 0; c < opts.classes; ++c) {
+                        logits.channel_ptr(c)[i] *= invs;
+                    }
+                    if (spm) {
+                        float spm_bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+                        for (int64_t c = 0; c < opts.classes; ++c) {
+                            spm_bin[siam::SIAM18_TO_SPM6[c]] += logits.channel_ptr(c)[i];
+                        }
+                        for (int64_t b = 0; b < siam::SPM6_NUM_CLASSES; ++b) {
+                            logits.channel_ptr(b)[i] = spm_bin[b];
+                        }
+                    }
+                }
+
+                // Allocate MATLAB 4D output [Xup, Yup, Zup, C] (column-major
+                // matches canonical X-fastest layout). Background channel
+                // starts at 1.0 outside the bbox (channel 0 default, or
+                // channel 5 = Air in SPM ordering).
+                const int64_t out_classes = opts.classes_out;
+                const int64_t bg_channel  = spm
+                                            ? siam::SPM6_AIR_CHANNEL
+                                            : 0;
+                const mwSize tdims[4] = {
+                    static_cast<mwSize>(Xup),
+                    static_cast<mwSize>(Yup),
+                    static_cast<mwSize>(Zup),
+                    static_cast<mwSize>(out_classes),
+                };
+                plhs[0] = mxCreateNumericArray(4, tdims, mxSINGLE_CLASS, mxREAL);
+                float* tpm_ptr = static_cast<float*>(mxGetData(plhs[0]));
+                const int64_t per_chan_up = Xup * Yup * Zup;
+                std::fill_n(tpm_ptr + bg_channel * per_chan_up, per_chan_up, 1.0f);
+
+                for (int64_t c = 0; c < out_classes; ++c) {
+                    const float* src = logits.channel_ptr(c);
+                    float* dst_chan = tpm_ptr + c * per_chan_up;
+
+                    for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
+                        const int64_t lz = z - bbox_lo_up[0];
+                        for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
+                            const int64_t ly = y - bbox_lo_up[1];
+                            const int64_t copy_n_x = bbox_hi_up[2] - bbox_lo_up[2];
+                            std::copy_n(
+                                &src[lz * lyN * lxN + ly * lxN],
+                                copy_n_x,
+                                &dst_chan[z * plane_up + y * Xup + bbox_lo_up[2]]);
+                        }
+                    }
+                }
+            } else {
+                // Labels: argmax (SPM-aware) at network resolution, then
+                // bbox-copy into the upsampled canonical buffer. Outside-
+                // bbox default is label 0 (background) by default, label
+                // 5 (Air) in SPM ordering.
+                const bool spm = (opts.class_set == siam::ClassSet::SPM);
+                const uint8_t bg_label = spm
+                                         ? static_cast<uint8_t>(siam::SPM6_AIR_CHANNEL)
+                                         : static_cast<uint8_t>(0);
+                const mwSize odims[3] = {
+                    static_cast<mwSize>(Xup),
+                    static_cast<mwSize>(Yup),
+                    static_cast<mwSize>(Zup),
+                };
+                plhs[0] = mxCreateNumericArray(3, odims, mxUINT8_CLASS, mxREAL);
+                uint8_t* out_ptr = static_cast<uint8_t*>(mxGetData(plhs[0]));
+                std::fill_n(out_ptr,
+                            static_cast<size_t>(Xup) * Yup * Zup, bg_label);
+
+                #pragma omp parallel for schedule(static) collapse(2)
+                for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
+                    for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
+                        const int64_t lz = z - bbox_lo_up[0];
+                        const int64_t ly = y - bbox_lo_up[1];
+
+                        for (int64_t x = bbox_lo_up[2]; x < bbox_hi_up[2]; ++x) {
+                            const int64_t lx = x - bbox_lo_up[2];
+                            const int64_t i_net = lz * lyN * lxN + ly * lxN + lx;
+                            int best = 0;
+
+                            if (spm) {
+                                float M = logits.channel_ptr(0)[i_net];
+                                for (int64_t c = 1; c < opts.classes; ++c) {
+                                    float v = logits.channel_ptr(c)[i_net];
+                                    if (v > M) M = v;
+                                }
+                                float bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+                                for (int64_t c = 0; c < opts.classes; ++c) {
+                                    bin[siam::SIAM18_TO_SPM6[c]] +=
+                                        std::exp(logits.channel_ptr(c)[i_net] - M);
+                                }
+                                float bestv = bin[0];
+                                for (int64_t b = 1; b < siam::SPM6_NUM_CLASSES; ++b) {
+                                    if (bin[b] > bestv) {
+                                        bestv = bin[b];
+                                        best = static_cast<int>(b);
+                                    }
+                                }
+                            } else {
+                                float bestv = logits.channel_ptr(0)[i_net];
+                                for (int64_t c = 1; c < opts.classes; ++c) {
+                                    float v = logits.channel_ptr(c)[i_net];
+                                    if (v > bestv) {
+                                        bestv = v;
+                                        best = static_cast<int>(c);
+                                    }
+                                }
+                            }
+                            out_ptr[z * plane_up + y * Xup + x] =
+                                static_cast<uint8_t>(best);
+                        }
+                    }
+                }
+            }
+
+            // plhs[1]: 4x4 affine for the upsampled grid, row-major, double.
+            // MATLAB stores 4x4 column-major; mxCreateDoubleMatrix(4,4)
+            // gives that. We write transposed so MATLAB's nii.NIFTIHeader.Affine
+            // (which is row-major 3x4 or 4x4 in the JNIfTI convention) reads
+            // correctly.
+            if (nlhs >= 2) {
+                plhs[1] = mxCreateDoubleMatrix(4, 4, mxREAL);
+                double* a_ptr = mxGetPr(plhs[1]);
+                for (int r = 0; r < 4; ++r) {
+                    for (int c_ = 0; c_ < 4; ++c_) {
+                        a_ptr[c_ * 4 + r] = static_cast<double>(A_up[r * 4 + c_]);
+                    }
+                }
+            }
+
+            return;
+        }
+        // ---- end upsample branch; non-upsample path below ----
 
         siam::LogitsVolume logits_back;
         logits_back.resize(opts.classes, cZ, cY, cX);
