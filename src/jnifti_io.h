@@ -100,11 +100,11 @@ void save_jnifti_labels(const std::string& path,
  * @param  class_set        semantic label set; controls which preset
  *                          (if any) goes into NIFTIHeader._DataInfo_.LabelTable
  * @param  shuffle          apply JData _ArrayShuffle_=4 (byte-shuffle) to
- *                          the float32 payload before zlib (default true;
- *                          1.5-2.5x smaller .jnii/.bnii at no decode cost
- *                          for spec-compliant readers). Pass false to
- *                          emit a vanilla zlib-only payload for tools
- *                          that don't yet understand _ArrayShuffle_.
+ *                          the float32 payload before zlib. Default false
+ *                          for interop with readers that don't yet
+ *                          understand _ArrayShuffle_; set true to opt in
+ *                          to the 1.5-2.5x size win at no decode cost
+ *                          for spec-compliant readers.
  */
 void save_jnifti_tpm(const std::string& path,
                      const NiftiImage& src,
@@ -112,7 +112,7 @@ void save_jnifti_tpm(const std::string& path,
                      int64_t num_classes,
                      const std::string& format,
                      ClassSet class_set = ClassSet::CUSTOM_N,
-                     bool shuffle = true);
+                     bool shuffle = false);
 
 /**
  * @brief Load a JNIfTI file (.jnii or .bnii) into a canonical NiftiImage

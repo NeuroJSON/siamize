@@ -322,12 +322,13 @@ void usage(const char* exe) {
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
                  "                      wall time; use only on RAM-constrained hosts.\n"
-                 "      --no-shuffle    disable JData _ArrayShuffle_=4 (byte-shuffle before\n"
-                 "                      zlib) on TPM .jnii/.bnii output. Default ON, yields\n"
+                 "      --shuffle       enable JData _ArrayShuffle_=4 (byte-shuffle before\n"
+                 "                      zlib) on TPM .jnii/.bnii output. Default OFF for\n"
+                 "                      interop with readers that don't yet understand\n"
+                 "                      _ArrayShuffle_ (current jsonlab). When set, yields\n"
                  "                      1.5-2.5x smaller TPM files at no decode cost for\n"
-                 "                      spec-compliant readers. Pass this when writing for\n"
-                 "                      a reader that doesn't yet understand _ArrayShuffle_\n"
-                 "                      (e.g. older jsonlab versions).\n"
+                 "                      spec-compliant readers (siamize itself, future\n"
+                 "                      jsonlab).\n"
                  "      --lowmem        force the full low-memory preset (--no-arena +\n"
                  "                      -t auto-cap=8 + --cudnn-max-workspace 0 +\n"
                  "                      --gpu-mem-limit 6G + -P 192x192x128). The -P\n"
@@ -447,11 +448,13 @@ int main(int argc, char** argv) {
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
-    bool        tpm_shuffle     = true;  // apply JData _ArrayShuffle_=4 before zlib
-                                         // on TPM jnii/bnii output. Default ON for
-                                         // the 1.5-2.5x size win; pass --no-shuffle
-                                         // for readers that don't yet understand
-                                         // _ArrayShuffle_ (e.g. older jsonlab).
+    bool        tpm_shuffle     = false; // apply JData _ArrayShuffle_=4 before zlib
+                                         // on TPM jnii/bnii output. Default OFF for
+                                         // interop with readers that don't yet
+                                         // understand _ArrayShuffle_ (e.g. current
+                                         // jsonlab); pass --shuffle to opt in to
+                                         // the 1.5-2.5x size win for spec-compliant
+                                         // readers (siamize itself, future jsonlab).
     bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
                                          //         (skip per-channel back-resample),
                                          //         un-cropped to full canonical extent,
@@ -587,8 +590,8 @@ int main(int argc, char** argv) {
         } else if (a == "--no-arena") {
             engine_tuning.cpu_arena = false;
             cpu_arena_set = true;
-        } else if (a == "--no-shuffle") {
-            tpm_shuffle = false;
+        } else if (a == "--shuffle") {
+            tpm_shuffle = true;
         } else if (a == "--upsample") {
             upsample_mode = true;
         } else if (a == "--lowmem") {
@@ -832,7 +835,7 @@ int main(int argc, char** argv) {
                   engine_tuning.cpu_arena ? "" : "  --no-arena",
                   lowmem_mode ? "  --lowmem" : "",
                   class_set == ClassSet::SPM ? "  --classes spm" : "",
-                  (tpm_mode && !tpm_shuffle) ? "  --no-shuffle" : "");
+                  (tpm_mode && tpm_shuffle) ? "  --shuffle" : "");
 
     // Pre-flight memory check: warn if available RAM is below the
     // expected peak for the current config. We can't trap SIGKILL
