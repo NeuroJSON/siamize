@@ -938,24 +938,61 @@ int main(int argc, char** argv) {
                      threads, 0.5f, verbose, device, trt_cache_dir, engine_tuning);
     } catch (const Ort::Exception& e) {
         std::string msg = e.what();
-        bool oom = msg.find("allocate") != std::string::npos
-                   || msg.find("Allocate") != std::string::npos
-                   || msg.find("out of memory") != std::string::npos
-                   || msg.find("CUDA_ERROR_OUT_OF_MEMORY") != std::string::npos;
+        const bool oom = msg.find("allocate") != std::string::npos
+                         || msg.find("Allocate") != std::string::npos
+                         || msg.find("out of memory") != std::string::npos
+                         || msg.find("CUDA_ERROR_OUT_OF_MEMORY") != std::string::npos;
+        // cuDNN/cuBLAS handle creation failures or other CUDA-runtime
+        // errors that fire AFTER the CUDA EP successfully appends but
+        // BEFORE/DURING session creation. The library loaded; the
+        // runtime state is bad (driver/cuDNN version mismatch, GPU in
+        // compute-prohibited mode, another process holding the device,
+        // etc.). Distinct from OOM because the remedy is different
+        // -- adjusting workspace knobs won't help; only switching off
+        // GPU does.
+        const bool cuda_init = msg.find("CUDNN")        != std::string::npos
+                               || msg.find("cudnn")     != std::string::npos
+                               || msg.find("CUBLAS")    != std::string::npos
+                               || msg.find("cublas")    != std::string::npos
+                               || msg.find("CUDA failure") != std::string::npos
+                               || msg.find("Exception during initialization") != std::string::npos;
 
         if (device == "auto" && oom) {
-            std::fprintf(stderr,
-                         "[warn]     GPU allocation failed: %s\n"
-                         "           -c auto falling back to CPU. To force CPU from the\n"
-                         "           start, pass `-c cpu`; for tight-VRAM GPUs try also\n"
-                         "           `--cudnn-max-workspace 0 --arena-extend same` before\n"
-                         "           giving up on GPU.\n",
-                         e.what());
+            siam::log_warn("GPU allocation failed: %s", e.what());
+            siam::log_hint("-c auto falling back to CPU. To force CPU from the");
+            siam::log_cont("start, pass `-c cpu`; for tight-VRAM GPUs try also");
+            siam::log_cont("`--cudnn-max-workspace 0 --arena-extend same` before");
+            siam::log_cont("giving up on GPU.");
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
                          threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+        } else if (device == "auto" && cuda_init) {
+            siam::log_warn("CUDA/cuDNN session init failed: %s", e.what());
+            siam::log_hint("-c auto falling back to CPU. Common root causes:");
+            siam::log_cont("  - cuDNN library version mismatch (ORT 1.26 expects cuDNN 9.x)");
+            siam::log_cont("  - NVIDIA driver too old for installed CUDA runtime (check `nvidia-smi`)");
+            siam::log_cont("  - GPU in compute-prohibited mode (`nvidia-smi -q | grep \"Compute Mode\"`)");
+            siam::log_cont("  - another process holding the GPU exclusively");
+            siam::log_cont("  - pass `-c cpu` to skip GPU entirely");
+            logits = siam::sliding_window(
+                         resampled, model_paths, patch, num_classes,
+                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+        } else if (cuda_init) {
+            // User explicitly asked for cuda / tensorrt and the
+            // session init failed. Print a useful diagnostic and exit
+            // cleanly instead of letting the exception abort the
+            // process via std::terminate.
+            siam::log_warn("CUDA/cuDNN session init failed: %s", e.what());
+            siam::log_hint("you passed `-c %s`; common root causes:", device.c_str());
+            siam::log_cont("  - cuDNN library version mismatch (ORT 1.26 expects cuDNN 9.x)");
+            siam::log_cont("  - NVIDIA driver too old for installed CUDA runtime (check `nvidia-smi`)");
+            siam::log_cont("  - GPU in compute-prohibited mode (`nvidia-smi -q | grep \"Compute Mode\"`)");
+            siam::log_cont("  - another process holding the GPU exclusively");
+            siam::log_cont("  - pass `-c cpu` or `-c auto` to switch off GPU");
+            return 4;
         } else {
-            throw;
+            siam::log_warn("ORT exception: %s", e.what());
+            return 4;
         }
     }
 
