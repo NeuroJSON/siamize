@@ -142,14 +142,14 @@ jobs:
 
       - name: Run single-fold inference (expect CPU fallback on GPU-less runner)
         # GitHub runners have no NVIDIA GPU, so siamize falls back to
-        # CPU. The dynamic-shape ONNX + 14 GB GHA cgroup needs --lowmem
-        # to drop the patch from 256x256x192 to 192x192x128 (27 tiles
-        # rather than 8); --no-arena is implied by the --lowmem
-        # preset. End-to-end completes in ~10 min.
+        # CPU. Dynamic-shape ONNX + default 256x256x192 + --no-arena
+        # peaks ~11-12 GB on the 14 GB GHA cgroup (the historical
+        # OOM was a stale arena-ignore bug, fixed in 6d052ed). 8
+        # tiles, end-to-end ~500-550 s.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
-              --lowmem \
+              --no-arena \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
