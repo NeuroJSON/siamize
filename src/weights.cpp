@@ -236,11 +236,10 @@ std::string default_cache_dir() {
 /*******************************************************************************/
 /*! \fn    const char* variant_str(WeightVariant variant)
     \brief Map WeightVariant to its on-server `doc=` value / cache subdir name
-    \return  null-terminated string ("dynshape", "fixshape", "coreml")
+    \return  null-terminated string ("dynshape" or "coreml")
 */
 const char* variant_str(WeightVariant variant) {
     switch (variant) {
-        case WeightVariant::FIXSHAPE: return "fixshape";
         case WeightVariant::COREML:   return "coreml";
         case WeightVariant::DYNSHAPE:
         default:                      return "dynshape";
@@ -256,7 +255,6 @@ std::string default_weights_url(WeightVariant variant) {
 
     // doc=dynshape: fp16 ONNX with dynamic_axes={D,H,W}. Default for
     //   CUDA / TensorRT / CPU EPs; supports --lowmem patch shrink.
-    // doc=fixshape: fp16 ONNX locked to 256x256x192. Legacy CI bundle.
     // doc=coreml:   fp16 fixed-shape ONNX with rank-5 InstanceNorm
     //   rewritten to rank-3 (see tools/onnx_export/rewrite_for_coreml.py)
     //   so Apple's mlcompilerd accepts it. Used by the CoreML EP.

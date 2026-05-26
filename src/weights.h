@@ -87,12 +87,11 @@ std::string default_cache_dir();
 enum class WeightVariant {
     DYNSHAPE,   /**< doc=dynshape: fp16, dynamic D/H/W axes. Canonical
                      for CUDA / TensorRT / CPU EPs. */
-    FIXSHAPE,   /**< doc=fixshape: fp16, locked to 256x256x192. Legacy
-                     CI / regression-test bundle. */
-    COREML,     /**< doc=coreml: fp16 fixed-shape but with rank-5
+    COREML,     /**< doc=coreml: fp16 fixed-shape with rank-5
                      InstanceNormalization rewritten to rank-3 via
-                     Reshape ops, so Apple's mlcompilerd accepts it.
-                     Used when the CoreML EP is active. */
+                     Reshape ops (see tools/onnx_export/
+                     rewrite_for_coreml.py) so Apple's mlcompilerd
+                     accepts it. Used when the CoreML EP is active. */
 };
 
 std::string default_weights_url(WeightVariant variant = WeightVariant::DYNSHAPE);
