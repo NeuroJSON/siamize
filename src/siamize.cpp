@@ -536,6 +536,7 @@ int main(int argc, char** argv) {
     bool cudnn_max_workspace_set  = false;
     bool gpu_mem_limit_set        = false;
     bool format_set               = false;
+    bool coreml_units_set         = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -588,6 +589,8 @@ int main(int argc, char** argv) {
                              s.c_str());
                 return 2;
             }
+
+            coreml_units_set = true;
         } else if (a == "--coreml-cache-dir") {
             engine_tuning.coreml_cache_dir = need();
         } else if (a == "--coreml-static-shapes") {
@@ -837,6 +840,22 @@ int main(int argc, char** argv) {
         if (!cpu_arena_set) {
             engine_tuning.cpu_arena = false;
             auto_applied.push_back("--no-arena");
+        }
+
+        // CoreML EP compile-memory mitigation. Apple's mlcompilerd
+        // peaks ~6-8 GB compiling SIAM's MLProgram for all three
+        // compute units (CPU + Metal GPU + ANE). On a memory-tight
+        // host (auto-lowmem trigger: avail RAM < 14 GB) the ANE +
+        // GPU codegen passes are what blow the budget. Dropping to
+        // MLComputeUnits=CPUOnly slashes compile-time peak to ~1-2
+        // GB at the cost of run-time perf (no ANE / GPU offload).
+        // Same opt-out as the other auto-lowmem knobs: don't stomp
+        // on an explicit --coreml-units choice. Only applies when
+        // CoreML is the active EP target.
+        if (!coreml_units_set
+                && (device == "coreml" || device == "auto")) {
+            engine_tuning.coreml_units = siam::CoreMLUnits::CPU_ONLY;
+            auto_applied.push_back("--coreml-units cpu");
         }
 
         // -t auto-cap reduction is handled in the threads-resolution
