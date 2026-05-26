@@ -384,7 +384,7 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Run single-fold inference (-c auto: CoreML first, CPU fallback)
+      - name: "Run single-fold inference (-c auto: CoreML first, CPU fallback)"
         # First run compiles ONNX -> .mlmodelc (~10-30 s). End-to-end
         # ~30-60 s on macos-14 (M1, 8 GB RAM unified) when CoreML
         # claims the graph; up to ~10 min on CPU fallback.
