@@ -397,12 +397,41 @@ jobs:
         # CoreML-friendly rewrite (Reshape -> InstanceNorm2D ->
         # Reshape) the CoreML EP will actually run end-to-end.
         timeout-minutes: 30
+        env:
+          # ORT verbose logging so the CoreML EP partition decisions
+          # and the MLProgram compile path are visible in the CI log.
+          # 0 = VERBOSE, 1 = INFO, 2 = WARNING, 3 = ERROR.
+          ORT_LOG_SEVERITY_LEVEL: "1"
         run: |
+          # Capture exit code through the tee pipe so we can tell
+          # "graceful CPU fallback" (0) apart from "killed mid-compile"
+          # (137 / 134 / 139). Without PIPESTATUS the step would report
+          # tee's exit status, which is always 0.
+          set +e
           build/siamize \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
               -c auto 2>&1 | tee siamize.log
+          exit_code=${PIPESTATUS[0]}
+          set -e
+          echo "=== siamize exited with code $exit_code ==="
+          case $exit_code in
+            0)   echo "OK: inference completed cleanly." ;;
+            4)   echo "Clean fallback path -- siamize printed a [warn] + [hint] block." ;;
+            137) echo "SIGKILL (likely OS OOM killer; macos-14 has only ~7 GB RAM and"
+                 echo "CoreML's MLProgram compile of a 283 MB ONNX can peak 4-6 GB)." ;;
+            134) echo "SIGABRT (uncaught exception / assertion inside ORT or CoreML)." ;;
+            139) echo "SIGSEGV (segfault, most likely in Apple's mlcompilerd)." ;;
+            *)   echo "Unexpected exit code." ;;
+          esac
+          # Dump memory state so we can correlate a non-zero exit with
+          # actual pressure on the runner.
+          echo "=== vm_stat ==="
+          vm_stat 2>&1 | head -8 || true
+          echo "=== top -l 1 (mem column) ==="
+          top -l 1 -n 0 -stats pid,command,mem,state 2>&1 | head -15 || true
+          test "$exit_code" -eq 0
 
       - name: Verify CoreML EP was probed (and CoreML compile attempted)
         run: |
