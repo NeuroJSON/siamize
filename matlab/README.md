@@ -61,29 +61,43 @@ git submodule update --init  # populates matlab/jsonlab
 
 ### 2. Build the MEX
 
-GNU Octave (Linux/macOS):
+CPU-only MEX (works on every host):
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_OCTAVE_MEX=ON
-cmake --build build -j
-# -> build/siamex.mex
+make mex-octave              # -> matlab/siamex.mex
+make mex-matlab              # -> matlab/siamex.mexa64 / .mexmaca64 / .mexw64
 ```
 
-MATLAB (Linux/macOS/Windows):
+GPU-enabled MEX (same EP options as the corresponding CLI build):
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_MATLAB_MEX=ON
+# NVIDIA CUDA (Linux / Windows):
+make cudaoct                 # Octave MEX,  -DSIAMIZE_GPU=cuda
+make cudamex                 # MATLAB MEX,  -DSIAMIZE_GPU=cuda
+
+# Apple Silicon Core ML (macOS only):
+make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
+make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
+```
+
+All `make` targets drop the `.mex*` next to `matlab/siamize.m` so the
+wrapper finds it via `addpath` auto-detection — no manual path setup
+needed. Equivalent explicit CMake forms:
+
+```bash
+# Octave:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_OCTAVE_MEX=ON  [-DSIAMIZE_GPU=cuda|coreml]
+
+# MATLAB:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_MATLAB_MEX=ON  [-DSIAMIZE_GPU=cuda|coreml]
 cmake --build build -j
-# -> build/siamex.mexa64  (Linux)
-#    build/siamex.mexmaca64 (macOS arm64)
-#    build/Release/siamex.mexw64 (Windows)
 ```
 
 The MEX dlopens `libonnxruntime` from the ORT prebuilt under
-`third_party/onnxruntime/lib/` (Linux/macOS) or `bin/` (Windows). For
-deployment, drop `siamex.mex*`, `siamize.m`, the `jsonlab/` directory, and
-the matching `libonnxruntime.{so,dylib,dll}` into a single folder; users
-just `addpath()` it.
+`third_party/onnxruntime/lib/` (Linux / macOS) or `bin/` (Windows).
+For deployment, drop `siamex.mex*`, `siamize.m`, the `jsonlab/`
+directory, and the matching `libonnxruntime.{so,dylib,dll}` into a
+single folder; users just `addpath()` it.
 
 ### 3. Run
 
@@ -209,18 +223,24 @@ siamize CLI long flags (hyphens become underscores in MATLAB):
 
 | Key | CLI counterpart | Value |
 |---|---|---|
-| `'compute'` | `-c / --compute` | `'auto'` (default), `'cpu'`, `'cuda'`, `'tensorrt'` |
-| `'thread'` | `-t / --thread` | int (default 0 = all available cores) |
-| `'gpu'` | `-G / --gpu` | int (0-based CUDA device id) |
-| `'patch'` | `-P / --patch` | `[pz, py, px]` (default `[256 256 192]`) |
+| `'compute'` | `-c / --compute` | `'auto'` (default), `'cpu'`, `'cuda'`, `'tensorrt'`, `'coreml'` |
+| `'thread'` | `-t / --thread` | int (default 0 = `min(hardware_concurrency, 16)`) |
+| `'gpu'` | `-G / --gpu` | int (0-based device id; matches `nvidia-smi -L` indices, see [parent README](../README.md#engine-choice--gpu-portability)) |
+| `'patch'` | `-P / --patch` | `[pz, py, px]` (default `[256 256 192]`; requires dynamic-axes ONNX) |
 | `'spacing'` | `-u / --spacing` | double mm (default 0.75) |
-| `'classes'` | `-C / --classes` | int (default 18, matches SIAM v0.3) |
+| `'classes'` | `-C / --classes` | int (default 18, matches SIAM v0.3) **or** `'spm'` to remap to SPM12's 6 TPM channels (GM, WM, CSF, Bone, Soft, Air). Works for both labels and TPM. |
 | `'trt_cache'` | `--trt-cache-dir` | char (default `~/.cache/siamize/trt`) |
-| `'verbose'` | `-v / --verbose` | logical (default false) |
+| `'verbose'` | `-v / --verbose` | logical (default **true**). Set to false to silence the per-stage `[tag]` log lines. Output flushes live via `mexEvalString("drawnow;")`. |
+| `'arena'` | `--no-arena` | logical (default true = arena ON). false = `--no-arena` (saves ~16 GB RSS on the 18-class model at ~1.5× wall). |
+| `'lowmem'` | `--lowmem` | logical (default false). True forces the full low-memory preset (smaller patch + tighter EP knobs). Auto-applied on hosts with < 14 GB free RAM. |
+| `'upsample'` | `--upsample` | logical (default false). True returns labels / TPM at the network's internal 0.75 mm canonical-RAS grid instead of resampling back to the input grid. The MEX returns the new affine as a second output arg, and `siamize.m` writes it into `nii.NIFTIHeader.Affine` automatically. |
 | `'cudnn_max_workspace'` | `--cudnn-max-workspace` | 0 or 1 (default 1) |
 | `'arena_extend'` | `--arena-extend` | `'power'` (default) or `'same'` |
 | `'cudnn_algo'` | `--cudnn-algo` | `'default'` / `'heuristic'` / `'exhaustive'` |
 | `'gpu_mem_limit'` | `--gpu-mem-limit` | bytes (double, e.g. `6*1024^3` for 6 GB) |
+| `'coreml_units'` | `--coreml-units` | `'all'` / `'cpune'` / `'cpugpu'` / `'cpu'` — which hardware Core ML may route to (CPU + Metal GPU + Neural Engine). Default `'all'`. Auto-lowmem drops to `'cpu'` on RAM-tight hosts. |
+| `'coreml_cache_dir'` | `--coreml-cache-dir` | char (default `~/.cache/siamize/coreml`) — Core ML's `.mlmodelc` compile cache. |
+| `'coreml_static_shapes'` | `--coreml-static-shapes` | logical (default true). Tells Core ML the input shape is fixed (pairs with the `doc=coreml` ONNX). |
 | `'tpm'` | `--tpm` | logical (default false). When true, `nii.NIFTIData` is a 4D single TPM instead of 3D uint8 labels. |
 | `'tpm_t'` | `--tpm-t` | softmax temperature (default 1.0). Only meaningful when `tpm` is true. |
 
@@ -269,11 +289,19 @@ both. The wrapper looks up each missing fold in this order:
 Default URL prefix:
 
 ```
-https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=
+https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&file=
 ```
 
-(`size=` is informational and not validated by the server, so the same
-constant is reused for every fold.)
+The `doc=` parameter selects the weight variant:
+
+| `doc=` | When used | Contents |
+|---|---|---|
+| `dynshape` (default) | CUDA / TensorRT / CPU EPs | fp16 ONNX with dynamic D / H / W axes |
+| `coreml` | Apple Core ML EP (auto-picked when `opts.compute='coreml'` and `opts.coreml_static_shapes=true`) | fp16 fixed-shape with rank-5 InstanceNorm rewritten to rank-3 (so Apple's mlcompilerd accepts it) |
+
+The variants are cached in separate subdirs (`models/` and
+`models/coreml/`) so a host that runs both CUDA and CoreML EPs holds
+both ONNX variants on disk without basename collisions.
 
 ## Layout
 
@@ -336,9 +364,24 @@ Two approaches that **don't** work and are worth not wasting time on:
   A second C++ runtime inside a MEX fights MATLAB's already-loaded
   libstdc++ over `type_info`, vtables, and `std::cout`, and aborts on
   MEX load with "MATLAB is exiting because of fatal error".
-* **LD_PRELOAD-ing the system libstdc++.** Works for a smoke load but
-  forces every MATLAB launch into a non-default config and breaks any
-  MathWorks toolbox compiled against the bundled libstdc++.
+* **LD_PRELOAD-ing the system libstdc++** for production. Works for
+  a smoke load (see below) but forces every MATLAB launch into a
+  non-default config and breaks any MathWorks toolbox compiled
+  against the bundled libstdc++.
+
+If you can't switch GCC versions (MATLAB R2022b on a recent Ubuntu /
+RHEL host, for instance), `LD_PRELOAD` is the diagnostic-only
+workaround:
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab -nodesktop
+```
+
+The system's `libstdc++.so.6` includes the GLIBCXX_3.4.29+ symbols
+the MEX references, satisfying the dynamic linker before MATLAB's
+older bundled one is loaded. Verify with
+`strings /usr/lib/x86_64-linux-gnu/libstdc++.so.6 | grep GLIBCXX_3.4 | sort -V | tail`
+that the host libstdc++ actually has the required version.
 
 ## Bundled dependencies
 

@@ -75,12 +75,15 @@ scripts\fetch_deps.ps1
 The fp16 ONNX fold weights are **not** fetched up-front: `siamize` and
 its MATLAB/Octave wrapper auto-download any missing fold from
 NeuroJSON (URL prefix
-`https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=`,
+`https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&file=`,
 overridable via `SIAMIZE_WEIGHTS_BASE_URL`) into a shared cache (`$SIAMIZE_CACHE_DIR`,
 default `$HOME/.cache/siamize/models/` on POSIX or
 `%LOCALAPPDATA%/siamize/models/` on Windows). One download serves both
-the CLI binary and the MEX. If you want all five folds pre-staged
-before going offline, run:
+the CLI binary and the MEX. The default `doc=dynshape` variant has
+dynamic spatial axes (any patch size); `doc=coreml` ships an
+InstanceNorm-rewritten variant for Apple's Core ML EP (see the CoreML
+section below), and the resolver auto-picks the right one based on
+`-c`. If you want all five folds pre-staged before going offline, run:
 
 ```bash
 scripts/fetch_weights.sh     # downloads the 5 fp16 .onnx folds (~1.35 GB) into models/
@@ -119,11 +122,22 @@ cmake -S . -B build -DSIAMIZE_GPU=cuda
 cmake --build build -j
 ```
 
-The binary then accepts `-c {auto,cpu,cuda}` (default `auto`). On
-`auto` it tries to register the CUDA Execution Provider and falls back to
-CPU if the runtime libraries (`libcudart`, `libcudnn`, `libcublasLt`) can't
-be loaded. Pass `-c cuda` to force GPU and fail loudly if it isn't
-available; pass `-c cpu` to skip GPU even when compiled in.
+The binary accepts `-c {auto,cpu,cuda,tensorrt,coreml}` (default
+`auto`). On `auto` siamize prefers (in order): TensorRT EP (if
+compiled in), CUDA EP (if compiled in), Apple Core ML EP (if compiled
+in on macOS), then CPU. The EP probe is graceful — if the runtime
+libraries (`libcudart`, `libcudnn`, `libcublasLt`, ...) can't be
+loaded, siamize falls back to CPU with a `[cuda] unavailable`-style
+log line. Pass `-c cuda` / `-c tensorrt` / `-c coreml` to force a
+specific EP and fail loudly if it isn't available; `-c cpu` skips
+GPU even when the build includes it.
+
+On a multi-GPU host, `-G N` selects the device. siamize sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` by default so `-G N` matches the same
+index `nvidia-smi -L` prints (otherwise CUDA's default
+`FASTEST_FIRST` order silently routes `-G 0` to whichever card CUDA
+considers fastest, which can be the opposite of what
+`nvidia-smi -L` reports on heterogeneous hosts).
 
 CUDA runtime libraries are loaded via `dlopen`, so you may need to set
 `LD_LIBRARY_PATH` to include their location. With PyTorch-managed CUDA
@@ -318,6 +332,55 @@ savings (13.3 − 8.7 = 4.6 s) takes **~209 inferences per fold**. For a
 If you're not deploying to a batch server, **stick with the default CUDA
 EP**. The TRT path stays available for the lab that needs it.
 
+#### Optional: Core ML EP (Apple Silicon)
+
+On macOS / Apple Silicon, siamize can run inference through Apple's
+Core ML stack — CPU + Metal GPU + Neural Engine (ANE), selectable
+via `MLComputeUnits`. Core ML is statically linked into ORT 1.26's
+macOS dylib, so no separate provider plugin to fetch:
+
+```bash
+make coreml             # builds with -DSIAMIZE_GPU=coreml
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c coreml
+# or just:
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0       # -c auto picks CoreML on macOS
+```
+
+CoreML-relevant flags:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--coreml-units {all\|cpune\|cpugpu\|cpu}` | `all` | Which hardware Core ML can route ops to. `all` = CPU + Metal GPU + ANE. |
+| `--coreml-cache-dir P` | `~/.cache/siamize/coreml` | Per-host `.mlmodelc` compile cache. First run takes ~10-30 s to compile; subsequent runs hit the cache. |
+| `--coreml-static-shapes 0\|1` | `1` | `RequireStaticInputShapes` knob. Default `1` pairs with the `doc=coreml` fixed-shape ONNX. |
+
+**Important**: SIAM v0.3's encoder/decoder uses 3D `InstanceNorm`,
+which Core ML's MLProgram format rejects (rank-5 input; spec
+supports only rank 3-4). siamize ships under `doc=coreml` an
+InstanceNorm-rewritten ONNX where each rank-5 IN is replaced with
+`Reshape → InstanceNorm-rank-3 → Reshape`. The math is bit-exact
+to the original. The siamize weight resolver auto-fetches the
+`doc=coreml` variant when CoreML EP is active.
+
+Compile-time RAM peaks roughly:
+
+| `--coreml-units` | mlcompilerd peak (estimated) |
+|---|---|
+| `all` (CPU + GPU + ANE) | 6-8 GB |
+| `cpugpu` | 4-6 GB |
+| `cpu` | 1-2 GB |
+
+If your host is RAM-tight (< 14 GB free), siamize's auto-lowmem
+heuristic drops to `--coreml-units cpu` automatically. To
+benchmark real ANE acceleration, run on a host with ≥ 14 GB free
+RAM and pass `--coreml-units all` explicitly.
+
+The `tools/onnx_export/rewrite_for_coreml.py` script applies the
+InstanceNorm rewrite to any fp16/fp32 SIAM ONNX; it's how the
+`doc=coreml` bundle was produced from the same trained weights as
+`doc=dynshape`. Useful if you want to re-export with different
+fold or quantization choices.
+
 ### 3. Run
 
 ```bash
@@ -333,9 +396,32 @@ build/siamize -i input.nii.gz -o output.nii.gz \
     -M models/fold_0_fp16.onnx,models/fold_1_fp16.onnx
 ```
 
-`-t/--thread` defaults to `0` (all available cores via
-`std::thread::hardware_concurrency()`); set it explicitly only if you
-want to throttle CPU use.
+`-t/--thread` defaults to `0` = `min(hardware_concurrency, 16)`. The
+16-thread cap is empirical (see the "CPU thread tuning" section below
+for the Threadripper measurements that motivated it). Pass an explicit
+`-t N` to override.
+
+#### Useful flags (CLI quick reference)
+
+The most-used options beyond `-i / -o / -M / -c`:
+
+| Flag | Effect |
+|---|---|
+| `-v / --verbose` | progress messages (default ON since 0.1.0). Pair with `-q / --quiet` to silence. |
+| `-G N` | CUDA / TensorRT device id. Matches `nvidia-smi -L` indices (siamize sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`). |
+| `-t N` | ORT intra-op thread count. Default `min(hc, 16)`. |
+| `-P ZxYxX` | Sliding-window patch size, default `256x256x192`. Smaller patches → lower peak memory, more tiles. Requires dynamic-axes ONNX. |
+| `-u S` | Target isotropic spacing in mm, default `0.75`. |
+| `-C N\|spm` | Output classes. `-C 18` (default, SIAM v0.3) or `-C spm` to remap to SPM12's 6 TPM channels (GM, WM, CSF, Bone, Soft, Air). |
+| `--tpm [0\|1]` + `--tpm-t T` | Write a 4D float32 tissue probability map (per-voxel softmax over classes) instead of a uint8 labelmap. `--tpm-t > 1` softens the softmax. |
+| `--upsample` | Save at the network's internal 0.75 mm canonical-RAS grid instead of resampling back to the input grid. |
+| `--shuffle` | Apply JData `_ArrayShuffle_=4` byte-shuffle before zlib on TPM `.jnii`/`.bnii` output. 1.5-2.5× smaller payload for spec-compliant readers. |
+| `--lowmem` | Force the full low-memory preset (smaller patch + tighter EP knobs). Auto-applied on hosts with < 14 GB free RAM / < 12 GB free VRAM. |
+| `--no-arena` | Disable ORT's CPU memory arena (saves ~16 GB peak RSS on the 18-class model at ~1.5× wall cost). |
+| `--cudnn-max-workspace 0` + `--arena-extend same` + `--cudnn-algo heuristic` | Tight-VRAM GPU recipe (8 GB consumer cards). |
+| `--gpu-mem-limit N[K\|M\|G]` | Cap the CUDA EP arena. |
+
+Run `build/siamize --help` for the full list with longer descriptions.
 
 #### JNIfTI containers (`.jnii` / `.bnii`)
 
@@ -371,6 +457,27 @@ round-tripping has been verified for `.nii.gz` ↔ `.jnii` ↔ `.bnii`
 inputs on the bundled `sub-01_T1w.nii.gz` (100 % agreement, 5-fold
 ensemble).
 
+`.jnii` / `.bnii` labelmap and TPM outputs additionally carry a
+JGIFTI-style `LabelTable` at
+`NIFTIHeader._DataInfo_.LabelTable` — anatomical names + per-tissue
+RGBA colors keyed by label ID. Two presets are emitted automatically:
+the full SIAM v0.3 18-class dictionary (default), or the SPM12
+6-class TPM dictionary (GM, WM, CSF, Bone, Soft, Air) when
+`--classes spm` is set. Viewers that honour the
+[JGIFTI spec](https://github.com/NeuroJSON/jgifti) render tissue
+names and colors instead of an unlabeled colormap. NIfTI-1 output
+(`.nii` / `.nii.gz`) doesn't carry the LabelTable since the format
+has no extensible JSON header.
+
+For TPM output (`--tpm`) on the `.jnii` / `.bnii` path, opt into
+byte-shuffle compression with `--shuffle`. The flag wraps the
+fp32 payload with a JData `_ArrayShuffle_=4` annotation
+(blosc2-style per-byte plane regrouping before zlib), giving
+1.5-2.5× smaller files at no decode cost on JData-spec-compliant
+readers (siamize itself; future jsonlab versions). Default OFF for
+interop with current jsonlab which doesn't yet implement the
+unshuffle.
+
 ### 4. Regression test (optional)
 
 ```bash
@@ -389,16 +496,38 @@ share the `siamize_core` C++ sources).
 
 ### Build
 
+CPU-only MEX (works on every host):
+
 ```bash
 # Octave (Linux/macOS):
-make mex-octave              # -> build/siamex.mex
+make mex-octave              # -> matlab/siamex.mex
 
 # MATLAB (Linux/macOS/Windows):
-make mex-matlab              # -> build/siamex.mexa64 / .mexmaca64 / .mexw64
+make mex-matlab              # -> matlab/siamex.mexa64 / .mexmaca64 / .mexw64
+```
 
-# Equivalent explicit forms:
-# cmake -S . -B build -DSIAMIZE_BUILD_OCTAVE_MEX=ON  && cmake --build build -j
-# cmake -S . -B build -DSIAMIZE_BUILD_MATLAB_MEX=ON  && cmake --build build -j
+GPU-enabled MEX variants (same CLI capabilities as the corresponding
+`siamize` binary build):
+
+```bash
+# CUDA EP (NVIDIA, Linux/Windows):
+make cudaoct                 # Octave MEX,  -DSIAMIZE_GPU=cuda
+make cudamex                 # MATLAB MEX,  -DSIAMIZE_GPU=cuda
+
+# CoreML EP (Apple Silicon, macOS):
+make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
+make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
+```
+
+All targets drop the `.mex*` next to `matlab/siamize.m` so the
+wrapper finds it via its `addpath` auto-detection. Equivalent
+explicit CMake forms (any of the above translates to):
+
+```bash
+cmake -S . -B build -DSIAMIZE_BUILD_OCTAVE_MEX=ON  [-DSIAMIZE_GPU=cuda|coreml]
+# or:
+cmake -S . -B build -DSIAMIZE_BUILD_MATLAB_MEX=ON  [-DSIAMIZE_GPU=cuda|coreml]
+cmake --build build -j
 ```
 
 The bundled jsonlab submodule (`matlab/jsonlab/`) provides
@@ -431,9 +560,21 @@ nii_out = siamize(my_volume, '0,2,4', 'verbose', true);
 % explicit affine + output file + ensemble + opts
 siamize(my_volume, A, 'labels.nii.gz', 0:4, 'compute', 'cuda');
 
+% multi-GPU box, pick the GPU 1 of N (matches `nvidia-smi -L` index):
+siamize('in.nii.gz', 'lab.nii.gz', 0:4, 'compute', 'cuda', 'gpu', 1);
+
+% CoreML EP (Apple Silicon; needs MEX built via `make coremlmex` / coremloct):
+siamize('in.nii.gz', 'lab.nii.gz', 0, 'compute', 'coreml');
+
 % TPM mode: nii_out.NIFTIData becomes 4D single (float32) [X, Y, Z, 18]:
 nii_tpm = siamize('input.nii.gz', 0:4, 'tpm', true, 'tpm_t', 1.5);
 siamize('input.nii.gz', 'tpm.nii.gz', 0:4, 'tpm', true);  % save TPM to disk
+
+% SPM12-style 6-class output (GM, WM, CSF, Bone, Soft, Air):
+siamize('input.nii.gz', 'spm.nii.gz', 0, 'classes', 'spm');
+
+% Upsample mode: save at the network's 0.75 mm grid instead of the input grid.
+siamize('input.nii.gz', 'pred_hires.nii.gz', 0, 'upsample', true);
 ```
 
 | First arg | Interpretation |
@@ -488,9 +629,9 @@ src/  +  CMakeLists.txt # C++ standalone with ONNX Runtime, uses .onnx from (2)
 
 | Artifact | Size |
 |---|---|
-| `siamize` binary (static-linked C++/zlib/OpenMP) | 2.2 MB |
-| `siamex.mex*` (Octave MEX, dynamic libstdc++) | 180 KB |
-| `siamex.mexa64` (MATLAB MEX, static libstdc++) | ~3 MB |
+| `build/siamize` binary (static-linked C++/zlib/OpenMP) | ~2-3 MB |
+| `matlab/siamex.mex` (Octave MEX, dynamic libstdc++) | ~200 KB |
+| `matlab/siamex.mexa64` (MATLAB MEX, static libstdc++) | ~3-4 MB |
 | `libonnxruntime.so.1.26.0` | 23 MB |
 | One fold `.onnx` (fp16) | 270 MB |
 | Five folds | 1.35 GB |
@@ -621,19 +762,36 @@ in; in practice 8 GB has been sufficient.
 
 ## Engine choice / GPU portability
 
-The C++ binary uses **ONNX Runtime** with the CPU execution provider. Adding
-optional GPU providers later is a build-flag change, not a code change:
+The C++ binary uses **ONNX Runtime** with one of four execution
+providers, selected by `-DSIAMIZE_GPU=<backend>` at build time and by
+`-c` at run time. All four are wired in and CI-tested:
 
-- **CUDA EP** for NVIDIA — drop in `libonnxruntime-gpu.so` from the same ORT
-  release.
-- **DirectML EP** for any DX12 GPU on Windows.
-- **OpenVINO EP** for Intel CPU/GPU on Linux/Windows.
+| `-DSIAMIZE_GPU=` | `-c` | Hardware | Status |
+|---|---|---|---|
+| `none` (default) | `cpu` | any CPU | always available |
+| `cuda` | `cuda` | NVIDIA via ORT CUDA EP | CI: Linux + Windows builds |
+| `tensorrt` | `tensorrt` | NVIDIA via ORT TensorRT EP (+ CUDA fallback) | opt-in build |
+| `coreml` | `coreml` | Apple Silicon CPU + Metal GPU + ANE via ORT CoreML EP | CI: macos-14 build |
 
-A vendor-neutral GPU path on Linux (Vulkan/OpenCL) is not provided by ORT
-itself; for that, the same `.onnx` files can feed [MNN](https://github.com/alibaba/MNN)
-(OpenCL) or [TVM](https://tvm.apache.org/) (Vulkan/OpenCL/SPIR-V). Initial
-exploration of [ncnn](https://github.com/Tencent/ncnn) found its Vulkan
-backend lacks 3D conv kernels for this model.
+On a given host you build with the backend(s) you want; siamize's `-c
+auto` then picks the best available one at run time (TRT > CUDA >
+CoreML > CPU). MEX builds have matching `cudamex` / `cudaoct` /
+`coremlmex` / `coremloct` targets so MATLAB / Octave callers get the
+same EP coverage.
+
+ORT does also offer DirectML (any DX12 GPU on Windows), OpenVINO
+(Intel CPU/GPU), and ROCm (AMD) EPs — siamize doesn't wire them up
+today, but adding any of them is a CMake + sliding.cpp probe-block
+change rather than a code-change. The CoreML wiring (`sliding.cpp`'s
+`#ifdef SIAMIZE_HAS_COREML` block + `CMakeLists.txt` GPU-backend
+switch) is the cleanest template if you want to send a PR for one
+of these.
+
+For a vendor-neutral GPU path on Linux (Vulkan / OpenCL) the same
+`.onnx` files can feed [MNN](https://github.com/alibaba/MNN) (OpenCL)
+or [TVM](https://tvm.apache.org/) (Vulkan / OpenCL / SPIR-V). Initial
+exploration of [ncnn](https://github.com/Tencent/ncnn) found its
+Vulkan backend lacks 3D conv kernels for this model.
 
 ## Known precision gap (~0.3% vs Python)
 
