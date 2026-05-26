@@ -132,12 +132,8 @@ log line. Pass `-c cuda` / `-c tensorrt` / `-c coreml` to force a
 specific EP and fail loudly if it isn't available; `-c cpu` skips
 GPU even when the build includes it.
 
-On a multi-GPU host, `-G N` selects the device. siamize sets
-`CUDA_DEVICE_ORDER=PCI_BUS_ID` by default so `-G N` matches the same
-index `nvidia-smi -L` prints (otherwise CUDA's default
-`FASTEST_FIRST` order silently routes `-G 0` to whichever card CUDA
-considers fastest, which can be the opposite of what
-`nvidia-smi -L` reports on heterogeneous hosts).
+On a multi-GPU host, `-G N` selects the device; the index matches
+`nvidia-smi -L`.
 
 CUDA runtime libraries are loaded via `dlopen`, so you may need to set
 `LD_LIBRARY_PATH` to include their location. With PyTorch-managed CUDA
@@ -748,7 +744,7 @@ the arena is disabled).
 |---|---|---|---|
 | Single fold | RTX 2080 Super (Turing sm_75, 8 GB) | 13.3 s (±0.04 s, n=3) | **9.5×** |
 | 5-fold ensemble | RTX 2080 Super (Turing sm_75, 8 GB) | 58.5 s | **~11×** |
-| Single fold | A100 (Ampere sm_80, 40 GB) | pending — device contended at benchmark time |
+| Single fold | A100-PCIE-40GB (Ampere sm_80, 40 GB) | **9.8 s** | **~13×** |
 
 Correctness: the Turing 5-fold output matches the Phase-1 PyTorch reference
 at 99.7167% voxel agreement — identical to the CPU C++ result. Switching to
