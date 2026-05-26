@@ -240,9 +240,12 @@ std::string default_cache_dir() {
 */
 const char* variant_str(WeightVariant variant) {
     switch (variant) {
-        case WeightVariant::COREML:   return "coreml";
+        case WeightVariant::COREML:
+            return "coreml";
+
         case WeightVariant::DYNSHAPE:
-        default:                      return "dynshape";
+        default:
+            return "dynshape";
     }
 }
 

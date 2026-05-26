@@ -524,11 +524,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 #ifndef _WIN32
     setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 #else
+
     // Windows: setenv doesn't exist; use _putenv_s which UNCONDITIONALLY
     // overwrites, so check first.
     if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
         _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
     }
+
 #endif
 
     if (nrhs < 3) {
@@ -579,13 +581,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         // decision propagates identically.
         siam::WeightVariant weight_variant_mex = siam::WeightVariant::DYNSHAPE;
 #ifdef SIAMIZE_HAS_COREML
+
         if (opts.device == "coreml" || opts.device == "auto") {
             weight_variant_mex = siam::WeightVariant::COREML;
         }
+
 #else
+
         if (opts.device == "coreml") {
             weight_variant_mex = siam::WeightVariant::COREML;
         }
+
 #endif
 
         for (auto& m : models) {
@@ -827,6 +833,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             // inside the full upsampled canonical grid. Per-axis floor of
             // bbox_lo scaled by input_spacing / target_spacing.
             std::array<int64_t, 3> bbox_lo_up{};
+
             for (int i = 0; i < 3; ++i) {
                 bbox_lo_up[i] = static_cast<int64_t>(std::llround(
                         static_cast<double>(crop.bbox[i][0]) *
@@ -837,6 +844,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 logits.spat[0], logits.spat[1], logits.spat[2]
             };
             std::array<int64_t, 3> bbox_hi_up{};
+
             for (int i = 0; i < 3; ++i) {
                 bbox_hi_up[i] = std::min(bbox_lo_up[i] + net_extent[i],
                                          full_up_shape[i]);
@@ -850,13 +858,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             };
             std::array<float, 16> A_up{};
             A_up[15] = 1.0f;
+
             for (int r = 0; r < 3; ++r) {
                 float origin_shift = 0.0f;
+
                 for (int i = 0; i < 3; ++i) {
                     const float scale = opts.spacing / zooms_canon[i];
                     A_up[r * 4 + i] = affine_canon[r * 4 + i] * scale;
                     origin_shift += affine_canon[r * 4 + i] * 0.5f * (scale - 1.0f);
                 }
+
                 A_up[r * 4 + 3] = affine_canon[r * 4 + 3] + origin_shift;
             }
 
@@ -886,27 +897,39 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 const int64_t N_net = lzN * lyN * lxN;
 
                 #pragma omp parallel for schedule(static)
+
                 for (int64_t i = 0; i < N_net; ++i) {
                     float m = logits.channel_ptr(0)[i] * inv_T;
+
                     for (int64_t c = 1; c < opts.classes; ++c) {
                         float v = logits.channel_ptr(c)[i] * inv_T;
-                        if (v > m) m = v;
+
+                        if (v > m) {
+                            m = v;
+                        }
                     }
+
                     float s = 0.0f;
+
                     for (int64_t c = 0; c < opts.classes; ++c) {
                         float e = std::exp(logits.channel_ptr(c)[i] * inv_T - m);
                         logits.channel_ptr(c)[i] = e;
                         s += e;
                     }
+
                     float invs = 1.0f / s;
+
                     for (int64_t c = 0; c < opts.classes; ++c) {
                         logits.channel_ptr(c)[i] *= invs;
                     }
+
                     if (spm) {
                         float spm_bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
                         for (int64_t c = 0; c < opts.classes; ++c) {
                             spm_bin[siam::SIAM18_TO_SPM6[c]] += logits.channel_ptr(c)[i];
                         }
+
                         for (int64_t b = 0; b < siam::SPM6_NUM_CLASSES; ++b) {
                             logits.channel_ptr(b)[i] = spm_bin[b];
                         }
@@ -938,6 +961,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                     for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
                         const int64_t lz = z - bbox_lo_up[0];
+
                         for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
                             const int64_t ly = y - bbox_lo_up[1];
                             const int64_t copy_n_x = bbox_hi_up[2] - bbox_lo_up[2];
@@ -968,6 +992,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                             static_cast<size_t>(Xup) * Yup * Zup, bg_label);
 
                 #pragma omp parallel for schedule(static) collapse(2)
+
                 for (int64_t z = bbox_lo_up[0]; z < bbox_hi_up[0]; ++z) {
                     for (int64_t y = bbox_lo_up[1]; y < bbox_hi_up[1]; ++y) {
                         const int64_t lz = z - bbox_lo_up[0];
@@ -980,16 +1005,24 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                             if (spm) {
                                 float M = logits.channel_ptr(0)[i_net];
+
                                 for (int64_t c = 1; c < opts.classes; ++c) {
                                     float v = logits.channel_ptr(c)[i_net];
-                                    if (v > M) M = v;
+
+                                    if (v > M) {
+                                        M = v;
+                                    }
                                 }
+
                                 float bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
+
                                 for (int64_t c = 0; c < opts.classes; ++c) {
                                     bin[siam::SIAM18_TO_SPM6[c]] +=
                                         std::exp(logits.channel_ptr(c)[i_net] - M);
                                 }
+
                                 float bestv = bin[0];
+
                                 for (int64_t b = 1; b < siam::SPM6_NUM_CLASSES; ++b) {
                                     if (bin[b] > bestv) {
                                         bestv = bin[b];
@@ -998,14 +1031,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                                 }
                             } else {
                                 float bestv = logits.channel_ptr(0)[i_net];
+
                                 for (int64_t c = 1; c < opts.classes; ++c) {
                                     float v = logits.channel_ptr(c)[i_net];
+
                                     if (v > bestv) {
                                         bestv = v;
                                         best = static_cast<int>(c);
                                     }
                                 }
                             }
+
                             out_ptr[z * plane_up + y * Xup + x] =
                                 static_cast<uint8_t>(best);
                         }
@@ -1021,6 +1057,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             if (nlhs >= 2) {
                 plhs[1] = mxCreateDoubleMatrix(4, 4, mxREAL);
                 double* a_ptr = mxGetPr(plhs[1]);
+
                 for (int r = 0; r < 4; ++r) {
                     for (int c_ = 0; c_ < 4; ++c_) {
                         a_ptr[c_ * 4 + r] = static_cast<double>(A_up[r * 4 + c_]);
@@ -1030,6 +1067,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
             return;
         }
+
         // ---- end upsample branch; non-upsample path below ----
 
         siam::LogitsVolume logits_back;

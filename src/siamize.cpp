@@ -482,9 +482,11 @@ int main(int argc, char** argv) {
 #ifndef _WIN32
     setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 #else
+
     if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
         _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
     }
+
 #endif
 
     std::string input_path, output_path, models_csv;
@@ -1008,16 +1010,20 @@ int main(int argc, char** argv) {
     // fall back to the dynshape default.
     siam::WeightVariant weight_variant = siam::WeightVariant::DYNSHAPE;
 #ifdef SIAMIZE_HAS_COREML
+
     if (device == "coreml" || device == "auto") {
         weight_variant = siam::WeightVariant::COREML;
     }
+
 #else
+
     if (device == "coreml") {
         // User passed -c coreml on a non-CoreML build. sliding.cpp
         // will throw a clearer error later; we still pick the matching
         // weight variant for consistency in case they switch the build.
         weight_variant = siam::WeightVariant::COREML;
     }
+
 #endif
 
     for (auto& m : model_paths) {

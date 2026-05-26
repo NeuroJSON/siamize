@@ -669,17 +669,21 @@ LogitsVolume sliding_window(const Volume& data,
 
                 switch (engine_tuning.coreml_units) {
                     case CoreMLUnits::CPU_ONLY:
-                        co_opts["MLComputeUnits"] = "CPUOnly"; break;
+                        co_opts["MLComputeUnits"] = "CPUOnly";
+                        break;
 
                     case CoreMLUnits::CPU_AND_GPU:
-                        co_opts["MLComputeUnits"] = "CPUAndGPU"; break;
+                        co_opts["MLComputeUnits"] = "CPUAndGPU";
+                        break;
 
                     case CoreMLUnits::CPU_AND_ANE:
-                        co_opts["MLComputeUnits"] = "CPUAndNeuralEngine"; break;
+                        co_opts["MLComputeUnits"] = "CPUAndNeuralEngine";
+                        break;
 
                     case CoreMLUnits::ALL:
                     default:
-                        co_opts["MLComputeUnits"] = "ALL"; break;
+                        co_opts["MLComputeUnits"] = "ALL";
+                        break;
                 }
 
                 // MLProgram is the modern Core ML format (macOS 13+):
