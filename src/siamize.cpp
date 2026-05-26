@@ -843,21 +843,34 @@ int main(int argc, char** argv) {
         }
 
         // CoreML EP compile-memory mitigation. Apple's mlcompilerd
-        // peaks ~6-8 GB compiling SIAM's MLProgram for all three
-        // compute units (CPU + Metal GPU + ANE). The ANE codegen
-        // pass is the heaviest (~3-5 GB on its own); skipping just
-        // ANE while keeping the Metal GPU path typically drops the
-        // compile peak to ~2-4 GB, which fits the ~7 GB hosts that
-        // auto-lowmem targets while still giving the user a real
-        // GPU acceleration signal. CPU+GPU vs CPU-only: roughly 5-10x
-        // faster on 3D conv workloads on Apple Silicon. Same opt-out
-        // as the other auto-lowmem knobs: don't stomp on an explicit
-        // --coreml-units choice. Only applies when CoreML is the
-        // active EP target.
+        // peaks ~6-8 GB compiling SIAM v0.3's MLProgram for all
+        // three compute units. Empirically (e2337c6 CI run on the
+        // macos-14 free runner, 7 GB RAM): both `ALL` and `cpugpu`
+        // are killed by the OS OOM at exit 137 before the compile
+        // returns -- the 283 MB ONNX with 75 InstanceNorm + 200+
+        // Conv3D nodes blows past the budget even when we skip ANE
+        // codegen and ask only for Metal GPU. Only CPU_ONLY's
+        // ~1-2 GB compile peak fits. Auto-fallback there.
+        //
+        // The trade-off is real: -c coreml --coreml-units cpu is
+        // typically NO faster than -c cpu (Core ML CPU backend vs
+        // ORT MLAS), and pays the ~10 s ONNX -> .mlmodelc compile
+        // on top. The right user move on tight-RAM hosts is just
+        // -c cpu. We keep the CoreML+CPU path here so the wiring
+        // is exercised and so users with >7 GB free will hit the
+        // ALL / cpugpu branch when their host has the headroom.
+        //
+        // Future tiering: when avail RAM is in the 8-14 GB range,
+        // CPU_AND_GPU may fit (GPU codegen alone is the median
+        // peak). Untested. Leaving CPU_ONLY as the conservative
+        // auto-pick until we have a confirmed-fits target.
+        //
+        // Same opt-out as the other auto-lowmem knobs: don't stomp
+        // on an explicit --coreml-units choice.
         if (!coreml_units_set
                 && (device == "coreml" || device == "auto")) {
-            engine_tuning.coreml_units = siam::CoreMLUnits::CPU_AND_GPU;
-            auto_applied.push_back("--coreml-units cpugpu");
+            engine_tuning.coreml_units = siam::CoreMLUnits::CPU_ONLY;
+            auto_applied.push_back("--coreml-units cpu");
         }
 
         // -t auto-cap reduction is handled in the threads-resolution
