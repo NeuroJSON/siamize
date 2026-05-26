@@ -633,8 +633,17 @@ src/  +  CMakeLists.txt # C++ standalone with ONNX Runtime, uses .onnx from (2)
 | Five folds | 1.35 GB |
 | **Single-fold deployable bundle** | **≈295 MB** |
 
-vs. the original SIAM stack: multi-GB PyTorch + nnU-Net + torchio install,
-plus 5.4 GB checkpoints.
+vs. the original SIAM stack: multi-GB PyTorch + nnU-Net + torchio
+install, plus 5.7 GB checkpoints (5 × 1.14 GB `checkpoint_final.pth`).
+The .pth files are ~4× larger per fold than siamize's .onnx not just
+because of fp32-vs-fp16 (~2×) but also because nnUNet's
+`dynamic_network_architectures` wrapper exposes every conv weight
+under multiple Python attribute paths (`module.conv` AND
+`module.all_modules[0]`, plus a `decoder.encoder.*` mirror), and
+PyTorch's pickle serialization doesn't fully dedup the shared
+storage across those paths. ONNX export traces the computation
+graph instead of the module tree, so the resulting `.onnx`
+references each underlying tensor exactly once.
 
 ### Runtime shared-library dependencies of `siamize`
 
