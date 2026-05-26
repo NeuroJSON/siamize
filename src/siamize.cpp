@@ -844,18 +844,20 @@ int main(int argc, char** argv) {
 
         // CoreML EP compile-memory mitigation. Apple's mlcompilerd
         // peaks ~6-8 GB compiling SIAM's MLProgram for all three
-        // compute units (CPU + Metal GPU + ANE). On a memory-tight
-        // host (auto-lowmem trigger: avail RAM < 14 GB) the ANE +
-        // GPU codegen passes are what blow the budget. Dropping to
-        // MLComputeUnits=CPUOnly slashes compile-time peak to ~1-2
-        // GB at the cost of run-time perf (no ANE / GPU offload).
-        // Same opt-out as the other auto-lowmem knobs: don't stomp
-        // on an explicit --coreml-units choice. Only applies when
-        // CoreML is the active EP target.
+        // compute units (CPU + Metal GPU + ANE). The ANE codegen
+        // pass is the heaviest (~3-5 GB on its own); skipping just
+        // ANE while keeping the Metal GPU path typically drops the
+        // compile peak to ~2-4 GB, which fits the ~7 GB hosts that
+        // auto-lowmem targets while still giving the user a real
+        // GPU acceleration signal. CPU+GPU vs CPU-only: roughly 5-10x
+        // faster on 3D conv workloads on Apple Silicon. Same opt-out
+        // as the other auto-lowmem knobs: don't stomp on an explicit
+        // --coreml-units choice. Only applies when CoreML is the
+        // active EP target.
         if (!coreml_units_set
                 && (device == "coreml" || device == "auto")) {
-            engine_tuning.coreml_units = siam::CoreMLUnits::CPU_ONLY;
-            auto_applied.push_back("--coreml-units cpu");
+            engine_tuning.coreml_units = siam::CoreMLUnits::CPU_AND_GPU;
+            auto_applied.push_back("--coreml-units cpugpu");
         }
 
         // -t auto-cap reduction is handled in the threads-resolution
