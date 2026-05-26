@@ -233,22 +233,36 @@ std::string default_cache_dir() {
     \brief Resolve the NeuroJSON URL prefix for auto-fetched weights
     \return  URL prefix (env-overridable; see weights.h)
 */
-std::string default_weights_url(bool fixshape) {
+/*******************************************************************************/
+/*! \fn    const char* variant_str(WeightVariant variant)
+    \brief Map WeightVariant to its on-server `doc=` value / cache subdir name
+    \return  null-terminated string ("dynshape", "fixshape", "coreml")
+*/
+const char* variant_str(WeightVariant variant) {
+    switch (variant) {
+        case WeightVariant::FIXSHAPE: return "fixshape";
+        case WeightVariant::COREML:   return "coreml";
+        case WeightVariant::DYNSHAPE:
+        default:                      return "dynshape";
+    }
+}
+
+std::string default_weights_url(WeightVariant variant) {
     const char* env = std::getenv("SIAMIZE_WEIGHTS_BASE_URL");
 
     if (env && *env) {
         return env;
     }
 
-    // doc=dynshape: ONNX with dynamic_axes={D,H,W} (default). Works with
-    // any patch size; preferred for CUDA / TensorRT / CPU.
-    // doc=fixshape: ONNX with shape locked to 256x256x192. Required for
-    // the CoreML EP's RequireStaticInputShapes=1 fast path (much better
-    // op fusion on Apple Silicon).
-    const char* doc = fixshape ? "fixshape" : "dynshape";
+    // doc=dynshape: fp16 ONNX with dynamic_axes={D,H,W}. Default for
+    //   CUDA / TensorRT / CPU EPs; supports --lowmem patch shrink.
+    // doc=fixshape: fp16 ONNX locked to 256x256x192. Legacy CI bundle.
+    // doc=coreml:   fp16 fixed-shape ONNX with rank-5 InstanceNorm
+    //   rewritten to rank-3 (see tools/onnx_export/rewrite_for_coreml.py)
+    //   so Apple's mlcompilerd accepts it. Used by the CoreML EP.
     return std::string(
                "https://neurojson.org/io/stat.cgi?action=get&db=siam_v03"
-               "&doc=") + doc + "&file=";
+               "&doc=") + variant_str(variant) + "&file=";
 }
 
 /*******************************************************************************/
@@ -268,7 +282,7 @@ std::string default_weights_url(bool fixshape) {
     \throws std::runtime_error if none of the lookup stages produces a file
 */
 std::string resolve_model_path(const std::string& spec, bool verbose,
-                               bool fixshape) {
+                               WeightVariant variant) {
     namespace fs = std::filesystem;
 
     if (spec.empty()) {
@@ -282,13 +296,13 @@ std::string resolve_model_path(const std::string& spec, bool verbose,
         return spec;
     }
 
-    // 2. Look up <cache_dir>/<basename>. Fixshape weights live under
-    //    <cache_dir>/fixshape/ so they don't collide with the default
-    //    dynamic-shape weights (same basename fold_0_fp16.onnx).
+    // 2. Look up <cache_dir>/<basename>. Non-default variants live in
+    //    a per-variant subdir so the same basename (fold_0_fp16.onnx)
+    //    doesn't collide across the three weight sets on disk.
     fs::path cache = default_cache_dir();
 
-    if (fixshape) {
-        cache /= "fixshape";
+    if (variant != WeightVariant::DYNSHAPE) {
+        cache /= variant_str(variant);
     }
 
     fs::path base = fs::path(spec).filename();
@@ -304,7 +318,7 @@ std::string resolve_model_path(const std::string& spec, bool verbose,
     //    first; decompress via zmat's bundled miniz (no external tool).
     //    Fall back to the raw uncompressed URL if the .gz form 404s.
     fs::create_directories(cache, ec);
-    std::string url_base = default_weights_url(fixshape);
+    std::string url_base = default_weights_url(variant);
     std::string verbose_curl = verbose ? "-#" : "-s";
 
     // url_base is expected to end with the parameter that takes the

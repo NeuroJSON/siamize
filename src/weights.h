@@ -75,7 +75,27 @@ std::string default_cache_dir();
  *
  * @return the URL prefix (or its override)
  */
-std::string default_weights_url(bool fixshape = false);
+/**
+ * \enum  WeightVariant
+ * \brief Which on-server weight bundle the resolver should pull.
+ *
+ * Maps 1:1 to the NeuroJSON `doc=` URL parameter and to a same-
+ * named subdirectory under \c $SIAMIZE_CACHE_DIR. Multiple
+ * variants exist because different ORT EPs have different ONNX
+ * compatibility constraints (see the per-variant docs below).
+ */
+enum class WeightVariant {
+    DYNSHAPE,   /**< doc=dynshape: fp16, dynamic D/H/W axes. Canonical
+                     for CUDA / TensorRT / CPU EPs. */
+    FIXSHAPE,   /**< doc=fixshape: fp16, locked to 256x256x192. Legacy
+                     CI / regression-test bundle. */
+    COREML,     /**< doc=coreml: fp16 fixed-shape but with rank-5
+                     InstanceNormalization rewritten to rank-3 via
+                     Reshape ops, so Apple's mlcompilerd accepts it.
+                     Used when the CoreML EP is active. */
+};
+
+std::string default_weights_url(WeightVariant variant = WeightVariant::DYNSHAPE);
 
 /**
  * @brief Resolve a model spec to an existing local file path, fetching if needed
@@ -95,14 +115,13 @@ std::string default_weights_url(bool fixshape = false);
  *
  * @param  spec      fold spec: filename, digit shortcut, or full path
  * @param  verbose   true to print progress to stderr
- * @param  fixshape  true to fetch the fixed-shape weight variant
- *                   (CoreML EP with RequireStaticInputShapes=1 wants
- *                   this). Cached under <cache_dir>/fixshape/ to keep
- *                   it separate from the default dynamic-shape cache.
+ * @param  variant   which on-server weight bundle to pull; cached
+ *                   under <cache_dir>/<variant>/ to keep variants
+ *                   separate (same basename, different contents).
  * @return           absolute path to the resolved .onnx file
  */
 std::string resolve_model_path(const std::string& spec, bool verbose,
-                               bool fixshape = false);
+                               WeightVariant variant = WeightVariant::DYNSHAPE);
 
 }  // namespace siam
 

@@ -1001,25 +1001,28 @@ int main(int argc, char** argv) {
     // [resample] and [infer] in the verbose log -- a user typo on the
     // input path still fails fast above, and the network download (if
     // any) happens just before it's needed.
-    // Fetch the fixed-shape ONNX bundle when CoreML EP is active with
-    // RequireStaticInputShapes=1 (Core ML's preferred fusion path).
-    // The default dynamic-shape weights work everywhere else (CUDA,
-    // TensorRT, CPU) and remain the right choice if the user opted
-    // into --coreml-static-shapes 0. On non-CoreML builds, `auto`
-    // never targets CoreML so we always keep the dynamic-shape path
-    // -- avoids breaking --lowmem's -P shrink on CUDA / CPU runs.
-    bool fetch_fixshape = false;
+    // Pick which on-server weight bundle to pull. CoreML EP needs the
+    // 'coreml' variant (rank-3 InstanceNorm rewrite); other EPs use
+    // dynshape so --lowmem's -P shrink keeps working. On non-CoreML
+    // builds the `auto` branch never targets CoreML, so we always
+    // fall back to the dynshape default.
+    siam::WeightVariant weight_variant = siam::WeightVariant::DYNSHAPE;
 #ifdef SIAMIZE_HAS_COREML
-    fetch_fixshape = (device == "coreml" || device == "auto")
-                     && engine_tuning.coreml_static_shapes;
+    if (device == "coreml" || device == "auto") {
+        weight_variant = siam::WeightVariant::COREML;
+    }
 #else
-    fetch_fixshape = (device == "coreml")  // user override even without build support; rejects later
-                     && engine_tuning.coreml_static_shapes;
+    if (device == "coreml") {
+        // User passed -c coreml on a non-CoreML build. sliding.cpp
+        // will throw a clearer error later; we still pick the matching
+        // weight variant for consistency in case they switch the build.
+        weight_variant = siam::WeightVariant::COREML;
+    }
 #endif
 
     for (auto& m : model_paths) {
         try {
-            m = siam::resolve_model_path(m, verbose, fetch_fixshape);
+            m = siam::resolve_model_path(m, verbose, weight_variant);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "siamize: %s\n", e.what());
             return 3;

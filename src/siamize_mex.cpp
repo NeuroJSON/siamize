@@ -574,20 +574,22 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             models.push_back("fold_0_fp16.onnx");
         }
 
-        // Same CoreML-fixshape gating as siamize.cpp. The MEX inherits
-        // opts.device and opts.engine_tuning.coreml_static_shapes from
-        // the caller's struct, so the decision propagates identically.
-        bool fetch_fixshape_mex = false;
+        // Same CoreML weight-variant gating as siamize.cpp. The MEX
+        // inherits opts.device from the caller's struct, so the
+        // decision propagates identically.
+        siam::WeightVariant weight_variant_mex = siam::WeightVariant::DYNSHAPE;
 #ifdef SIAMIZE_HAS_COREML
-        fetch_fixshape_mex = (opts.device == "coreml" || opts.device == "auto")
-                             && opts.engine_tuning.coreml_static_shapes;
+        if (opts.device == "coreml" || opts.device == "auto") {
+            weight_variant_mex = siam::WeightVariant::COREML;
+        }
 #else
-        fetch_fixshape_mex = (opts.device == "coreml")
-                             && opts.engine_tuning.coreml_static_shapes;
+        if (opts.device == "coreml") {
+            weight_variant_mex = siam::WeightVariant::COREML;
+        }
 #endif
 
         for (auto& m : models) {
-            m = siam::resolve_model_path(m, opts.verbose, fetch_fixshape_mex);
+            m = siam::resolve_model_path(m, opts.verbose, weight_variant_mex);
         }
 
         // ----- Lowmem preset (manual or auto-detected) ---------------------

@@ -359,13 +359,16 @@ jobs:
       - name: Fetch C++ deps (CPU ORT -- macOS dylib already includes CoreML EP)
         run: scripts/fetch_deps.sh
 
-      - name: Fetch fold_0 weight (FIXED-shape, CoreML's preferred fusion path)
-        # Core ML's RequireStaticInputShapes=1 path gets the best fusion
-        # + ANE coverage when the ONNX has fixed spatial dims. Pull the
-        # matching fixshape build of the fp16 ONNX from the NeuroJSON
-        # server (same one default_weights_url() resolves for -c coreml).
+      - name: Fetch fold_0 weight (CoreML variant; InstanceNorm rewritten)
+        # SIAM v0.3's encoder/decoder uses 3D InstanceNorm, which Apple's
+        # mlcompilerd doesn't accept in MLProgram format (only rank 3-4).
+        # We host a rewritten variant on the NeuroJSON server under
+        # doc=coreml where rank-5 InstanceNorm has been replaced with
+        # Reshape -> InstanceNorm-rank-3 -> Reshape (see
+        # tools/onnx_export/rewrite_for_coreml.py). siamize's weight
+        # resolver auto-picks this variant when -c coreml is active.
         run: |
-          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=fixshape&file=fold_0_fp16.onnx.gz'
+          URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=coreml&file=fold_0_fp16.onnx.gz'
           mkdir -p models
           curl -fsSL "$URL" -o models/fold_0_fp16.onnx.gz
           gunzip -f models/fold_0_fp16.onnx.gz
