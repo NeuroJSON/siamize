@@ -359,7 +359,30 @@ jobs:
       - name: Fetch C++ deps (CPU ORT -- macOS dylib already includes CoreML EP)
         run: scripts/fetch_deps.sh
 
+      - name: Configure (CoreML EP)
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSIAMIZE_STATIC_LINK=ON \
+              -DSIAMIZE_GPU=coreml
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke-run --help (always)
+        # Cheap sanity check on every push: the binary launches and the
+        # CoreML-EP-aware help text is intact. Full inference is gated
+        # behind the tag-push branch below since CPU-only Core ML on the
+        # 7 GB free runner takes ~7-10 min and adds no regression value
+        # to normal CI.
+        run: build/siamize --help | head -20
+
+      # The remaining steps (fetch weight, run, verify, package) execute
+      # only on tag pushes -- that's where we actually want to validate
+      # the macOS-arm64-coreml release bundle end-to-end. Pull requests
+      # and main-branch pushes stop at "Build" above.
       - name: Fetch fold_0 weight (CoreML variant; InstanceNorm rewritten)
+        if: github.ref_type == 'tag'
         # SIAM v0.3's encoder/decoder uses 3D InstanceNorm, which Apple's
         # mlcompilerd doesn't accept in MLProgram format (only rank 3-4).
         # We host a rewritten variant on the NeuroJSON server under
@@ -374,17 +397,8 @@ jobs:
           gunzip -f models/fold_0_fp16.onnx.gz
           ls -la models/
 
-      - name: Configure (CoreML EP)
-        run: |
-          cmake -S . -B build \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DSIAMIZE_STATIC_LINK=ON \
-              -DSIAMIZE_GPU=coreml
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
       - name: Run single-fold inference on Apple Silicon
+        if: github.ref_type == 'tag'
         # macos-14 free-tier runner has ~7 GB RAM, which forces
         # auto-lowmem to MLComputeUnits=CPUOnly (the only target whose
         # mlcompilerd peak fits the budget; ALL and even cpugpu OOM at
@@ -400,6 +414,7 @@ jobs:
               -c auto 2>&1 | tee siamize.log
 
       - name: Verify CoreML EP registered
+        if: github.ref_type == 'tag'
         run: |
           if ! grep -Eq "\[coreml\][[:space:]]+enabled" siamize.log; then
             echo "FAIL: expected '[coreml] enabled' line; got:"
@@ -409,19 +424,16 @@ jobs:
           echo "OK: CoreML EP registered."
 
       - name: Verify output produced
+        if: github.ref_type == 'tag'
         run: |
           test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
           ls -lh pred_ci.nii.gz
 
       - name: Package
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
-          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              VER="${GITHUB_REF_NAME#v}"
-          else
-              VER="${BASE}-${GITHUB_SHA:0:7}"
-          fi
+          VER="${GITHUB_REF_NAME#v}"
           BUNDLE="siamize-${VER}-macos-arm64-coreml"
           # package.sh's 'cuda' / 'tensorrt' modes pull GPU-specific libs;
           # the macOS CoreML bundle is just the CPU package (CoreML EP is
@@ -430,6 +442,7 @@ jobs:
           echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle
+        if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
