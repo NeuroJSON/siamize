@@ -521,9 +521,17 @@ jobs:
           # block. Their presence proves the CUDA EP probe code reached
           # the linker; their absence means SIAMIZE_HAS_CUDA didn't
           # propagate (the dee8b1d bug).
+          #
+          # Dump strings to a file first, then grep the file. Piping
+          # `strings ... | grep -q ...` is fragile under bash's
+          # `-o pipefail` (GHA default): when grep finds the match
+          # early it closes the pipe, strings gets SIGPIPE and exits
+          # non-zero, and the pipeline reports failure even though the
+          # match was found.
+          strings -a matlab/siamex.mex > /tmp/siamex_strings.txt
           for needle in "probing CUDA EP" "cudnn_conv_use_max_workspace" \
                         "cudnn_conv_algo_search"; do
-              if ! strings matlab/siamex.mex | grep -qF "$needle"; then
+              if ! grep -qF "$needle" /tmp/siamex_strings.txt; then
                   echo "FAIL: '$needle' not found in matlab/siamex.mex" >&2
                   exit 1
               fi
@@ -568,10 +576,21 @@ jobs:
           # block. Their presence proves the CoreML EP probe code reached
           # the linker; their absence means SIAMIZE_HAS_COREML didn't
           # propagate through the Octave MEX's CXXFLAGS path.
+          #
+          # Dump strings to a file first, then grep the file. Apple's
+          # BSD strings exits non-zero on SIGPIPE when grep -q closes
+          # the pipe early; combined with bash's `-o pipefail` (GHA
+          # default) that fails the pipeline even when the match was
+          # found. -a forces strings to read every Mach-O section,
+          # not just __TEXT.
+          strings -a matlab/siamex.mex > /tmp/siamex_strings.txt
           for needle in "probing CoreML EP" "MLComputeUnits" \
                         "ModelCacheDirectory" "RequireStaticInputShapes"; do
-              if ! strings matlab/siamex.mex | grep -qF "$needle"; then
+              if ! grep -qF "$needle" /tmp/siamex_strings.txt; then
                   echo "FAIL: '$needle' not found in matlab/siamex.mex" >&2
+                  echo "--- strings related to coreml / CoreML (for triage) ---"
+                  grep -iE "coreml|mlcompute|mlprogram|instance" \
+                      /tmp/siamex_strings.txt | head -20
                   exit 1
               fi
           done
