@@ -384,73 +384,29 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: "Run single-fold inference (-c auto: CoreML first, CPU fallback)"
-        # First run compiles ONNX -> .mlmodelc (~10-30 s). End-to-end
-        # ~30-60 s on macos-14 (M1, 8 GB RAM unified) when CoreML
-        # claims the graph; up to ~10 min on CPU fallback.
-        #
-        # The SIAM v0.3 ONNX uses rank-5 InstanceNormalization, which
-        # CoreML's current MLProgram format doesn't accept. ORT 1.26's
-        # CoreML EP doesn't partition that op out so the compile fails
-        # whole-graph. siamize catches the compile error and falls
-        # back to CPU when -c auto is set. Once the export gets a
-        # CoreML-friendly rewrite (Reshape -> InstanceNorm2D ->
-        # Reshape) the CoreML EP will actually run end-to-end.
+      - name: Run single-fold inference on Apple Silicon
+        # macos-14 free-tier runner has ~7 GB RAM, which forces
+        # auto-lowmem to MLComputeUnits=CPUOnly (the only target whose
+        # mlcompilerd peak fits the budget; ALL and even cpugpu OOM at
+        # exit 137). CPU-only Core ML completes in ~7-10 min wall.
+        # Local benchmarks on hosts with >=14 GB free can override with
+        # --coreml-units all to exercise the Metal GPU + ANE paths.
         timeout-minutes: 30
-        env:
-          # ORT verbose logging so the CoreML EP partition decisions
-          # and the MLProgram compile path are visible in the CI log.
-          # 0 = VERBOSE, 1 = INFO, 2 = WARNING, 3 = ERROR.
-          ORT_LOG_SEVERITY_LEVEL: "1"
         run: |
-          # Capture exit code through the tee pipe so we can tell
-          # "graceful CPU fallback" (0) apart from "killed mid-compile"
-          # (137 / 134 / 139). Without PIPESTATUS the step would report
-          # tee's exit status, which is always 0.
-          set +e
           build/siamize \
               -i tests/sub-01_T1w.nii.gz \
               -o pred_ci.nii.gz \
               -M models/fold_0_fp16.onnx \
               -c auto 2>&1 | tee siamize.log
-          exit_code=${PIPESTATUS[0]}
-          set -e
-          echo "=== siamize exited with code $exit_code ==="
-          case $exit_code in
-            0)   echo "OK: inference completed cleanly." ;;
-            4)   echo "Clean fallback path -- siamize printed a [warn] + [hint] block." ;;
-            137) echo "SIGKILL (likely OS OOM killer; macos-14 has only ~7 GB RAM and"
-                 echo "CoreML's MLProgram compile of a 283 MB ONNX can peak 4-6 GB)." ;;
-            134) echo "SIGABRT (uncaught exception / assertion inside ORT or CoreML)." ;;
-            139) echo "SIGSEGV (segfault, most likely in Apple's mlcompilerd)." ;;
-            *)   echo "Unexpected exit code." ;;
-          esac
-          # Dump memory state so we can correlate a non-zero exit with
-          # actual pressure on the runner.
-          echo "=== vm_stat ==="
-          vm_stat 2>&1 | head -8 || true
-          echo "=== top -l 1 (mem column) ==="
-          top -l 1 -n 0 -stats pid,command,mem,state 2>&1 | head -15 || true
-          test "$exit_code" -eq 0
 
-      - name: Verify CoreML EP was probed (and CoreML compile attempted)
+      - name: Verify CoreML EP registered
         run: |
-          if grep -Eq "\[coreml\][[:space:]]+enabled" siamize.log; then
-            echo "OK: CoreML EP registered."
-          else
+          if ! grep -Eq "\[coreml\][[:space:]]+enabled" siamize.log; then
             echo "FAIL: expected '[coreml] enabled' line; got:"
             cat siamize.log
             exit 1
           fi
-          # If CoreML compiled OK, no fallback log line; if it didn't,
-          # we expect the siamize.cpp catch-and-fallback path to have
-          # produced a [hint] / [warn] pair. Either outcome is OK for
-          # CI; we just want the BUILD + EP REGISTRATION to work.
-          if grep -Eq "CoreML model compile failed" siamize.log; then
-            echo "NOTE: CoreML compile failed (likely InstanceNorm3D op-coverage gap)."
-            echo "      siamize fell back to CPU; this is expected until the ONNX"
-            echo "      is re-exported with rank-5 InstanceNorm rewritten."
-          fi
+          echo "OK: CoreML EP registered."
 
       - name: Verify output produced
         run: |
