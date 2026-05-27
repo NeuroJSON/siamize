@@ -7,7 +7,7 @@
 #
 # Inputs (env vars):
 #   PROBE_DIR  default /tmp/mnn-probe
-#   MNN_IN     converted .mnn from Stage 1, default $PROBE_DIR/fold_0.mnn
+#   MNN_IN     converted .mnn from Stage 1, default $PROBE_DIR/fold_0_fp16.mnn
 #
 # Decision gates:
 #   PASS:    pure 2D Conv + Add + Reshape + Reduce + elementwise + 1D Interp.
@@ -20,8 +20,8 @@
 set -e
 
 PROBE_DIR="${PROBE_DIR:-/tmp/mnn-probe}"
-MNN_IN="${MNN_IN:-$PROBE_DIR/fold_0.mnn}"
-JSON_OUT="${PROBE_DIR}/fold_0.json"
+MNN_IN="${MNN_IN:-$PROBE_DIR/fold_0_fp16.mnn}"
+JSON_OUT="${PROBE_DIR}/fold_0_fp16.json"
 
 if [ ! -f "$MNN_IN" ]; then
     echo "FAIL: $MNN_IN not found. Run 01_convert.sh first." >&2

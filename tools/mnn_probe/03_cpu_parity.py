@@ -16,8 +16,8 @@ Decision gates:
 
 Inputs (env vars):
   PROBE_DIR  default /tmp/mnn-probe
-  ONNX_IN    default $PROBE_DIR/fold_0.onnx
-  MNN_IN     default $PROBE_DIR/fold_0.mnn
+  ONNX_IN    default $PROBE_DIR/fold_0_fp16.onnx
+  MNN_IN     default $PROBE_DIR/fold_0_fp16.mnn
 
 Usage:
   python3 03_cpu_parity.py
@@ -30,8 +30,8 @@ import time
 import numpy as np
 
 PROBE_DIR = os.environ.get("PROBE_DIR", "/tmp/mnn-probe")
-ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0.onnx"))
-MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0.mnn"))
+ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0_fp16.onnx"))
+MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0_fp16.mnn"))
 
 PATCH_SHAPE = (1, 1, 256, 256, 192)  # SIAM's nominal patch
 SEED = 0

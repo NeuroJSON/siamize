@@ -21,8 +21,8 @@ Decision gates:
 
 Inputs (env vars):
   PROBE_DIR    default /tmp/mnn-probe
-  ONNX_IN      default $PROBE_DIR/fold_0.onnx
-  MNN_IN       default $PROBE_DIR/fold_0.mnn
+  ONNX_IN      default $PROBE_DIR/fold_0_fp16.onnx
+  MNN_IN       default $PROBE_DIR/fold_0_fp16.mnn
   INPUT_NII    default <siamize-repo>/tests/sub-01_T1w.nii.gz
   SIAMIZE_REPO default /drives/bixi1/users/fangq/git/Temp/siamize
 
@@ -40,8 +40,8 @@ SIAMIZE_REPO = os.environ.get(
     "SIAMIZE_REPO", "/drives/bixi1/users/fangq/git/Temp/siamize"
 )
 PROBE_DIR = os.environ.get("PROBE_DIR", "/tmp/mnn-probe")
-ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0.onnx"))
-MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0.mnn"))
+ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0_fp16.onnx"))
+MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0_fp16.mnn"))
 INPUT_NII = os.environ.get(
     "INPUT_NII", os.path.join(SIAMIZE_REPO, "tests", "sub-01_T1w.nii.gz")
 )

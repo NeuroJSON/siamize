@@ -12,8 +12,8 @@
 # Inputs (env vars, with defaults):
 #   PROBE_DIR       /tmp/mnn-probe
 #   SIAMIZE_REPO    /drives/bixi1/users/fangq/git/Temp/siamize
-#   ONNX_IN         $PROBE_DIR/fold_0.onnx
-#   MNN_IN          $PROBE_DIR/fold_0.mnn
+#   ONNX_IN         $PROBE_DIR/fold_0_fp16.onnx
+#   MNN_IN          $PROBE_DIR/fold_0_fp16.mnn
 #   INPUT_NII       $SIAMIZE_REPO/tests/sub-01_T1w.nii.gz
 #   SKIP_STAGES     comma-separated stage numbers to skip (e.g. "5")
 
@@ -22,8 +22,8 @@ set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROBE_DIR="${PROBE_DIR:-/tmp/mnn-probe}"
 SIAMIZE_REPO="${SIAMIZE_REPO:-$(cd "$HERE/../.." && pwd)}"
-ONNX_IN="${ONNX_IN:-$PROBE_DIR/fold_0.onnx}"
-MNN_IN="${MNN_IN:-$PROBE_DIR/fold_0.mnn}"
+ONNX_IN="${ONNX_IN:-$PROBE_DIR/fold_0_fp16.onnx}"
+MNN_IN="${MNN_IN:-$PROBE_DIR/fold_0_fp16.mnn}"
 INPUT_NII="${INPUT_NII:-$SIAMIZE_REPO/tests/sub-01_T1w.nii.gz}"
 SKIP_STAGES="${SKIP_STAGES:-}"
 

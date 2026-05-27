@@ -22,7 +22,7 @@ Decision gates:
 
 Inputs (env vars):
   PROBE_DIR  default /tmp/mnn-probe
-  MNN_IN     default $PROBE_DIR/fold_0.mnn
+  MNN_IN     default $PROBE_DIR/fold_0_fp16.mnn
 
 Usage:
   # In one terminal, start a GPU-utilization monitor before running:
@@ -39,8 +39,8 @@ import time
 import numpy as np
 
 PROBE_DIR = os.environ.get("PROBE_DIR", "/tmp/mnn-probe")
-MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0.mnn"))
-ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0.onnx"))
+MNN_IN = os.environ.get("MNN_IN", os.path.join(PROBE_DIR, "fold_0_fp16.mnn"))
+ONNX_IN = os.environ.get("ONNX_IN", os.path.join(PROBE_DIR, "fold_0_fp16.onnx"))
 
 PATCH_SHAPE = (1, 1, 256, 256, 192)
 SEED = 0

@@ -4,8 +4,8 @@
 #
 # Inputs (env vars, with defaults):
 #   PROBE_DIR  workspace, default /tmp/mnn-probe
-#   ONNX_IN    source ONNX path, default $PROBE_DIR/fold_0.onnx
-#   MNN_OUT    target .mnn path, default $PROBE_DIR/fold_0.mnn
+#   ONNX_IN    source ONNX path, default $PROBE_DIR/fold_0_fp16.onnx
+#   MNN_OUT    target .mnn path, default $PROBE_DIR/fold_0_fp16.mnn
 #
 # Decision gates:
 #   PASS:    no "not support" / "unsupport" / "unknown op" / "fail" in the
@@ -20,12 +20,16 @@
 set -e
 
 PROBE_DIR="${PROBE_DIR:-/tmp/mnn-probe}"
-ONNX_IN="${ONNX_IN:-$PROBE_DIR/fold_0.onnx}"
-MNN_OUT="${MNN_OUT:-$PROBE_DIR/fold_0.mnn}"
+ONNX_IN="${ONNX_IN:-$PROBE_DIR/fold_0_fp16.onnx}"
+MNN_OUT="${MNN_OUT:-$PROBE_DIR/fold_0_fp16.mnn}"
 
 if [ ! -f "$ONNX_IN" ]; then
     echo "FAIL: source ONNX not found at $ONNX_IN" >&2
-    echo "  cp <siamize-repo>/models/fold_0_fp16.onnx $ONNX_IN" >&2
+    echo "  Place fold_0_fp16.onnx at $ONNX_IN, e.g.:" >&2
+    echo "    cp <siamize-repo>/models/fold_0_fp16.onnx $ONNX_IN" >&2
+    echo "  Or fetch the dynshape variant from NeuroJSON:" >&2
+    echo "    URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&file=fold_0_fp16.onnx.gz'" >&2
+    echo "    curl -sSL \"\$URL\" | gunzip > $ONNX_IN" >&2
     exit 1
 fi
 

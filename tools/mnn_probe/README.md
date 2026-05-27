@@ -69,9 +69,12 @@ which MNNConvert MNNDump2Json || {
 BUILD
 }
 
-# Copy SIAM weights. Use the fixshape variant first (no dynamic-axes
-# complication for the initial conversion test).
-cp <siamize-repo>/models/fold_0_fp16.onnx /tmp/mnn-probe/fold_0.onnx
+# Place SIAM weights at /tmp/mnn-probe/fold_0_fp16.onnx, either from a
+# local siamize checkout or by fetching the dynshape variant directly.
+cp <siamize-repo>/models/fold_0_fp16.onnx /tmp/mnn-probe/fold_0_fp16.onnx
+# or:
+URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&file=fold_0_fp16.onnx.gz'
+curl -sSL "$URL" | gunzip > /tmp/mnn-probe/fold_0_fp16.onnx
 ```
 
 ## Probe stages
