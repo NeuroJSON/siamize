@@ -55,14 +55,15 @@ else
     echo
 fi
 
-# Stage 2: op histogram
+# Stage 2: op histogram (Python -- the pip wheel doesn't ship MNNDump2Json,
+# so we walk the graph via MNN.expr.load_as_list instead).
 if skip 2; then
     echo "=== SKIP Stage 2 ==="
 else
     echo "############################"
     echo "# Stage 2: op histogram"
     echo "############################"
-    bash "$HERE/02_op_histogram.sh"
+    python3 "$HERE/02_op_histogram.py"
     echo
 fi
 

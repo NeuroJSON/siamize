@@ -101,11 +101,11 @@ log for warning patterns that would signal unsupported ops.
 | Specific 3D ops warned | PARTIAL | Stage 2 with caveat |
 | Fatal "Convolution3D not supported" | FAIL | STOP |
 
-### Stage 2 — `02_op_histogram.sh` (~5 min)
+### Stage 2 — `02_op_histogram.py` (~1 min)
 
-Dump the resulting `.mnn` to JSON and count op types; verify the 3D-to-2D
-decomposition actually fired (no `Conv3D` / `ConvTranspose3D` should
-survive at runtime).
+Walk the converted `.mnn` graph via `MNN.expr.load_as_list` and tally
+op types; verify the 3D-to-2D decomposition actually fired (no `Conv3D`
+/ `ConvTranspose3D` should survive at runtime).
 
 **Gate:**
 
@@ -173,7 +173,7 @@ probe results accumulate as evidence.
 tools/mnn_probe/
 ├── README.md             # this file
 ├── 01_convert.sh         # Stage 1: MNNConvert + log grep
-├── 02_op_histogram.sh    # Stage 2: dump-to-json + jq
+├── 02_op_histogram.py    # Stage 2: walk MNN graph via MNN.expr API
 ├── 03_cpu_parity.py      # Stage 3: ORT vs MNN CPU on a synthetic tile
 ├── 04_opencl_parity.py   # Stage 4: MNN CPU vs MNN OpenCL on a tile
 ├── 05_e2e_perf.py        # Stage 5: full siamize pipeline through MNN
