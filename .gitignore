@@ -31,3 +31,4 @@ __pycache__/
 octave-workspace
 sub-01_T1w.nii.gz
 output.jnii
+tools/mnn_probe/reports/
