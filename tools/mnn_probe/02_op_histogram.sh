@@ -28,16 +28,34 @@ if [ ! -f "$MNN_IN" ]; then
     exit 1
 fi
 
-if ! command -v MNNDump2Json >/dev/null; then
-    echo "FAIL: MNNDump2Json not in PATH." >&2
-    echo "  Provided by the same MNN build/install that supplied MNNConvert." >&2
+# Same naming-convention split as in Stage 1: pip wheel uses lowercase,
+# source builds use PascalCase. There's also a python-module fallback.
+DUMP=""
+for cand in MNNDump2Json mnndump2json; do
+    if command -v "$cand" >/dev/null; then
+        DUMP="$cand"
+        break
+    fi
+done
+if [ -z "$DUMP" ]; then
+    if python3 -c "import MNN.tools.mnndump" >/dev/null 2>&1; then
+        DUMP="python3 -m MNN.tools.mnndump"
+    fi
+fi
+if [ -z "$DUMP" ]; then
+    echo "FAIL: no MNN model dumper in PATH (tried MNNDump2Json, mnndump2json," >&2
+    echo "      python -m MNN.tools.mnndump)." >&2
+    echo "  pip install MNN==3.5.0  ships 'mnndump2json' alongside 'mnnconvert'." >&2
+    echo "  If only the python module is available you'd need a source build:" >&2
+    echo "    cmake -DMNN_BUILD_TOOLS=ON ..." >&2
     exit 1
 fi
+echo "Using dumper: $DUMP"
 
 cd "$PROBE_DIR"
 
 echo "=== dumping $MNN_IN -> $JSON_OUT ==="
-MNNDump2Json "$MNN_IN" "$JSON_OUT"
+$DUMP "$MNN_IN" "$JSON_OUT"
 ls -lh "$JSON_OUT"
 
 if ! command -v jq >/dev/null; then

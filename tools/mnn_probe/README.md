@@ -54,10 +54,15 @@ python3 -m venv venv && source venv/bin/activate
 pip install --upgrade pip
 pip install MNN==3.5.0 onnx onnxruntime numpy nibabel
 
-# Confirm the CLI tools came with the pip wheel.
-which MNNConvert MNNDump2Json || {
-    echo "FALL BACK: pip wheel lacks the CLI tools."
-    echo "Build MNN from source instead:"
+# The pip wheel ships its CLIs under LOWERCASE names; source builds use
+# PascalCase. The probe scripts auto-detect either, but a quick sanity
+# check is worthwhile:
+which mnnconvert mnndump2json 2>/dev/null \
+    || which MNNConvert MNNDump2Json 2>/dev/null \
+    || {
+    echo "Neither lowercase nor PascalCase MNN tools were found."
+    echo "Build MNN from source -- the pip wheel CLIs may be missing on"
+    echo "this platform:"
     cat <<'BUILD'
         git clone --depth 1 --branch 3.5.0 \
             https://github.com/alibaba/MNN.git
