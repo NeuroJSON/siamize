@@ -77,15 +77,18 @@ print(
 )
 
 in_tensor = interp.getSessionInput(sess)
-# Resize if MNN's declared input shape doesn't match (some converters
-# fix the shape to whatever was in the ONNX I/O signature).
-if tuple(in_tensor.getShape()) != PATCH_SHAPE:
-    print(
-        f"resizing input from {tuple(in_tensor.getShape())} to {PATCH_SHAPE}",
-        flush=True,
-    )
-    interp.resizeTensor(in_tensor, list(PATCH_SHAPE))
-    interp.resizeSession(sess)
+# Always call resizeTensor + resizeSession for dynamic-axes models. Even
+# when getShape() happens to match PATCH_SHAPE, the downstream Reshape
+# ops have unresolved symbolic-shape sentinels (0x90000000 family); only
+# an explicit resizeSession() triggers MNN's shape inference to propagate
+# real dims through the graph. Skipping it leaves dependent ops in an
+# unbound state and runSession bails with "not resized".
+print(
+    f"resizing input from {tuple(in_tensor.getShape())} to {PATCH_SHAPE}",
+    flush=True,
+)
+interp.resizeTensor(in_tensor, PATCH_SHAPE)
+interp.resizeSession(sess)
 
 # Copy data in. MNN's Halide_Type_Float is fp32; Caffe layout = NCHW
 # (extended to NCDHW for 3D).
@@ -95,11 +98,25 @@ mnn_in = MNN.Tensor(
 in_tensor.copyFrom(mnn_in)
 
 t0 = time.time()
-interp.runSession(sess)
+err = interp.runSession(sess)
 mnn_time = time.time() - t0
+if err != 0:
+    print(f"FAIL: MNN runSession returned error code {err}", file=sys.stderr)
+    print("  Likely cause: shape inference failed for a Reshape with", file=sys.stderr)
+    print("  dynamic axes. Try the fixshape ONNX variant instead.", file=sys.stderr)
+    sys.exit(4)
 
 out_tensor = interp.getSessionOutput(sess)
-y_mnn = np.array(out_tensor.getData(), dtype=np.float32).reshape(out_tensor.getShape())
+out_shape = tuple(out_tensor.getShape())
+if 0 in out_shape:
+    print(f"FAIL: MNN output shape is unbound: {out_shape}", file=sys.stderr)
+    print(
+        "  Shape inference did not propagate -- runSession likely failed",
+        file=sys.stderr,
+    )
+    print("  silently. Check the MNN log for 'Compute Shape Error'.", file=sys.stderr)
+    sys.exit(5)
+y_mnn = np.array(out_tensor.getData(), dtype=np.float32).reshape(out_shape)
 print(f"MNN CPU run:    {mnn_time:.2f} s")
 print(f"MNN output:     shape={y_mnn.shape}, dtype={y_mnn.dtype}")
 print(f"MNN logit range: [{y_mnn.min():.3f}, {y_mnn.max():.3f}]")

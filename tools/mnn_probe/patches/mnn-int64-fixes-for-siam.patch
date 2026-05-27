@@ -1,0 +1,476 @@
+diff --git a/include/MNN/Tensor.hpp b/include/MNN/Tensor.hpp
+index 049027e2..c2f5d269 100644
+--- a/include/MNN/Tensor.hpp
++++ b/include/MNN/Tensor.hpp
+@@ -232,9 +232,14 @@ public:
+     /**
+      * @brief calculate number of elements needed to store data taking reordering flag into account.
+      * @return elements needed to store data
++     *
++     * Returns size_t so that tensors with > 2^31 / sizeof(T) elements (common
++     * in 3D medical imaging) don't silently overflow. For 4-byte fp32 the
++     * threshold is ~537M elements, easily reached by a (1, 96, 256, 256, 192)
++     * Im2Col intermediate during Conv3D-to-Conv2D rewrite.
+      */
+-    inline int elementSize() const {
+-        return size() / mBuffer.type.bytes();
++    inline size_t elementSize() const {
++        return usize() / mBuffer.type.bytes();
+     }
+ 
+ public:
+diff --git a/source/backend/cpu/CPUDeconvolution.cpp b/source/backend/cpu/CPUDeconvolution.cpp
+index c9fbf2a4..7360cec8 100644
+--- a/source/backend/cpu/CPUDeconvolution.cpp
++++ b/source/backend/cpu/CPUDeconvolution.cpp
+@@ -242,9 +242,12 @@ ErrorCode CPUDeconvolutionOrigin::onResize(const std::vector<Tensor*>& inputs, c
+     mGemmInput = allocator->alloc(threadNumber * im2colOutputStride);
+     auto gemmOutputStride = kernelCount * core->pack * eP * core->bytes;
+     mGemmOutput = allocator->alloc(threadNumber * gemmOutputStride);
+-    auto outputSize = batch*src_width*src_height*ocC4*core->pack*core->bytes;
++    // For ConvTranspose3D-decomposed Deconv2D ops on SIAM-class 3D models
++    // the per-slab outputs reach ~6 GB and outputSize overflows int32 when
++    // computed as plain int. Use size_t.
++    size_t outputSize = (size_t)batch*src_width*src_height*ocC4*core->pack*core->bytes;
+     if (threadNumber > 1) {
+-        mExtraOutput = allocator->alloc((threadNumber-1)*outputSize);
++        mExtraOutput = allocator->alloc((size_t)(threadNumber-1)*outputSize);
+     }
+     allocator->free(mGemmInput);
+     allocator->free(mGemmOutput);
+@@ -300,8 +303,8 @@ ErrorCode CPUDeconvolutionOrigin::onResize(const std::vector<Tensor*>& inputs, c
+             }
+             // Col2Im
+             for (int z = 0; z < ocC4; ++z) {
+-                auto dstZ = tempOutPtr + z * src_height * src_width * batch * unitBytes;
+-                auto srcZ = colBufferPtr + kw * kh * xCount * z * unitBytes;
++                auto dstZ = tempOutPtr + (size_t)z * src_height * src_width * batch * unitBytes;
++                auto srcZ = colBufferPtr + (size_t)kw * kh * xCount * z * unitBytes;
+                 for (int x=0; x<xCount; ++x) {
+                     auto indexE = xStart + x;
+                     int b = indexE / (width * height);
+@@ -317,7 +320,7 @@ ErrorCode CPUDeconvolutionOrigin::onResize(const std::vector<Tensor*>& inputs, c
+                     int sfx = ALIMAX(0, (UP_DIV(-srcStartX, dilateX)));
+                     int efx = ALIMIN(kw, UP_DIV(src_width - srcStartX, dilateX));
+ 
+-                    auto dstStart = dstZ + b * src_width * src_height * unitBytes + srcStartX * unitBytes + srcStartY * src_width * unitBytes;
++                    auto dstStart = dstZ + (size_t)b * src_width * src_height * unitBytes + srcStartX * unitBytes + (size_t)srcStartY * src_width * unitBytes;
+                     auto srcStart = srcZ + x * unitBytes;
+                     if (sfy >= efy || sfx >= efx) {
+                         continue;
+@@ -336,10 +339,10 @@ ErrorCode CPUDeconvolutionOrigin::onResize(const std::vector<Tensor*>& inputs, c
+         auto unitBytes = core->pack * core->bytes;
+         auto biasPtr = biasTensor->host<uint8_t>();
+         for (int z = tId; z < ocC4; z+=threadNumber) {
+-            auto dstZ = outputPtr + z * src_height * src_width * batch * unitBytes;
++            auto dstZ = outputPtr + (size_t)z * src_height * src_width * batch * unitBytes;
+             if (threadNumber > 1) {
+                 for (int index=0; index<threadNumber-1; ++index) {
+-                    auto src = mExtraOutput.ptr() + index * outputSize + z * src_height * src_width * batch * unitBytes;
++                    auto src = mExtraOutput.ptr() + (size_t)index * outputSize + (size_t)z * src_height * src_width * batch * unitBytes;
+                     core->MNNMatrixAdd((float*)(dstZ), (float*)(src), (float*)(dstZ), src_height * src_width * batch, 0, 0, 0, 1);
+                 }
+             }
+diff --git a/source/backend/cpu/CPULayerNorm.cpp b/source/backend/cpu/CPULayerNorm.cpp
+index 0a2af995..32cb93c7 100644
+--- a/source/backend/cpu/CPULayerNorm.cpp
++++ b/source/backend/cpu/CPULayerNorm.cpp
+@@ -86,11 +86,15 @@ ErrorCode CPULayerNorm::onExecute(const std::vector<Tensor*> &inputs,
+ 
+     MNN_CONCURRENCY_BEGIN(ttId, threadNumber) {
+         for (int tId=ttId; tId < mOutterSize; tId += threadNumber) {
+-            const float* inner_input = (const float*)(input + tId * mInnerSize * bytes);
+-            float* inner_output = (float*)(output + tId * mInnerSize * bytes);
++            // For 3D-segmentation models (e.g. InstanceNorm rewritten to
++            // LayerNorm over depth*height*width), mInnerSize can reach
++            // ~12.5M and tId * mInnerSize * bytes overflows int32 around
++            // tId=43. Use size_t for the byte offset.
++            const float* inner_input = (const float*)(input + (size_t)tId * mInnerSize * bytes);
++            float* inner_output = (float*)(output + (size_t)tId * mInnerSize * bytes);
+             if (bytes != 4) {
+-                auto tmpInput = (float*)(mTmpInputFloat.ptr() + ttId * mInnerSize * sizeof(float));
+-                auto tmpOutput = (float*)(mTmpOutputFloat.ptr() + ttId * mInnerSize * sizeof(float));
++                auto tmpInput = (float*)(mTmpInputFloat.ptr() + (size_t)ttId * mInnerSize * sizeof(float));
++                auto tmpOutput = (float*)(mTmpOutputFloat.ptr() + (size_t)ttId * mInnerSize * sizeof(float));
+                 if (bytes == 1) {
+                     CPUCastCreator::cast(inner_input, tmpInput, CPUCastCreator::INT8_TO_FlOAT, mInnerSize, inputQuan->scale, inputQuan->zero, inputQuan->min, inputQuan->max, bn);
+                 } else {
+@@ -144,8 +148,8 @@ ErrorCode CPULayerNorm::onResize(const std::vector<Tensor*> &inputs,
+     auto buf = bn->getBufferAllocator();
+ 
+     if (CPUBackend::getDataType(inputs[0]) == DataType_DT_INT8 || inputs[0]->getType().bytes() == 1 || bn->functions()->bytes != 4) {
+-        mTmpInputFloat = buf->alloc(threadNumber * mInnerSize * sizeof(float));
+-        mTmpOutputFloat = buf->alloc(threadNumber * mInnerSize * sizeof(float));
++        mTmpInputFloat = buf->alloc((size_t)threadNumber * mInnerSize * sizeof(float));
++        mTmpOutputFloat = buf->alloc((size_t)threadNumber * mInnerSize * sizeof(float));
+         buf->free(mTmpInputFloat);
+         buf->free(mTmpOutputFloat);
+     }
+diff --git a/source/backend/cpu/CPURaster.cpp b/source/backend/cpu/CPURaster.cpp
+index 13390893..4c70bb12 100644
+--- a/source/backend/cpu/CPURaster.cpp
++++ b/source/backend/cpu/CPURaster.cpp
+@@ -137,34 +137,34 @@ void CPURaster::executeFaster(const std::vector<Tensor *> &inputs, const std::ve
+             }
+             auto& slice = iter.second;
+             //Offset use byte
+-            auto srcPtr = iter.first->host<uint8_t>() + slice.src.offset * bytes;
+-            auto dstPtr = output->host<uint8_t>() + slice.dst.offset * bytes;
++            auto srcPtr = iter.first->host<uint8_t>() + (size_t)slice.src.offset * bytes;
++            auto dstPtr = output->host<uint8_t>() + (size_t)slice.dst.offset * bytes;
+             if (slice.src.stride[1] == slice.size[2] && slice.dst.stride[1] == slice.size[2] && slice.src.stride[2] == 1) {
+                 for (int z=0; z<slice.size[0]; ++z) {
+-                    auto srcZ = srcPtr + z * slice.src.stride[0] * byteC4;
+-                    auto dstZ = dstPtr + z * slice.dst.stride[0] * byteC4;
+-                    ::memcpy(dstZ, srcZ, slice.size[1] * slice.src.stride[1] * byteC4);
++                    auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * byteC4;
++                    auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * byteC4;
++                    ::memcpy(dstZ, srcZ, (size_t)slice.size[1] * slice.src.stride[1] * byteC4);
+                 }
+                 continue;
+             }
+             if (1 == slice.src.stride[2] && 1 == slice.dst.stride[2]) {
+                 for (int z=0; z<slice.size[0]; ++z) {
+-                    auto srcZ = srcPtr + z * slice.src.stride[0] * byteC4;
+-                    auto dstZ = dstPtr + z * slice.dst.stride[0] * byteC4;
++                    auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * byteC4;
++                    auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * byteC4;
+                     for (int y=0; y<slice.size[1]; ++y) {
+-                        auto srcY = srcZ + y * slice.src.stride[1] * byteC4;
+-                        auto dstY = dstZ + y * slice.dst.stride[1] * byteC4;
+-                        ::memcpy(dstY, srcY, slice.size[2] * byteC4);
++                        auto srcY = srcZ + (size_t)y * slice.src.stride[1] * byteC4;
++                        auto dstY = dstZ + (size_t)y * slice.dst.stride[1] * byteC4;
++                        ::memcpy(dstY, srcY, (size_t)slice.size[2] * byteC4);
+                     }
+                 }
+                 continue;
+             }
+             for (int z=0; z<slice.size[0]; ++z) {
+-                auto srcZ = srcPtr + z * slice.src.stride[0] * byteC4;
+-                auto dstZ = dstPtr + z * slice.dst.stride[0] * byteC4;
++                auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * byteC4;
++                auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * byteC4;
+                 for (int y=0; y<slice.size[1]; ++y) {
+-                    auto srcY = srcZ + y * slice.src.stride[1] * byteC4;
+-                    auto dstY = dstZ + y * slice.dst.stride[1] * byteC4;
++                    auto srcY = srcZ + (size_t)y * slice.src.stride[1] * byteC4;
++                    auto dstY = dstZ + (size_t)y * slice.dst.stride[1] * byteC4;
+                     C4proc(dstY, srcY, slice.size[2], slice.src.stride[2], slice.dst.stride[2]);
+                 }
+             }
+@@ -322,6 +322,11 @@ static bool _reduceblit(const Tensor::InsideDescribe::Region& slice, int bytes,
+ }
+ 
+ static void _blit(const Tensor::InsideDescribe::Region& slice, int bytes, const uint8_t* srcPtr, uint8_t* dstPtr, bool hasReduce, FP16ToFP32 funcFp16ToFp32 = nullptr, FP32ToFP16 funcFp32ToFp16 = nullptr) {
++    // 3D models with > 500 MB intermediate tensors produce per-iteration
++    // byte offsets (z * stride[0] * bytes, etc.) that exceed 2^31. Promote
++    // those products to size_t so srcPtr/dstPtr arithmetic stays within
++    // the actual allocation -- otherwise an int32 wrap lands the load in
++    // unmapped memory and the thread segfaults inside memcpy/memmove.
+     auto proc = _selectUnitProc(bytes, slice.src.stride[2], slice.dst.stride[2]);
+     if (hasReduce) {
+         if (_reduceblit(slice, bytes, srcPtr, dstPtr, funcFp16ToFp32, funcFp32ToFp16)) {
+@@ -330,12 +335,12 @@ static void _blit(const Tensor::InsideDescribe::Region& slice, int bytes, const
+     }
+     if (slice.src.stride[1] == slice.size[2] && slice.dst.stride[1] == slice.size[2] && slice.src.stride[2] == 1) {
+         for (int z=0; z<slice.size[0]; ++z) {
+-            auto srcZ = srcPtr + z * slice.src.stride[0] * bytes;
+-            auto dstZ = dstPtr + z * slice.dst.stride[0] * bytes;
++            auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * bytes;
++            auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * bytes;
+ #ifdef DEBUG
+-            ::memset(dstZ, 0, slice.size[1] * slice.src.stride[1] * bytes);
++            ::memset(dstZ, 0, (size_t)slice.size[1] * slice.src.stride[1] * bytes);
+ #endif
+-            ::memcpy(dstZ, srcZ, slice.size[1] * slice.src.stride[1] * bytes);
++            ::memcpy(dstZ, srcZ, (size_t)slice.size[1] * slice.src.stride[1] * bytes);
+         }
+         return;
+     }
+@@ -347,25 +352,25 @@ static void _blit(const Tensor::InsideDescribe::Region& slice, int bytes, const
+     }
+     if (1 == slice.src.stride[2] && 1 == slice.dst.stride[2]) {
+         for (int z=0; z<slice.size[0]; ++z) {
+-            auto srcZ = srcPtr + z * slice.src.stride[0] * bytes;
+-            auto dstZ = dstPtr + z * slice.dst.stride[0] * bytes;
++            auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * bytes;
++            auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * bytes;
+             for (int y=0; y<slice.size[1]; ++y) {
+-                auto srcY = srcZ + y * slice.src.stride[1] * bytes;
+-                auto dstY = dstZ + y * slice.dst.stride[1] * bytes;
++                auto srcY = srcZ + (size_t)y * slice.src.stride[1] * bytes;
++                auto dstY = dstZ + (size_t)y * slice.dst.stride[1] * bytes;
+ #ifdef DEBUG
+-                ::memset(dstY, 0, slice.size[2] * bytes);
++                ::memset(dstY, 0, (size_t)slice.size[2] * bytes);
+ #endif
+-                ::memcpy(dstY, srcY, slice.size[2] * bytes);
++                ::memcpy(dstY, srcY, (size_t)slice.size[2] * bytes);
+             }
+         }
+         return;
+     }
+     for (int z=0; z<slice.size[0]; ++z) {
+-        auto srcZ = srcPtr + z * slice.src.stride[0] * bytes;
+-        auto dstZ = dstPtr + z * slice.dst.stride[0] * bytes;
++        auto srcZ = srcPtr + (size_t)z * slice.src.stride[0] * bytes;
++        auto dstZ = dstPtr + (size_t)z * slice.dst.stride[0] * bytes;
+         for (int y=0; y<slice.size[1]; ++y) {
+-            auto srcY = srcZ + y * slice.src.stride[1] * bytes;
+-            auto dstY = dstZ + y * slice.dst.stride[1] * bytes;
++            auto srcY = srcZ + (size_t)y * slice.src.stride[1] * bytes;
++            auto dstY = dstZ + (size_t)y * slice.dst.stride[1] * bytes;
+             proc(dstY, srcY, slice.size[2], slice.src.stride[2], slice.dst.stride[2]);
+         }
+     }
+@@ -699,8 +704,8 @@ ErrorCode CPURaster::onResize(const std::vector<Tensor *> &____inputs, const std
+                 // Avoid crash when has zero shape input blit
+                 continue;
+             }
+-            auto srcPtr = iter.first->host<uint8_t>() + slice.src.offset * bytes;
+-            auto dstPtr = (uint8_t*)mOutputPtr + slice.dst.offset * bytes;
++            auto srcPtr = iter.first->host<uint8_t>() + (size_t)slice.src.offset * bytes;
++            auto dstPtr = (uint8_t*)mOutputPtr + (size_t)slice.dst.offset * bytes;
+             _blit(slice, (int)bytes, srcPtr, dstPtr, mHasReduce, core->MNNLowpToFp32, core->MNNFp32ToLowp);
+         }
+     }, threadNum));
+@@ -952,9 +957,9 @@ public:
+                     auto dstOffset = dstIter * step0 + dstView->offset();
+                     if (dstOffset >= 0 && dstOffset < outputSize) {
+                         if (srcOffset >= 0 && srcOffset < inputSize) {
+-                            _blit(reg, bytes, input->host<uint8_t>() + bytes * srcOffset, output->host<uint8_t>() + bytes * dstOffset, false);
++                            _blit(reg, bytes, input->host<uint8_t>() + (size_t)bytes * srcOffset, output->host<uint8_t>() + (size_t)bytes * dstOffset, false);
+                         } else {
+-                            _zero(reg, bytes, output->host<uint8_t>() + bytes * dstOffset);
++                            _zero(reg, bytes, output->host<uint8_t>() + (size_t)bytes * dstOffset);
+                         }
+                     }
+                 }
+diff --git a/source/backend/cpu/CPUScale.cpp b/source/backend/cpu/CPUScale.cpp
+index 19890717..56a59338 100644
+--- a/source/backend/cpu/CPUScale.cpp
++++ b/source/backend/cpu/CPUScale.cpp
+@@ -78,7 +78,11 @@ ErrorCode CPUScale::onExecute(const std::vector<Tensor*>& inputs, const std::vec
+     MNN_CONCURRENCY_BEGIN(tId, numberThread) {
+         for (int i = tId; i < totalDepth; i+=numberThread) {
+             auto depthIndex = i / batch;
+-            core->MNNScaleAndAddBias((float*)(output->host<uint8_t>() + depthStride * i * core->bytes), (const float*)(input->host<uint8_t>() + depthStride * i * core->bytes), (const float*)(biasPtr + core->pack * core->bytes * depthIndex),
++            // depthStride * i * core->bytes overflows int32 around i=6 on
++            // SIAM-class 3D models (depthStride ~ 100M, bytes=4 → 2.4 GB).
++            // Use size_t for the byte offset so SIMD reads stay in-buffer.
++            size_t byteOffset = (size_t)depthStride * i * core->bytes;
++            core->MNNScaleAndAddBias((float*)(output->host<uint8_t>() + byteOffset), (const float*)(input->host<uint8_t>() + byteOffset), (const float*)(biasPtr + core->pack * core->bytes * depthIndex),
+                                      (const float*)(scalePtr + core->pack * core->bytes * depthIndex), planeNumber, 1);
+         }
+     }
+diff --git a/source/backend/cpu/CPUTensorConvert.cpp b/source/backend/cpu/CPUTensorConvert.cpp
+index 62f0a4f5..d1260d44 100644
+--- a/source/backend/cpu/CPUTensorConvert.cpp
++++ b/source/backend/cpu/CPUTensorConvert.cpp
+@@ -153,8 +153,8 @@ ErrorCode CPUTensorConverter::convert(const void* inputRaw, void* outputRaw, MNN
+                     return NO_ERROR;
+                 }
+                 for (int v=start; v<end; ++v) {
+-                    auto inputStart = (int8_t*)inputRaw + (v * core->pack * bitLength * area);
+-                    auto outputStart = (int8_t*)outputRaw + (v * channel * bitLength * area);
++                    auto inputStart = (int8_t*)inputRaw + ((size_t)v * core->pack * bitLength * area);
++                    auto outputStart = (int8_t*)outputRaw + ((size_t)v * channel * bitLength * area);
+                     proc((float*)outputStart, (const float*)inputStart, area, channel, offset);
+                 }
+             } else {
+@@ -225,8 +225,8 @@ ErrorCode CPUTensorConverter::convert(const void* inputRaw, void* outputRaw, MNN
+                     return NO_ERROR;
+                 }
+                 for (int v=start; v<end; ++v) {
+-                    auto outputStart = (int8_t*)outputRaw + (v * core->pack * bitLength * area);
+-                    auto inputStart = (int8_t*)inputRaw + (v * channel * bitLength * area);
++                    auto outputStart = (int8_t*)outputRaw + ((size_t)v * core->pack * bitLength * area);
++                    auto inputStart = (int8_t*)inputRaw + ((size_t)v * channel * bitLength * area);
+                     proc((float*)outputStart, (const float*)inputStart, area, channel, offset);
+                 }
+             } else {
+diff --git a/source/backend/cpu/compute/ConvolutionPackWinograd.cpp b/source/backend/cpu/compute/ConvolutionPackWinograd.cpp
+index 26bbebee..57aeca09 100644
+--- a/source/backend/cpu/compute/ConvolutionPackWinograd.cpp
++++ b/source/backend/cpu/compute/ConvolutionPackWinograd.cpp
+@@ -287,6 +287,11 @@ ErrorCode ConvolutionPackWinograd::onResize(const std::vector<Tensor *> &inputs,
+         parameters[3] = ePack * pack * bytes;
+         parameters[4] = 0;
+         parameters[5] = 0;
++        // Winograd source-/dest-channel stride. For 3D models after the
++        // Conv3DTurn2D rewrite, per-slab Conv2D inputs reach (batch=D, ic,
++        // H=256, W=192), producing iw*ih*batch*pack ~ 100M. Subsequent
++        // `z * sourceZStep * bytes` overflows int32 around z=6 (= 2.4 GB).
++        // Use size_t for the stride so pointer offsets stay correct.
+ 
+ 
+         std::vector<size_t> parametersRemain = parameters;
+@@ -308,7 +313,7 @@ ErrorCode ConvolutionPackWinograd::onResize(const std::vector<Tensor *> &inputs,
+             /*Source Transform Begin*/
+ #ifndef MNN_WINO_TRANFORM_TEST_CLOSE
+             {
+-                int sourceZStep = iw * ih * batch * pack;
++                size_t sourceZStep = (size_t)iw * ih * batch * pack;
+                 int oyBegin = xIndex / wUnit;
+                 int oxBegin = xIndex % wUnit;
+                 int oyEnd = (xIndex + xC-1) / wUnit;
+@@ -322,7 +327,7 @@ ErrorCode ConvolutionPackWinograd::onResize(const std::vector<Tensor *> &inputs,
+                         int srcY  = hIndex * dstUnit - padY;
+                         int ey    = ALIMIN(srcY + srcUnit, ih) - srcY;
+                         int sy    = ALIMAX(0, srcY) - srcY;
+-                        auto srcStartY = srcOrigin + (srcY * iw + bIndex * iw * ih) * pack * bytes;
++                        auto srcStartY = srcOrigin + ((size_t)srcY * iw + (size_t)bIndex * iw * ih) * pack * bytes;
+ 
+                         for (int si=0; si<step; ++si) {
+                             auto wIndex = si + oxBegin;
+@@ -373,7 +378,7 @@ ErrorCode ConvolutionPackWinograd::onResize(const std::vector<Tensor *> &inputs,
+                         int srcY  = hIndex * dstUnit - padY;
+                         int ey    = ALIMIN(srcY + srcUnit, ih) - srcY; //h dim pack element length
+                         int sy    = ALIMAX(0, srcY) - srcY;  // first y element
+-                        auto srcStartY = srcOrigin + (srcY * iw + bIndex * iw * ih) * pack * bytes;
++                        auto srcStartY = srcOrigin + ((size_t)srcY * iw + (size_t)bIndex * iw * ih) * pack * bytes;
+                         for (int si=0; si<step; ++si) {
+                             auto wIndex = si + oxBegin;
+                             int srcX  = wIndex * dstUnit - padX;
+@@ -489,7 +494,11 @@ ErrorCode ConvolutionPackWinograd::onResize(const std::vector<Tensor *> &inputs,
+ 
+                 int srcZStep = (fuseTransformPack ? ePack : xC) * pack;
+                 int unitStep = (fuseTransformPack ? ePack : xC) * dc_4 * pack;
+-                int dstZStep = ow * oh * pack * batch;
++                // dstZStep = full-volume bytes per output channel-pack.
++                // 100M+ for SIAM full-resolution decoder layers, so the
++                // downstream `z * dstZStep * bytes` overflows int32 unless
++                // we keep dstZStep at 64 bits.
++                size_t dstZStep = (size_t)ow * oh * pack * batch;
+                 int oyBegin = xIndex / wUnit;
+                 int oxBegin = xIndex % wUnit;
+                 int oyEnd = (xIndex + xC-1) / wUnit;
+diff --git a/source/backend/cpu/compute/DenseConvolutionTiledExecutor.cpp b/source/backend/cpu/compute/DenseConvolutionTiledExecutor.cpp
+index 52bedc0a..51f5d8b7 100644
+--- a/source/backend/cpu/compute/DenseConvolutionTiledExecutor.cpp
++++ b/source/backend/cpu/compute/DenseConvolutionTiledExecutor.cpp
+@@ -582,7 +582,12 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
+                 ::memset(gemmBuffer, 0, mTempBufferTranspose.stride(0));
+             }
+             info[0] = 1;
+-            int hw4Stride = info[1] * unit * bytes;
++            // hw4Stride = iw * ih * batch * pack * bytes. For SIAM-class 3D
++            // models after Conv3DTurn2D decomposition, info[1] (= iw*ih*batch)
++            // can reach 12.5M, so hw4Stride is ~200 MB and t_ic * hw4Stride
++            // overflows int32 when icC4 >= 11. Use size_t to keep the byte
++            // offset arithmetic correct.
++            size_t hw4Stride = (size_t)info[1] * unit * bytes;
+             static_cast<CPUBackend *>(backend())->computeDivideSizes(number * icC4, im2colParallelSize.data() + 1);
+             im2colParallelSize[0] = 0;
+             MNN_CONCURRENCY_BEGIN(tId, threadNumber) {
+@@ -594,8 +599,8 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
+                         int t_ic = tic_inumber % icC4;
+                         memcpy(threadEL, el + 4 * inumber, 4 * sizeof(int));
+                         threadEL[1] = std::min(ic - (t_ic * unit), unit);
+-                        const float* source = (const float*)((const uint8_t*)(srcPtr[inumber]) + t_ic * hw4Stride);
+-                        auto gemmDest = gemmBuffer + t_ic * unit * eP * bytes;
++                        const float* source = (const float*)((const uint8_t*)(srcPtr[inumber]) + (size_t)t_ic * hw4Stride);
++                        auto gemmDest = gemmBuffer + (size_t)t_ic * unit * eP * bytes;
+                         packA((float *)gemmDest, &source, info, threadEL);
+                 }
+             }
+diff --git a/source/backend/cpu/x86_x64/avx/GemmCommon.cpp b/source/backend/cpu/x86_x64/avx/GemmCommon.cpp
+index 57085b0c..29cb8498 100644
+--- a/source/backend/cpu/x86_x64/avx/GemmCommon.cpp
++++ b/source/backend/cpu/x86_x64/avx/GemmCommon.cpp
+@@ -10,6 +10,7 @@
+ #include "FunctionSummary.hpp"
+ #include "core/Macro.h"
+ #include "Vec8.hpp"
++#include <cstdint>
+ 
+ void AVX2GemmPostTreat(float* C, size_t eSize, const size_t* parameter, const float* postParameters,
+                        const float* bias) {
+@@ -64,7 +65,11 @@ void AVX2GemmPostTreat(float* C, size_t eSize, const size_t* parameter, const fl
+ void _AVX_MNNPackC4ForMatMul_A(float* destOrigin, float const** sourceGroup, const int32_t* info, const int32_t* el) {
+     const int unit = 8;
+     int number = info[0];
+-    int eReal = info[1];
++    // For Conv3D-decomposed models eReal = iw*ih*batch can reach 12.5M.
++    // Subsequent pointer offsets like `x * unit * eReal` overflow int32
++    // around x=23 / unit=8 / eReal=12.5M (= 2.3B). Promote to int64_t so
++    // the multiplications stay correct.
++    int64_t eReal = info[1];
+     int eDest = info[2];
+     int offset = info[3];
+     int pOffset = unit * offset;
+@@ -242,7 +247,7 @@ _mm_storeu_ps(dstX + 24 * i + 5 * 4, r5##i);\
+ void _AVX_MNNPackC4ForMatMul_A_EShort(float* destOrigin, float const** sourceGroup, const int32_t* info, const int32_t* el) {
+     const int unit = 8;
+     int number = info[0];
+-    int eReal = info[1];
++    int64_t eReal = info[1];   // see _AVX_MNNPackC4ForMatMul_A for rationale
+     int eDest = info[2];
+     int offset = info[3];
+     int pOffset = unit * offset;
+diff --git a/source/geometry/GeometryDet.cpp b/source/geometry/GeometryDet.cpp
+index d08b09cb..750b76d8 100644
+--- a/source/geometry/GeometryDet.cpp
++++ b/source/geometry/GeometryDet.cpp
+@@ -15,7 +15,8 @@ public:
+     virtual bool onCompute(const Op* op, const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                            Context& context, CommandBuffer& res) const override {
+         auto input = inputs[0], output = outputs[0];
+-        auto batch = output->elementSize(), M = input->length(input->dimensions() - 1);
++        int batch = (int)output->elementSize();
++        int M = input->length(input->dimensions() - 1);
+         
+         auto midInput = std::shared_ptr<Tensor>(Tensor::createDevice({batch, M, M}, input->getType(), input->getDimensionType()));
+         auto midInDes = TensorUtils::getDescribe(midInput.get());
+diff --git a/source/geometry/GeometryGather.cpp b/source/geometry/GeometryGather.cpp
+index 5e8b2a15..c7e005ef 100644
+--- a/source/geometry/GeometryGather.cpp
++++ b/source/geometry/GeometryGather.cpp
+@@ -169,7 +169,7 @@ public:
+         auto loopCmd = cmd.command[0];
+         auto param = loopCmd->op->main_as_LoopParam();
+         // Reset parameters for last command
+-        ((flatbuffers::Table*)param)->SetField(LoopParam::VT_LOOPNUMBER, indices->elementSize(), 0);
++        ((flatbuffers::Table*)param)->SetField(LoopParam::VT_LOOPNUMBER, (int)indices->elementSize(), 0);
+         auto rgcmd = param->commands()->GetAs<RegionCommand>(0);
+         auto step = (int*)rgcmd->steps()->data();
+         step[0] = inside;
+diff --git a/source/shape/ShapeReshape.cpp b/source/shape/ShapeReshape.cpp
+index 76ca057b..06736207 100644
+--- a/source/shape/ShapeReshape.cpp
++++ b/source/shape/ShapeReshape.cpp
+@@ -138,7 +138,12 @@ public:
+         }
+         output->buffer().dimensions = dimSize;
+ 
+-        int totalSizeInput  = 1;
++        // Use 64-bit accumulators: 3D models (e.g. medical-imaging nnUNet)
++        // routinely produce intermediate Reshape inputs with > 2^31 elements
++        // after Conv3D-to-Conv2D decomposition (Convolution3DTurn2D rewrite),
++        // and 32-bit products wrap into the negative range, breaking the
++        // determinAxis arithmetic and the round-trip equality check.
++        int64_t totalSizeInput  = 1;
+         for (int i = 0; i < input->buffer().dimensions; ++i) {
+             auto l = input->length(i);
+             totalSizeInput *= l;
+@@ -162,16 +167,16 @@ public:
+                 output->buffer().dim[i].extent = reshapeDim;
+             }
+         }
+-        int totalSizeOutput = 1;
++        int64_t totalSizeOutput = 1;
+         for (int i = 0; i < dimSize; ++i) {
+             totalSizeOutput *= output->buffer().dim[i].extent;
+         }
+         if (determinAxis >= 0) {
+-            output->buffer().dim[determinAxis].extent = totalSizeOutput ? totalSizeInput / totalSizeOutput : 0;
++            output->buffer().dim[determinAxis].extent = (int)(totalSizeOutput ? totalSizeInput / totalSizeOutput : 0);
+             totalSizeOutput *= output->buffer().dim[determinAxis].extent;
+         }
+         if (totalSizeInput != totalSizeOutput) {
+-            MNN_PRINT("Reshape error: %d -> %d\n", totalSizeInput, totalSizeOutput);
++            MNN_PRINT("Reshape error: %lld -> %lld\n", (long long)totalSizeInput, (long long)totalSizeOutput);
+             return false;
+         }
+         TensorUtils::getDescribe(output)->dimensionFormat = TensorUtils::getDescribe(input)->dimensionFormat;
