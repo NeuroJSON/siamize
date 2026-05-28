@@ -82,6 +82,11 @@ struct EngineTuning {
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */
 
+    // TensorRT EP cache (Linux only with ORT-GPU build). Inert otherwise.
+    std::string trt_cache_dir;       /**< empty => $HOME/.cache/siamize/trt. Populated
+                                          by sliding_window() from the separate
+                                          trt_cache_dir parameter for backward compat. */
+
     // CoreML EP knobs (macOS only). Inert on Linux / Windows builds.
     CoreMLUnits coreml_units = CoreMLUnits::ALL;  /**< hardware target */
     std::string coreml_cache_dir;                  /**< empty => $HOME/.cache/siamize/coreml */

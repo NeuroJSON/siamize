@@ -1,5 +1,5 @@
 /***************************************************************************//**
-**  \mainpage siamize - native C++/ONNX port of SIAM v0.3 brain segmentation
+**  \mainpage siamize - native C++ port of SIAM v0.3 brain segmentation
 **
 **  \author    Qianqian Fang <q.fang at neu.edu>
 **  \copyright Qianqian Fang, 2026
@@ -10,8 +10,6 @@
 **         Brain MRI Segmentation from Few High-Quality Templates via Synthetic
 **         Training," arXiv:2605.02737 (2026).
 **         <a href="https://arxiv.org/abs/2605.02737">arxiv.org/abs/2605.02737</a>
-**  \li \c (\b ORT) Microsoft ONNX Runtime,
-**         <a href="https://onnxruntime.ai">onnxruntime.ai</a>
 **
 **  \section slicense License
 **          Apache License 2.0, see LICENSE for details
@@ -19,7 +17,7 @@
 
 /***************************************************************************//**
 \file    sliding.cpp
-\brief   Sliding-window inference: tile generation, ORT plumbing, fold averaging
+\brief   Sliding-window inference: tile generation, fold averaging
 
 Mirrors the Python reference in py/siam_ref.py / siam_ort.py:
 
@@ -29,23 +27,24 @@ Mirrors the Python reference in py/siam_ref.py / siam_ort.py:
     smallest nonzero weight to avoid voxels with no coverage).
   - Generate evenly-spaced tile starts per axis at `step_ratio *
     patch_size` stride, with the last tile snug against the far edge.
-  - Run one ORT session per model fold; per tile, feed in (1, 1, Z, Y, X)
-    fp32 patches, accumulate logits * Gaussian into the accumulator,
-    track per-voxel weight, then divide at the end.
-  - Execution provider selection: CPU (always available), CUDA EP
-    (compile-time SIAMIZE_GPU=cuda + runtime cuDNN/cuBLAS), TensorRT
-    EP (compile-time SIAMIZE_GPU=tensorrt + runtime libnvinfer). The
-    "auto" device silently falls back from CUDA to CPU.
+  - For each fold: construct an Engine (ORT or MNN, depending on
+    build-time SIAMIZE_BACKEND), feed (1, 1, Z, Y, X) fp32 patches via
+    Engine::run_tile(), accumulate logits * Gaussian, track per-voxel
+    weight, then divide at the end.
 
-fp32 accumulators throughout; only one fold's session lives in ORT
-at any moment so peak VRAM stays bounded.
+The backend selection (CPU, CUDA, TensorRT, CoreML for ORT; CPU,
+OpenCL, Vulkan, Metal for MNN) is encapsulated in the Engine layer.
+This file knows nothing about either runtime -- it just allocates
+buffers, tiles, and accumulates.
+
+fp32 accumulators throughout; only one fold's Engine lives in memory
+at any moment so peak working-set stays bounded.
 *******************************************************************************/
 
 #include "sliding.h"
+#include "engine.h"
 #include "siam.h"
 #include "siam_log.h"
-
-#include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
 #include <array>
@@ -53,90 +52,15 @@ at any moment so peak VRAM stays bounded.
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
-
-#ifdef _WIN32
-    #define WIN32_LEAN_AND_MEAN
-    #include <windows.h>
-#endif
 
 namespace siam {
 
 namespace {
-
-/*******************************************************************************/
-/*! \fn    void ORT_API_CALL siam_ort_logging_func(...)
-    \brief Custom ORT log sink that filters/relays ORT's internal messages
-
-    By default ORT writes its own errors and warnings straight to stderr
-    in a "[E:onnxruntime:siam, provider_bridge_ort.cc:NNNN] ..." format
-    that terminals colour red. Two of those are routine and not actually
-    failure conditions:
-
-      - "Failed to load library .../libonnxruntime_providers_cuda.so"
-      - "cannot open shared object file" (cuDNN / cuBLAS missing)
-
-    They fire whenever -c auto probes the CUDA EP on a host without
-    CUDA drivers installed. siamize handles this case explicitly with
-    a user-friendly [cuda] unavailable (...); using CPU line. The
-    extra ORT error message just confuses users into thinking the
-    run failed.
-
-    This sink suppresses those known-routine messages and routes
-    everything else through siam::log_warn so they remain visible
-    but not visually alarming.
-*/
-void ORT_API_CALL siam_ort_logging_func(void* /*param*/,
-                                        OrtLoggingLevel severity,
-                                        const char* /*category*/,
-                                        const char* /*logid*/,
-                                        const char* /*code_location*/,
-                                        const char* message) {
-    if (!message) {
-        return;
-    }
-
-    // ERROR-severity messages get re-routed through siam::log_warn so
-    // they appear as "[warn] ORT: ..." instead of the loud
-    // "[E:onnxruntime:siam,...]" default ORT format. The full message
-    // body is preserved -- including "Failed to load library
-    // libXXX.so" / "cannot open shared object file" lines from the
-    // EP-probe path -- so users can see which dependency is missing
-    // when an EP fails. INFO/WARNING/VERBOSE chatter is dropped.
-    if (severity >= ORT_LOGGING_LEVEL_ERROR) {
-        siam::log_warn("ORT: %s", message);
-    }
-}
-
-#ifdef _WIN32
-/*******************************************************************************/
-/*! \fn    std::wstring widen_path(const std::string& s)
-    \brief Convert UTF-8 to UTF-16 for the Windows ORT Session constructor
-    \param  s  UTF-8 path
-    \return    UTF-16 path
-*/
-std::wstring widen_path(const std::string& s) {
-    if (s.empty()) {
-        return std::wstring();
-    }
-
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                                nullptr, 0);
-
-    if (n <= 0) {
-        throw std::runtime_error("MultiByteToWideChar failed for path: " + s);
-    }
-
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                        w.data(), n);
-    return w;
-}
-#endif
 
 /*******************************************************************************/
 /*! \fn    std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
@@ -151,30 +75,18 @@ std::wstring widen_path(const std::string& s) {
     (well outside the Gaussian's mass) are floored to the smallest
     nonzero weight so every voxel in the tile contributes some
     coverage to the accumulator.
-
-    \param  patch          tile shape in (Z, Y, X)
-    \param  sigma_scale    sigma = sigma_scale * patch_size, default 1/8
-    \param  value_scaling  peak after normalization (default 10x)
-    \return                flat (Z*Y*X) importance map
 */
 std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
                                     float sigma_scale = 1.0f / 8.0f,
                                     float value_scaling = 10.0f) {
     std::vector<float> g(patch[0] * patch[1] * patch[2]);
-    const float cz = patch[0] * 0.5f - 0.5f;     // matches scipy 'center = patch // 2' for even sizes
-    const float cy = patch[1] * 0.5f - 0.5f;
-    const float cx = patch[2] * 0.5f - 0.5f;
     const float sz = patch[0] * sigma_scale;
     const float sy = patch[1] * sigma_scale;
     const float sx = patch[2] * sigma_scale;
-    // Note: siam_ref/siam_ort use `s // 2` as center → integer center.
-    // Use the integer center to match Python exactly.
+    // siam_ref/siam_ort use `s // 2` as center -> integer center.
     const float icz = static_cast<float>(patch[0] / 2);
     const float icy = static_cast<float>(patch[1] / 2);
     const float icx = static_cast<float>(patch[2] / 2);
-    (void)cz;
-    (void)cy;
-    (void)cx;
 
     double gmax = 0.0;
 
@@ -211,9 +123,11 @@ std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
         nz_min = 1e-6;
     }
 
-    for (auto& v : g) if (v == 0.0f) {
+    for (auto& v : g) {
+        if (v == 0.0f) {
             v = static_cast<float>(nz_min);
         }
+    }
 
     return g;
 }
@@ -222,18 +136,7 @@ std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
 /*! \fn    std::vector<int64_t> compute_steps(int64_t image_size,
                                               int64_t patch,
                                               float step_ratio)
-    \brief Generate tile start indices along one axis
-
-    Picks the smallest number of evenly-spaced positions whose stride
-    is at most `patch * step_ratio` and which cover the full range
-    `[0, image_size - patch]`. With one tile, no spacing is needed;
-    otherwise the actual stride is recomputed to divide the span
-    exactly. Matches nnUNet's `compute_steps_for_sliding_window`.
-
-    \param  image_size  image extent along this axis
-    \param  patch       patch extent along this axis
-    \param  step_ratio  fraction of patch_size used as the target stride
-    \return             monotonically-increasing tile start indices
+    \brief Generate tile start indices along one axis (matches nnUNet)
 */
 std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step_ratio) {
     if (image_size < patch) {
@@ -263,40 +166,11 @@ std::vector<int64_t> compute_steps(int64_t image_size, int64_t patch, float step
 }  // anonymous namespace
 
 /*******************************************************************************/
-/*! \fn    LogitsVolume sliding_window(const Volume& data,
-                                       const std::vector<std::string>& model_paths,
-                                       std::array<int64_t, 3> patch_size,
-                                       int64_t num_classes,
-                                       int intra_threads,
-                                       float step_ratio,
-                                       bool verbose,
-                                       const std::string& device,
-                                       const std::string& trt_cache_dir,
-                                       const EngineTuning& engine_tuning)
+/*! \fn    LogitsVolume sliding_window(...)
     \brief Run sliding-window inference over one canonical volume
 
-    Implementation outline:
-
-      -# Decide which Execution Provider chain to install based on
-         \a device, the compile-time SIAMIZE_GPU value, and runtime
-         provider-library availability. CUDA EP is attempted before
-         CPU on "auto" / "cuda"; TensorRT EP is attempted only when
-         requested explicitly.
-      -# Pre-compute the Gaussian importance map (compute_gaussian)
-         and per-axis tile start indices (compute_steps).
-      -# Allocate the (num_classes, Z, Y, X) accumulator and a
-         per-voxel weight accumulator.
-      -# Loop over folds, creating one ORT session per fold;
-         feed (1, 1, Z, Y, X) fp32 tile tensors into Run(); multiply
-         the per-class outputs by the Gaussian and add into the
-         accumulator. Track per-voxel weight in parallel.
-      -# After all folds, divide the per-channel accumulator by the
-         weight buffer to obtain final logits.
-
-    \param  data, model_paths, patch_size, num_classes, intra_threads,
-            step_ratio, verbose, device, trt_cache_dir, engine_tuning
-            - see sliding.h for parameter semantics
-    \return Per-class logits at the same grid as \a data
+    Backend-agnostic. The per-fold inference is delegated to an Engine
+    (siam::make_engine() picks the build-time backend: ORT or MNN).
 */
 LogitsVolume sliding_window(const Volume& data,
                             const std::vector<std::string>& model_paths,
@@ -312,105 +186,14 @@ LogitsVolume sliding_window(const Volume& data,
         throw std::runtime_error("no model paths provided");
     }
 
-    const bool trt_required    = (device == "tensorrt");
-    const bool trt_try         = trt_required;
-    const bool cuda_required   = (device == "cuda");
-    const bool cuda_try        = (device == "cuda" || device == "auto"
-                                  || device == "tensorrt");
-    // CoreML EP (macOS / Apple Silicon). On a CoreML-enabled build,
-    // -c auto prefers CoreML over CPU. On a CUDA-enabled build that
-    // doesn't include CoreML, -c auto picks CUDA. Both can't be on at
-    // once (no current host has both NVIDIA + Apple Silicon).
-    const bool coreml_required = (device == "coreml");
-    const bool coreml_try      = (device == "coreml" || device == "auto");
+    // Carry the legacy trt_cache_dir parameter through EngineTuning so
+    // make_engine() sees one consistent options struct. trt_cache_dir
+    // is only meaningful to OrtEngine; MnnEngine ignores it.
+    EngineTuning tuning = engine_tuning;
 
-#ifndef SIAMIZE_HAS_CUDA
-
-    if (cuda_required || trt_required) {
-        throw std::runtime_error(
-            "device=" + device + " requested but siamize was built without GPU "
-            "support. Rebuild with -DSIAMIZE_GPU=cuda (or =tensorrt) and the "
-            "onnxruntime-gpu prebuilt.");
+    if (tuning.trt_cache_dir.empty()) {
+        tuning.trt_cache_dir = trt_cache_dir;
     }
-
-#endif
-#ifndef SIAMIZE_HAS_TENSORRT
-
-    if (trt_required) {
-        throw std::runtime_error(
-            "device=tensorrt requested but siamize was built without TensorRT. "
-            "Rebuild with -DSIAMIZE_GPU=tensorrt.");
-    }
-
-#endif
-#ifndef SIAMIZE_HAS_COREML
-
-    if (coreml_required) {
-        throw std::runtime_error(
-            "device=coreml requested but siamize was built without CoreML "
-            "support. Rebuild on macOS with -DSIAMIZE_GPU=coreml.");
-    }
-
-#endif
-
-    // Resolve the TRT engine cache directory (used only when TRT is enabled).
-    std::string trt_cache = trt_cache_dir;
-
-    if (trt_try && trt_cache.empty()) {
-        const char* home = std::getenv("HOME");
-
-        if (home == nullptr) {
-            home = ".";
-        }
-
-        trt_cache = std::string(home) + "/.cache/siamize/trt";
-    }
-
-#ifdef SIAMIZE_HAS_TENSORRT
-
-    if (trt_try) {
-        try {
-            std::filesystem::create_directories(trt_cache);
-        } catch (const std::exception& e) {
-            if (trt_required) {
-                throw std::runtime_error(
-                    "failed to create TRT engine cache dir " + trt_cache + ": " + e.what());
-            }
-        }
-    }
-
-#endif
-
-    // Resolve the CoreML model-compile cache directory (used only when
-    // CoreML EP is enabled). Core ML translates the ONNX graph to a
-    // .mlmodelc bundle at session creation; the first invocation pays
-    // 10-30 s for that compile and subsequent invocations hit the cache.
-    std::string coreml_cache = engine_tuning.coreml_cache_dir;
-
-    if (coreml_try && coreml_cache.empty()) {
-        const char* home = std::getenv("HOME");
-
-        if (home == nullptr) {
-            home = ".";
-        }
-
-        coreml_cache = std::string(home) + "/.cache/siamize/coreml";
-    }
-
-#ifdef SIAMIZE_HAS_COREML
-
-    if (coreml_try) {
-        try {
-            std::filesystem::create_directories(coreml_cache);
-        } catch (const std::exception& e) {
-            if (coreml_required) {
-                throw std::runtime_error(
-                    "failed to create CoreML cache dir " + coreml_cache + ": " + e.what());
-            }
-        }
-    }
-
-#endif
 
     const int64_t Z = data.shape[0], Y = data.shape[1], X = data.shape[2];
     // Pad if input is smaller than patch in any dim.
@@ -444,10 +227,11 @@ LogitsVolume sliding_window(const Volume& data,
     siam::log_tag("infer",
                   "image (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
                   ")  patch (%" PRId64 ",%" PRId64 ",%" PRId64
-                  ")  step %.2f  tiles %" PRId64 "  weights %zu",
+                  ")  step %.2f  tiles %" PRId64 "  weights %zu  backend %s",
                   spatZ, spatY, spatX,
                   patch_size[0], patch_size[1], patch_size[2],
-                  step_ratio, n_tiles, model_paths.size());
+                  step_ratio, n_tiles, model_paths.size(),
+                  siam::backend_name());
     (void)verbose;
 
     auto gauss = compute_gaussian(patch_size);
@@ -456,309 +240,30 @@ LogitsVolume sliding_window(const Volume& data,
     logits.resize(num_classes, spatZ, spatY, spatX);
     std::vector<float> weights(static_cast<size_t>(spatZ) * spatY * spatX, 0.0f);
 
-    // Custom log sink to suppress ORT's loud red EP-probe failure
-    // messages on -c auto when CUDA/cuDNN aren't installed. See
-    // siam_ort_logging_func above for the rationale.
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "siam",
-                 siam_ort_logging_func, /*logging_param=*/nullptr);
-
     const int64_t patchN = patch_size[0] * patch_size[1] * patch_size[2];
     std::vector<float> input_buf(patchN);
-
-    const std::array<int64_t, 5> input_shape = {1, 1, patch_size[0], patch_size[1], patch_size[2]};
-    const std::array<int64_t, 5> output_shape_expected = {1, num_classes, patch_size[0], patch_size[1], patch_size[2]};
-    (void)output_shape_expected;
-
-    Ort::AllocatorWithDefaultOptions allocator;
-    auto mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    // Decide on the execution providers once. On the first fold, try to
-    // register TRT (if requested) then CUDA (if available). Remember the
-    // outcome for subsequent folds.
-    bool use_trt    = false;
-    bool use_cuda   = false;
-    bool use_coreml = false;
-    bool ep_probed  = false;
+    std::vector<float> pred_buf(num_classes * patchN);
 
     for (size_t fi = 0; fi < model_paths.size(); ++fi) {
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(intra_threads);
-        opts.SetInterOpNumThreads(1);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-        const bool will_use_gpu = (use_trt || use_cuda || (!ep_probed && (trt_try || cuda_try)));
-
-        // ORT's CPU memory arena + memory-pattern optimizer:
-        // default ON (fast path) for the CPU EP. Profiling on a
-        // 64-core Zen2 showed the disabled path produced ~75M minor
-        // page faults and a 43% dTLB miss rate -- per-op mmap/munmap
-        // churn that dragged ~88% of system time into the kernel and
-        // capped scaling at ~18 cores. With the arena enabled, the
-        // same run drops to ~7M page faults and ~27 cores of
-        // utilization at the cost of ~2x peak RSS (12 GB -> 28 GB on
-        // the 18-class SIAM network). Pass --no-arena on the CLI (or
-        // engine_tuning.cpu_arena = false in the MEX) to opt out
-        // when RSS matters more than wall time.
-        //
-        // The CPU arena flag is harmless when CUDA/TRT EPs end up
-        // taking the run (those EPs use their own allocators), so
-        // honour the user's request unconditionally rather than
-        // gating on !will_use_gpu -- otherwise -c auto + --no-arena
-        // silently ignores --no-arena when the CUDA probe succeeds,
-        // and worse, leaves arena ENABLED on the CPU fallback path
-        // when the CUDA probe fails (the arena setting is baked into
-        // SessionOptions before the EP probe runs).
-        if (!engine_tuning.cpu_arena) {
-            opts.DisableCpuMemArena();
-            opts.DisableMemPattern();
-        }
-
-#ifdef SIAMIZE_HAS_TENSORRT
-
-        // TRT EP first so it gets to claim subgraphs it can fuse; CUDA EP
-        // (registered below) picks up whatever TRT declines.
-        if (trt_try && (!ep_probed || use_trt)) {
-            if (!ep_probed) {
-                siam::log_tag("trt", "probing TensorRT EP...");
-            }
-
-            try {
-                OrtTensorRTProviderOptionsV2* trt_opts = nullptr;
-                Ort::ThrowOnError(Ort::GetApi().CreateTensorRTProviderOptions(&trt_opts));
-
-                std::vector<const char*> tkeys;
-                std::vector<const char*> tvals;
-                tkeys.push_back("trt_engine_cache_enable");
-                tvals.push_back("1");
-                tkeys.push_back("trt_engine_cache_path");
-                tvals.push_back(trt_cache.c_str());
-                tkeys.push_back("trt_fp16_enable");
-                tvals.push_back("1");
-                Ort::ThrowOnError(Ort::GetApi().UpdateTensorRTProviderOptions(
-                                      trt_opts, tkeys.data(), tvals.data(), tkeys.size()));
-                opts.AppendExecutionProvider_TensorRT_V2(*trt_opts);
-                Ort::GetApi().ReleaseTensorRTProviderOptions(trt_opts);
-
-                if (!ep_probed) {
-                    use_trt = true;
-                    siam::log_tag("trt", "enabled (gpuid=%d, cache: %s)",
-                                  engine_tuning.gpuid, trt_cache.c_str());
-                    siam::log_cont("first run on a new GPU/TRT version builds engines "
-                                   "(~1-5 min/fold)");
-                }
-            } catch (const Ort::Exception& e) {
-                if (trt_required) {
-                    throw;   // user explicitly asked for TensorRT
-                }
-
-                if (!ep_probed) {
-                    siam::log_tag("trt", "unavailable (%s); falling back", e.what());
-                }
-
-                use_trt = false;
-            }
-        }
-
-#endif
-#ifdef SIAMIZE_HAS_CUDA
-
-        if (cuda_try && (!ep_probed || use_cuda || use_trt)) {
-            if (!ep_probed) {
-                siam::log_tag("cuda", "probing CUDA EP...");
-            }
-
-            try {
-                OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
-                Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
-
-                // Apply CUDA EP tuning overrides. These keys all default
-                // to ORT's standard values; we only override the ones the
-                // caller asked for. Empty/zero fields are skipped so the
-                // common case (no flags) stays bit-identical to before.
-                std::vector<std::string> kbuf, vbuf;
-                auto add = [&](const char* k, const std::string & v) {
-                    kbuf.emplace_back(k);
-                    vbuf.emplace_back(v);
-                };
-
-                if (engine_tuning.cudnn_max_workspace == 0) {
-                    add("cudnn_conv_use_max_workspace", "0");
-                }
-
-                if (engine_tuning.arena_same_as_req == 1) {
-                    add("arena_extend_strategy", "kSameAsRequested");
-                }
-
-                if (!engine_tuning.algo_search.empty()) {
-                    add("cudnn_conv_algo_search", engine_tuning.algo_search);
-                }
-
-                if (engine_tuning.gpu_mem_limit_bytes > 0) {
-                    add("gpu_mem_limit", std::to_string(engine_tuning.gpu_mem_limit_bytes));
-                }
-
-                if (engine_tuning.gpuid != 0) {
-                    add("device_id", std::to_string(engine_tuning.gpuid));
-                }
-
-                if (!kbuf.empty()) {
-                    std::vector<const char*> kp, vp;
-
-                    for (auto& s : kbuf) {
-                        kp.push_back(s.c_str());
-                    }
-
-                    for (auto& s : vbuf) {
-                        vp.push_back(s.c_str());
-                    }
-
-                    Ort::ThrowOnError(Ort::GetApi().UpdateCUDAProviderOptions(
-                                          cuda_opts, kp.data(), vp.data(), kp.size()));
-
-                    siam::log_tag("cuda", "tuning:");
-
-                    for (size_t i = 0; i < kbuf.size(); ++i) {
-                        siam::log_cont("%s = %s",
-                                       kbuf[i].c_str(), vbuf[i].c_str());
-                    }
-                }
-
-                opts.AppendExecutionProvider_CUDA_V2(*cuda_opts);
-                Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts);
-
-                if (!ep_probed) {
-                    use_cuda = true;
-
-                    if (!use_trt) {
-                        siam::log_tag("cuda", "enabled (gpuid=%d)",
-                                      engine_tuning.gpuid);
-                    }
-                }
-            } catch (const Ort::Exception& e) {
-                if (cuda_required) {
-                    throw;   // user explicitly asked for CUDA
-                }
-
-                if (!ep_probed) {
-                    siam::log_tag("cuda", "unavailable (%s); using CPU", e.what());
-                }
-
-                use_cuda = false;
-                // CPU fallback path: keep the arena enabled. See the
-                // note at the top of this loop for the profiling
-                // analysis behind that choice.
-            }
-        }
-
-#endif
-#ifdef SIAMIZE_HAS_COREML
-
-        // CoreML EP (macOS / Apple Silicon). The EP is statically baked
-        // into ORT's macOS dylib -- no provider-plugin .so to dlopen,
-        // unlike CUDA / TensorRT. We register via the v2 string-options
-        // interface so we can pass MLComputeUnits, ModelCacheDirectory,
-        // etc. Failures fall back to CPU when device == "auto"; an
-        // explicit -c coreml re-raises.
-        if (coreml_try && (!ep_probed || use_coreml)) {
-            if (!ep_probed) {
-                siam::log_tag("coreml", "probing CoreML EP...");
-            }
-
-            try {
-                std::unordered_map<std::string, std::string> co_opts;
-
-                switch (engine_tuning.coreml_units) {
-                    case CoreMLUnits::CPU_ONLY:
-                        co_opts["MLComputeUnits"] = "CPUOnly";
-                        break;
-
-                    case CoreMLUnits::CPU_AND_GPU:
-                        co_opts["MLComputeUnits"] = "CPUAndGPU";
-                        break;
-
-                    case CoreMLUnits::CPU_AND_ANE:
-                        co_opts["MLComputeUnits"] = "CPUAndNeuralEngine";
-                        break;
-
-                    case CoreMLUnits::ALL:
-                    default:
-                        co_opts["MLComputeUnits"] = "ALL";
-                        break;
-                }
-
-                // MLProgram is the modern Core ML format (macOS 13+):
-                // supports 3-D Conv / ConvTranspose / InstanceNorm and
-                // accepts fp16 weights natively. NeuralNetwork is the
-                // legacy format and would reject this network.
-                co_opts["ModelFormat"] = "MLProgram";
-
-                // First-run cache. Core ML compiles the ONNX into a
-                // hardware-specialized .mlmodelc bundle here. Cache hit
-                // on subsequent runs skips the 10-30 s compile.
-                co_opts["ModelCacheDirectory"] = coreml_cache;
-
-                // RequireStaticInputShapes=1 lets Core ML fuse more
-                // aggressively and avoids per-shape recompiles -- pair
-                // with the fixed-shape ONNX bundle. =0 is required for
-                // the dynamic-shape ONNX (--lowmem patch shrink).
-                co_opts["RequireStaticInputShapes"] =
-                    engine_tuning.coreml_static_shapes ? "1" : "0";
-
-                // EnableOnSubgraphs=1 lets Core ML claim subgraphs it
-                // can fuse and pushes the rest to the CPU EP. Without
-                // it, a single unsupported op forces the whole graph
-                // back to CPU.
-                co_opts["EnableOnSubgraphs"] = "1";
-
-                opts.AppendExecutionProvider("CoreML", co_opts);
-
-                if (!ep_probed) {
-                    use_coreml = true;
-                    const char* units_str =
-                        engine_tuning.coreml_units == CoreMLUnits::CPU_ONLY    ? "cpu" :
-                        engine_tuning.coreml_units == CoreMLUnits::CPU_AND_GPU ? "cpugpu" :
-                        engine_tuning.coreml_units == CoreMLUnits::CPU_AND_ANE ? "cpune" :
-                        "all";
-                    siam::log_tag("coreml",
-                                  "enabled (units=%s, cache=%s, static_shapes=%s)",
-                                  units_str, coreml_cache.c_str(),
-                                  engine_tuning.coreml_static_shapes ? "yes" : "no");
-                    siam::log_cont("first run compiles ONNX -> .mlmodelc "
-                                   "(~10-30 s, cached after)");
-                }
-            } catch (const Ort::Exception& e) {
-                if (coreml_required) {
-                    throw;   // user explicitly asked for CoreML
-                }
-
-                if (!ep_probed) {
-                    siam::log_tag("coreml", "unavailable (%s); using CPU",
-                                  e.what());
-                }
-
-                use_coreml = false;
-            }
-        }
-
-#endif
-        ep_probed = true;
-
-#ifdef _WIN32
-        auto wpath = widen_path(model_paths[fi]);
-        Ort::Session sess(env, wpath.c_str(), opts);
-#else
-        Ort::Session sess(env, model_paths[fi].c_str(), opts);
-#endif
-
-        Ort::AllocatedStringPtr in_name_ptr = sess.GetInputNameAllocated(0, allocator);
-        Ort::AllocatedStringPtr out_name_ptr = sess.GetOutputNameAllocated(0, allocator);
-        const char* in_name = in_name_ptr.get();
-        const char* out_name = out_name_ptr.get();
-        const char* in_names[] = {in_name};
-        const char* out_names[] = {out_name};
-
         siam::log_tag("weight", "%zu/%zu  %s",
                       fi + 1, model_paths.size(), model_paths[fi].c_str());
+
+        // One Engine per fold. The Engine owns the session (ORT
+        // Ort::Session / MNN MNN::Session) for this fold's weights.
+        // Going out of scope at the end of each fold iteration
+        // releases the session memory before the next fold loads.
+        std::unique_ptr<Engine> engine = siam::make_engine(
+                                             model_paths[fi], patch_size, intra_threads, device, tuning, verbose);
+
+        // Defensive: the model's declared num_classes must agree with
+        // the caller's. If it doesn't, the accumulator math silently
+        // misaligns.
+        if (engine->num_classes() != num_classes) {
+            throw std::runtime_error(
+                "fold " + std::to_string(fi) + " (" + model_paths[fi] +
+                ") declares num_classes=" + std::to_string(engine->num_classes()) +
+                " but caller passed num_classes=" + std::to_string(num_classes));
+        }
 
         int64_t tile_idx = 0;
 
@@ -777,19 +282,13 @@ LogitsVolume sliding_window(const Volume& data,
                         }
                     }
 
-                    Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
-                                               mem_info, input_buf.data(), input_buf.size(),
-                                               input_shape.data(), input_shape.size());
-                    auto outputs = sess.Run(Ort::RunOptions{nullptr},
-                                            in_names, &in_tensor, 1,
-                                            out_names, 1);
-                    const float* pred = outputs[0].GetTensorData<float>();
+                    engine->run_tile(input_buf.data(), pred_buf.data());
 
                     // accumulate: logits[c, z, y, x] += pred[c, ...] * gauss
                     // weights[z, y, x] += gauss   (only first fold)
                     for (int64_t c = 0; c < num_classes; ++c) {
                         float* logit_ch = logits.channel_ptr(c);
-                        const float* pred_ch = pred + c * patchN;
+                        const float* pred_ch = pred_buf.data() + c * patchN;
 
                         for (int64_t z = 0; z < patch_size[0]; ++z) {
                             for (int64_t y = 0; y < patch_size[1]; ++y) {
@@ -820,9 +319,7 @@ LogitsVolume sliding_window(const Volume& data,
                     ++tile_idx;
 
                     // TTY-aware progress bar (self-redrawing on a terminal,
-                    // one-line-per-tile when piped / inside a MEX). One
-                    // continuous progress signal across the long inference
-                    // phase regardless of where stderr ends up.
+                    // one-line-per-tile when piped / inside a MEX).
                     siam::log_progress("tile",
                                        static_cast<long long>(tile_idx),
                                        static_cast<long long>(n_tiles));

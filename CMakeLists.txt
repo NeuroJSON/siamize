@@ -189,7 +189,9 @@ set(SIAMIZE_SOURCES
     src/weights.cpp
     src/siam_log.cpp
 )
-if(SIAMIZE_BACKEND STREQUAL "mnn")
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    list(APPEND SIAMIZE_SOURCES src/engine_ort.cpp)
+elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     list(APPEND SIAMIZE_SOURCES src/engine_mnn.cpp)
 endif()
 
@@ -396,13 +398,29 @@ set(_siamize_mex_sources
     src/weights.cpp
     src/siam_log.cpp
 )
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    list(APPEND _siamize_mex_sources src/engine_ort.cpp)
+elseif(SIAMIZE_BACKEND STREQUAL "mnn")
+    list(APPEND _siamize_mex_sources src/engine_mnn.cpp)
+endif()
 set(_siamize_mex_includes
     src
     ${ORT_ROOT}/include
     ${ZMAT_INCLUDE}
 )
 
-if(SIAMIZE_BUILD_MATLAB_MEX)
+# MEX targets currently support the ORT backend only. MEX wiring for
+# MNN (different include dir, libMNN linkage, no provider-plugin DLLs)
+# is a follow-up; for now we skip MEX builds when SIAMIZE_BACKEND=mnn
+# rather than fail at compile time with a confusing missing-header error.
+if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "mnn")
+    message(STATUS "MATLAB MEX skipped: SIAMIZE_BACKEND=mnn (MNN-MEX wiring is TODO)")
+endif()
+if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "mnn")
+    message(STATUS "Octave MEX skipped: SIAMIZE_BACKEND=mnn (MNN-MEX wiring is TODO)")
+endif()
+
+if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
     find_package(Matlab COMPONENTS MX_LIBRARY)
 
     if(Matlab_FOUND)
@@ -520,7 +538,7 @@ endif()
 # ---- GNU Octave MEX target --------------------------------------------------
 # Octave doesn't have a CMake target wrapper like FindMatlab, so we invoke
 # mkoctfile via a custom command. Output is siamize.mex (Octave's binary mex).
-if(SIAMIZE_BUILD_OCTAVE_MEX)
+if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
     find_program(MKOCTFILE NAMES mkoctfile)
     if(MKOCTFILE)
         message(STATUS "Octave mkoctfile found: ${MKOCTFILE}")
