@@ -68,13 +68,37 @@ python3 setup.py --deps opencl install --user
 
 ## Known remaining issues
 
-- **Multi-threaded CPU** (`numThread > 1`) still segfaults on this
-  workload. Single-thread mode (the default for high-precision
-  inference) is correct. Multi-thread crash is in
-  `CPURaster::onResize`'s lambda — likely additional pointer-offset
-  overflows on a parallel-iteration code path that wasn't reached in
-  single-thread testing. Patching would follow the same int32→size_t
-  pattern as the rest of CPURaster.cpp.
+- **Multi-threaded CPU** (`numThread > 1`) still segfaults on SIAM-class
+  workloads. The patch includes a defensive workaround in
+  `CPURaster::onResize` that demotes any Raster op with a per-stride
+  byte step > 16 MB to single-thread, but this does not fully eliminate
+  the crash; the failing call stack is consistently
+  `_blit → memmove` inside `CPURaster::onResize::lambda#4`, even with
+  `mUseThreads` forcibly cleared. The root cause is therefore not in
+  the lambda's per-thread offset arithmetic (extensively audited and
+  patched) but somewhere else triggered by `numThread > 1` in the
+  parent backend's setup. **Workaround: pass `numThread=1` or `2`** in
+  `createSession`. Both values produce correct output and complete
+  inference; `numThread=2` is also ~1.5× faster than `numThread=1`.
+
+  Investigation summary of MT crash (for upstream MNN maintainers):
+  - The crash reproduces on the minimal `dec_272` truncated SIAM
+    (`/decoder/stages.5` Conv at full spatial 256×256×192).
+  - `numThread=1, 2`: no crash, output correct.
+  - `numThread=4, 8`: SIGSEGV in `_blit`'s inner `memcpy`, *even when*
+    the workaround forces every Raster op in this op-chain to
+    single-thread via `mUseThreads=false`. The lambda's captured
+    `threadNum=1` was verified with instrumentation.
+  - Audit-and-patch passes on every visible int32 byte-offset
+    arithmetic site (CPURaster offsets, AVX pack `eReal`, Winograd
+    zSteps, CPULayerNorm `tId * mInnerSize`, CPUScale `depthStride*i`,
+    CPUDeconvolution `outputSize`, CPUTensorConvert offsets) did *not*
+    eliminate the multi-thread failure.
+  - The most likely remaining cause is in a path that isn't reached
+    when `threadNumber == 1` from the start, but is reached when
+    `threadNumber == 4` even after every per-op lambda capture is
+    demoted — possibly thread-pool initialization, or a static state
+    in a shared kernel.
 
 - **OpenCL backend** not tested. Likely has similar int32 overflows
   given the systemic nature of the issue across MNN's CPU backend.
