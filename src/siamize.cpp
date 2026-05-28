@@ -338,10 +338,14 @@ void usage(const char* exe) {
                  "                         `heuristic` is the smallest-workspace option.\n"
                  "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
                  "                         e.g. 6G). Default 0 = no explicit cap.\n"
-                 "  -G, --gpu N         CUDA EP device_id (0-based index, default 0 = first visible GPU).\n"
-                 "                         Honors any CUDA_VISIBLE_DEVICES filter set in the environment;\n"
-                 "                         use `nvidia-smi --query-gpu=index,name --format=csv,noheader`\n"
-                 "                         to see what physical GPU each index maps to.\n"
+                 "  -G, --gpu N|P:D     GPU device index (default 0 = first visible GPU). Accepts:\n"
+                 "                         N    : device N within platform 0 (legacy / CUDA / single-ICD).\n"
+                 "                                Honors CUDA_VISIBLE_DEVICES; `nvidia-smi --query-gpu=\n"
+                 "                                index,name --format=csv,noheader` shows the mapping.\n"
+                 "                         P:D  : OpenCL/Vulkan platform P, device D (MNN backend only).\n"
+                 "                                Needed on multi-ICD hosts (e.g. PoCL + NVIDIA, AMD +\n"
+                 "                                Intel) where the real GPU is not on platform 0. List\n"
+                 "                                available platforms with `clinfo -l`. ORT EPs ignore P.\n"
                  "  -t, --thread N      ORT intra-op threads. Default 0 = auto, which selects\n"
                  "                      min(hardware_concurrency, 16). The 16-thread cap is\n"
                  "                      a heuristic: on huge-core hosts (e.g. AMD Zen2 64-core)\n"
@@ -696,7 +700,21 @@ int main(int argc, char** argv) {
         } else if (a == "--lowmem") {
             lowmem_mode = true;
         } else if (a == "-G" || a == "--gpu") {
-            engine_tuning.gpuid = std::stoi(need());
+            // Two accepted forms:
+            //   -G N        device N (legacy / CUDA path, platform 0)
+            //   -G P:D      OpenCL/Vulkan platform P, device D (MNN)
+            // The ":D" form lets users on multi-ICD hosts (e.g. PoCL +
+            // NVIDIA, AMD + Intel) reach a GPU that lives on a non-zero
+            // platform. ORT EPs ignore the platform half.
+            std::string s = need();
+            size_t colon = s.find(':');
+
+            if (colon == std::string::npos) {
+                engine_tuning.gpuid = std::stoi(s);
+            } else {
+                engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
+                engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
+            }
         } else if (a == "-F" || a == "--format") {
             std::string s = need();
 

@@ -35,10 +35,17 @@ decomposition. Document this limitation in your docs.
 #include "engine.h"
 #include "siam_log.h"
 
+// Define MNN_USER_SET_DEVICE before including MNNSharedContext.h so the
+// MNNDeviceContext struct (used for OpenCL/Vulkan device selection via
+// `BackendConfig::sharedContext`) becomes visible. The OpenCL backend
+// itself already defines this in OpenCLBackend.hpp, but we need the
+// definition here too to construct the struct at our end.
+#define MNN_USER_SET_DEVICE
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
 #include <MNN/MNNDefine.h>
 #include <MNN/MNNForwardType.h>
+#include <MNN/MNNSharedContext.h>
 
 #include <algorithm>
 #include <cstring>
@@ -106,6 +113,8 @@ class MnnEngine final : public Engine {
               std::array<int64_t, 3> patch_size,
               int intra_threads,
               const std::string& device,
+              int gpu_platform,
+              int gpuid,
               bool verbose);
     ~MnnEngine() override;
 
@@ -139,6 +148,8 @@ MnnEngine::MnnEngine(const std::string& model_path,
                      std::array<int64_t, 3> patch_size,
                      int intra_threads,
                      const std::string& device,
+                     int gpu_platform,
+                     int gpuid,
                      bool verbose)
     : mPatch(patch_size) {
     mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
@@ -160,6 +171,34 @@ MnnEngine::MnnEngine(const std::string& model_path,
     MNN::BackendConfig bcfg;
     bcfg.precision = MNN::BackendConfig::Precision_High;
     cfg.backendConfig = &bcfg;
+
+    // GPU device selection. MNN's OpenCL backend reads
+    // platformId / deviceId from BackendConfig::sharedContext
+    // (an MNNDeviceContext*) when info.user->sharedContext != nullptr.
+    // We expose gpuid as deviceId only; the platform stays at 0, which
+    // matches the typical single-vendor ICD layout (NVIDIA-only,
+    // AMD-only, or Intel-only). Users with multiple platforms can set
+    // a platform via the OpenCL ICD env vars (OCL_ICD_VENDORS,
+    // CUDA_VISIBLE_DEVICES, etc.) -- adding a second flag for
+    // platformId would be the next step if anyone asks. The Vulkan
+    // backend uses the same struct with deviceId pointing at a
+    // VkPhysicalDevice index; CUDA / Metal ignore the struct.
+    //
+    // The struct must outlive createSession(). createSession reads
+    // sharedContext synchronously and the OpenCL backend copies
+    // platformId / deviceId into its own state, so a stack-local
+    // works -- but we still keep it alive for the full session
+    // lifetime to be safe against future MNN changes that might
+    // retain the pointer. See OpenCLBackend.cpp:38-43.
+    MNNDeviceContext dev_ctx{};
+    const bool gpu_dev = (cfg.type == MNN_FORWARD_OPENCL ||
+                          cfg.type == MNN_FORWARD_VULKAN);
+
+    if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
+        dev_ctx.platformId = static_cast<uint32_t>(gpu_platform);
+        dev_ctx.deviceId = static_cast<uint32_t>(gpuid);
+        bcfg.sharedContext = &dev_ctx;
+    }
 
     mSession = mInterpreter->createSession(cfg);
 
@@ -242,9 +281,15 @@ MnnEngine::MnnEngine(const std::string& model_path,
                 break;
         }
 
-        siam::log_tag("mnn", "%s device=%s numThread=%d num_classes=%lld",
-                      model_path.c_str(), dev_name, cfg.numThread,
-                      static_cast<long long>(mNumClasses));
+        if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
+            siam::log_tag("mnn", "%s device=%s[platform=%d,device=%d] numThread=%d num_classes=%lld",
+                          model_path.c_str(), dev_name, gpu_platform, gpuid,
+                          cfg.numThread, static_cast<long long>(mNumClasses));
+        } else {
+            siam::log_tag("mnn", "%s device=%s numThread=%d num_classes=%lld",
+                          model_path.c_str(), dev_name, cfg.numThread,
+                          static_cast<long long>(mNumClasses));
+        }
     }
 }
 
@@ -285,13 +330,16 @@ make_engine(const std::string& model_path,
             std::array<int64_t, 3> patch_size,
             int intra_threads,
             const std::string& device,
-            const EngineTuning& /*tuning*/,
+            const EngineTuning& tuning,
             bool verbose) {
-    // EngineTuning's CUDA / CoreML knobs are inert for MNN. The
-    // signature stays the same as the ORT impl so sliding.cpp doesn't
-    // need backend-specific branches.
+    // EngineTuning's CUDA / CoreML knobs are inert for MNN; only the
+    // gpuid is honored (mapped to MNNDeviceContext::deviceId for the
+    // OpenCL / Vulkan backends). The signature stays the same as the
+    // ORT impl so sliding.cpp doesn't need backend-specific branches.
     return std::unique_ptr<Engine>(
-               new MnnEngine(model_path, patch_size, intra_threads, device, verbose));
+               new MnnEngine(model_path, patch_size, intra_threads,
+                             device, tuning.gpu_platform, tuning.gpuid,
+                             verbose));
 }
 
 const char* backend_name() {

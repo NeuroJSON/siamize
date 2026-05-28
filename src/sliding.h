@@ -77,7 +77,18 @@ struct EngineTuning {
                                           (vs the default kNextPowerOfTwo) */
     std::string algo_search;         /**< "", "DEFAULT", "HEURISTIC", or "EXHAUSTIVE" */
     size_t gpu_mem_limit_bytes = 0;  /**< 0 = no explicit memory cap */
-    int gpuid = 0;                   /**< CUDA EP device_id (0 = first visible GPU) */
+    int gpuid = 0;                   /**< CUDA EP device_id (0 = first visible GPU).
+                                          For the MNN backend's OpenCL / Vulkan
+                                          devices, this maps to MNNDeviceContext::
+                                          deviceId (device index within the chosen
+                                          platform). */
+    int gpu_platform = 0;            /**< OpenCL / Vulkan platform index (MNN only).
+                                          Inert for ORT EPs. Mostly relevant on
+                                          hosts with multiple OpenCL ICDs loaded
+                                          (e.g. PoCL + NVIDIA), where platform 0
+                                          may be the CPU runtime and the real GPU
+                                          lives on platform 1. CLI `-G P:D`
+                                          populates both fields. */
     bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */

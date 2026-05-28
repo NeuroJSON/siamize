@@ -24,14 +24,11 @@
 
 set -euo pipefail
 
-# MNN_REF can be a branch, tag, or commit SHA. Default points to the
-# NeuroJSON/MNN branch carrying the int64-overflow fixes needed for
-# SIAM-class workloads. Note: the v3.5-int64fix *tag* on that repo
-# currently points to a pre-patch commit (sha 59061a4f); the actual
-# patched HEAD lives on the siam-int64-fixes branch (sha 3ba7a4d4+).
-# `MNN_TAG` is accepted as a synonym for back-compat with the script's
-# first revision.
-MNN_REF="${MNN_REF:-${MNN_TAG:-siam-int64-fixes}}"
+# MNN_REF can be a branch, tag, or commit SHA on NeuroJSON/MNN. The
+# default tag carries the int64-overflow fixes needed for SIAM-class
+# workloads (>2 GB intermediate tensors after Conv3DTurn2D). MNN_TAG is
+# accepted as a synonym for back-compat.
+MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-int64fix}}"
 MNN_TAG="$MNN_REF"   # used in stage-dir naming below
 MNN_OPENCL="${MNN_OPENCL:-1}"
 FORCE="${FORCE:-0}"
