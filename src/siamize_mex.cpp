@@ -763,27 +763,28 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         bool vram_tight = (opts.lowmem && gpu_active)
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 
-        if (ram_tight) {
-            // Patch shrink: for ORT, gated on EXPLICIT opts.lowmem
-            // because old fixed-shape .onnx may not accept smaller
-            // patches. For MNN, the shipped doc=mnn_i8a bundle is
-            // always dyn-shape, so we auto-shrink without the opt-in.
-            // The 128x128x96 tier kicks in when BOTH RAM and VRAM are
-            // tight + a GPU device is active -- MNN-OpenCL allocates
-            // the full forward-pass workspace ahead of the first tile.
+        // Patch shrink: lives outside ram_tight so it fires on
+        // RAM-comfortable but VRAM-tight hosts too (the common
+        // workstation-with-10GB-GPU case). ORT keeps the explicit
+        // opts.lowmem gate; MNN's shipped doc=mnn_i8a is always
+        // dyn-shape so auto-shrink is safe.
+        {
             bool patch_shrink_allowed = opts.lowmem;
 #ifdef SIAMIZE_HAS_MNN
             patch_shrink_allowed = true;
 #endif
 
-            if (patch_shrink_allowed && !opts.patch_set) {
+            if (patch_shrink_allowed && !opts.patch_set
+                    && (ram_tight || vram_tight)) {
                 if (vram_tight && gpu_active) {
                     opts.patch = {128, 128, 96};
                 } else {
                     opts.patch = {192, 192, 128};
                 }
             }
+        }
 
+        if (ram_tight) {
             if (!opts.cpu_arena_set) {
                 opts.engine_tuning.cpu_arena = false;
             }

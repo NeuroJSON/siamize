@@ -910,30 +910,25 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> auto_applied;
 
-    if (ram_tight) {
-        // Patch shrink. For ORT, this stays gated on EXPLICIT --lowmem
-        // because the network only accepts smaller patches if its ONNX
-        // was exported with dynamic spatial axes; auto-detect can't
-        // make that assertion since old uploads / cached .onnx files
-        // may still be fixed-shape.
-        //
-        // For MNN, the assumption is safe: the shipped doc=mnn_i8a
-        // bundle is built from the dynshape ONNX and resizeTensor +
-        // resizeSession at run_tile time accepts any patch. So we
-        // auto-shrink without requiring --lowmem.
-        //
-        // The two-tier choice (192x192x128 vs 128x128x96) keys off
-        // vram_tight + GPU active so MNN-OpenCL on a 10 GB GPU drops
-        // all the way to 128x128x96 -- MNN's OpenCL backend allocates
-        // the full forward-pass workspace ahead of the first tile and
-        // a 192x192x128 patch plus the int8-asymmetric weight layout
-        // can still OOM-kill a 12 GB host.
+    // Patch shrink (lives OUTSIDE the ram_tight block so it also fires
+    // on RAM-comfortable but VRAM-tight hosts -- common case: 16 GB+
+    // workstation with a 10-12 GB GPU). For ORT, still gated on
+    // EXPLICIT --lowmem because old fixed-shape .onnx may reject
+    // smaller patches. For MNN, the shipped doc=mnn_i8a bundle is
+    // always dyn-shape so auto-shrink is safe without the opt-in.
+    //
+    // Two-tier choice:
+    //   vram_tight + gpu_active  -> 128x128x96  (MNN-OpenCL allocates
+    //     the full forward-pass workspace ahead of the first tile, so
+    //     a 192x192x128 patch on a ~10 GB GPU can still OOM)
+    //   otherwise (ram_tight)    -> 192x192x128
+    {
         bool patch_shrink_allowed = lowmem_mode;
 #ifdef SIAMIZE_HAS_MNN
         patch_shrink_allowed = true;
 #endif
 
-        if (patch_shrink_allowed && !patch_set) {
+        if (patch_shrink_allowed && !patch_set && (ram_tight || vram_tight)) {
             if (vram_tight && gpu_active) {
                 patch = {128, 128, 96};
                 auto_applied.push_back("-P 128x128x96");
@@ -942,7 +937,9 @@ int main(int argc, char** argv) {
                 auto_applied.push_back("-P 192x192x128");
             }
         }
+    }
 
+    if (ram_tight) {
         if (!cpu_arena_set) {
             engine_tuning.cpu_arena = false;
             auto_applied.push_back("--no-arena");
