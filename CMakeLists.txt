@@ -448,24 +448,22 @@ if(SIAMIZE_BACKEND STREQUAL "ort")
 elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     list(APPEND _siamize_mex_sources src/engine_mnn.cpp)
 endif()
-set(_siamize_mex_includes
-    src
-    ${ORT_ROOT}/include
-    ${ZMAT_INCLUDE}
-)
-
-# MEX targets currently support the ORT backend only. MEX wiring for
-# MNN (different include dir, libMNN linkage, no provider-plugin DLLs)
-# is a follow-up; for now we skip MEX builds when SIAMIZE_BACKEND=mnn
-# rather than fail at compile time with a confusing missing-header error.
-if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "mnn")
-    message(STATUS "MATLAB MEX skipped: SIAMIZE_BACKEND=mnn (MNN-MEX wiring is TODO)")
-endif()
-if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "mnn")
-    message(STATUS "Octave MEX skipped: SIAMIZE_BACKEND=mnn (MNN-MEX wiring is TODO)")
+# Include directories differ by backend (different runtime headers).
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    set(_siamize_mex_includes
+        src
+        ${ORT_ROOT}/include
+        ${ZMAT_INCLUDE}
+    )
+else()
+    set(_siamize_mex_includes
+        src
+        ${MNN_ROOT}/include
+        ${ZMAT_INCLUDE}
+    )
 endif()
 
-if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
+if(SIAMIZE_BUILD_MATLAB_MEX)
     find_package(Matlab COMPONENTS MX_LIBRARY)
 
     if(Matlab_FOUND)
@@ -495,31 +493,58 @@ if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
             LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_SOURCE_DIR}/matlab"
         )
         target_include_directories(siamize_mex PRIVATE ${_siamize_mex_includes})
-        target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
-        # Propagate SIAMIZE_HAS_CUDA / SIAMIZE_HAS_TENSORRT to the MEX
-        # exactly as we do for the CLI -- sliding.cpp's EP probe blocks
-        # are gated on these and #ifdef'd out otherwise. Combined with
-        # ort-gpu (fetched by `make cudamex`) this gives the MATLAB MEX
-        # the same -c cuda / -c tensorrt paths as siamize(1).
-        if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
-            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_CUDA)
-        endif()
-        if(SIAMIZE_GPU STREQUAL "tensorrt")
-            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_TENSORRT)
-        endif()
-        if(SIAMIZE_GPU STREQUAL "coreml")
-            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_COREML)
-            target_link_libraries(siamize_mex
-                "-framework CoreML"
-                "-framework Foundation")
-        endif()
-        # FindMatlab.cmake's matlab_add_mex() uses target_link_libraries
-        # in the plain (non-keyword) form. CMake forbids mixing plain and
-        # keyword signatures on the same target, so we follow suit here.
-        if(WIN32)
-            target_link_libraries(siamize_mex ${ORT_IMPORT_LIB})
-        else()
-            target_link_libraries(siamize_mex onnxruntime)
+        if(SIAMIZE_BACKEND STREQUAL "ort")
+            target_link_directories(siamize_mex PRIVATE ${ORT_LIB_DIR})
+            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_ORT)
+            # Propagate SIAMIZE_HAS_CUDA / SIAMIZE_HAS_TENSORRT to the MEX
+            # exactly as we do for the CLI -- engine_ort.cpp's EP probe
+            # blocks are gated on these and #ifdef'd out otherwise.
+            # Combined with ort-gpu (fetched by `make cudamex`) this gives
+            # the MATLAB MEX the same -c cuda / -c tensorrt paths as
+            # siamize(1).
+            if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+                target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_CUDA)
+            endif()
+            if(SIAMIZE_GPU STREQUAL "tensorrt")
+                target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_TENSORRT)
+            endif()
+            if(SIAMIZE_GPU STREQUAL "coreml")
+                target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_COREML)
+                target_link_libraries(siamize_mex
+                    "-framework CoreML"
+                    "-framework Foundation")
+            endif()
+            # FindMatlab.cmake's matlab_add_mex() uses target_link_libraries
+            # in the plain (non-keyword) form. CMake forbids mixing plain and
+            # keyword signatures on the same target, so we follow suit here.
+            if(WIN32)
+                target_link_libraries(siamize_mex ${ORT_IMPORT_LIB})
+            else()
+                target_link_libraries(siamize_mex onnxruntime)
+            endif()
+        else()  # SIAMIZE_BACKEND=mnn
+            target_compile_definitions(siamize_mex PRIVATE SIAMIZE_HAS_MNN)
+            if(MNN_STATIC_LIB)
+                # Static libMNN.a: link by absolute path so the linker
+                # rule doesn't prefer a sibling .so. Add system libs
+                # that MNN's CPU + OpenCL backends drag in.
+                target_link_libraries(siamize_mex ${MNN_STATIC_LIB})
+                if(UNIX AND NOT APPLE)
+                    target_link_libraries(siamize_mex pthread dl m)
+                elseif(APPLE)
+                    target_link_libraries(siamize_mex pthread dl m
+                        "-framework Foundation")
+                elseif(WIN32)
+                    target_link_libraries(siamize_mex psapi)
+                endif()
+            else()
+                target_link_directories(siamize_mex PRIVATE ${MNN_LIB_DIR})
+                if(WIN32)
+                    target_link_libraries(siamize_mex ${MNN_IMPORT_LIB})
+                else()
+                    target_link_libraries(siamize_mex MNN)
+                endif()
+            endif()
         endif()
         if(OpenMP_CXX_FOUND)
             target_link_libraries(siamize_mex OpenMP::OpenMP_CXX)
@@ -556,22 +581,40 @@ if(SIAMIZE_BUILD_MATLAB_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
                 -Wno-unused-variable -Wno-sign-compare
                 -Wno-unused-but-set-variable -Wno-misleading-indentation)
         endif()
-        # Make libonnxruntime findable when MATLAB loads the .mex*.
+        # Pick the runtime library directory for RPATH / DLL-copy.
+        # Static MNN builds need neither (the library is baked in), so
+        # _mex_runtime_dll is left empty in that branch and the Windows
+        # copy step is skipped.
+        if(SIAMIZE_BACKEND STREQUAL "ort")
+            set(_mex_lib_dir ${ORT_LIB_DIR})
+            set(_mex_runtime_dll ${ORT_RUNTIME_DLL})
+        else()
+            set(_mex_lib_dir ${MNN_LIB_DIR})
+            if(MNN_STATIC_LIB)
+                set(_mex_runtime_dll "")
+            else()
+                set(_mex_runtime_dll ${MNN_RUNTIME_DLL})
+            endif()
+        endif()
+        # Make the runtime findable when MATLAB loads the .mex*.
         if(APPLE)
             set_target_properties(siamize_mex PROPERTIES
-                BUILD_RPATH   "${ORT_LIB_DIR};@loader_path"
+                BUILD_RPATH   "${_mex_lib_dir};@loader_path"
                 INSTALL_RPATH "@loader_path"
             )
         elseif(WIN32)
-            # Windows: copy onnxruntime.dll next to siamize.mexw64 so the
-            # PE loader resolves it at MEX load time.
-            add_custom_command(TARGET siamize_mex POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${ORT_RUNTIME_DLL} $<TARGET_FILE_DIR:siamize_mex>
-                COMMENT "Copying onnxruntime.dll next to siamize.mexw64")
+            # Windows: copy the runtime DLL next to siamize.mexw64 so
+            # the PE loader resolves it at MEX load time. Skipped when
+            # the MEX statically links MNN (no DLL to copy).
+            if(_mex_runtime_dll)
+                add_custom_command(TARGET siamize_mex POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${_mex_runtime_dll} $<TARGET_FILE_DIR:siamize_mex>
+                    COMMENT "Copying ${SIAMIZE_BACKEND} runtime DLL next to siamize.mexw64")
+            endif()
         else()
             set_target_properties(siamize_mex PROPERTIES
-                BUILD_RPATH   "${ORT_LIB_DIR};\$ORIGIN"
+                BUILD_RPATH   "${_mex_lib_dir};\$ORIGIN"
                 INSTALL_RPATH "\$ORIGIN"
             )
         endif()
@@ -583,7 +626,7 @@ endif()
 # ---- GNU Octave MEX target --------------------------------------------------
 # Octave doesn't have a CMake target wrapper like FindMatlab, so we invoke
 # mkoctfile via a custom command. Output is siamize.mex (Octave's binary mex).
-if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
+if(SIAMIZE_BUILD_OCTAVE_MEX)
     find_program(MKOCTFILE NAMES mkoctfile)
     if(MKOCTFILE)
         message(STATUS "Octave mkoctfile found: ${MKOCTFILE}")
@@ -619,7 +662,20 @@ if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
         # to the empty string before ld ever sees it. The triple-escape
         # makes the CMake string `\$ORIGIN`, which the shell reads as a
         # literal `$ORIGIN` and forwards intact to the linker.
-        set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR} -Wl,-rpath,\\\$ORIGIN")
+        # Linker flags vary by backend.
+        # ORT: -L + -lonnxruntime + rpath to ORT lib dir.
+        # MNN dynamic: same shape, swapping the library + dir.
+        # MNN static: link libMNN.a by absolute path + add the system
+        #   libs MNN drags in. No rpath needed (the .a is baked in)
+        #   but we keep $ORIGIN in case the caller layered other shared
+        #   deps next to the .mex later.
+        if(SIAMIZE_BACKEND STREQUAL "ort")
+            set(_oct_ld "-L${ORT_LIB_DIR} -lonnxruntime -Wl,-rpath,${ORT_LIB_DIR} -Wl,-rpath,\\\$ORIGIN")
+        elseif(MNN_STATIC_LIB)
+            set(_oct_ld "${MNN_STATIC_LIB} -lpthread -ldl -lm -Wl,-rpath,\\\$ORIGIN")
+        else()
+            set(_oct_ld "-L${MNN_LIB_DIR} -lMNN -Wl,-rpath,${MNN_LIB_DIR} -Wl,-rpath,\\\$ORIGIN")
+        endif()
         # Octave loads its MEX into a process that already has a
         # dynamically-loaded libstdc++. Statically embedding a second
         # copy of libstdc++ inside the MEX causes ABI conflicts at
@@ -639,18 +695,23 @@ if(SIAMIZE_BUILD_OCTAVE_MEX AND SIAMIZE_BACKEND STREQUAL "ort")
         # MATLAB MEX target above, but via CXXFLAGS since mkoctfile does
         # not honor target_compile_definitions.
         set(_oct_cxxflags "-std=c++17 -O2 -fPIC -DMATLAB_MEX_FILE")
-        if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
-            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_CUDA")
-        endif()
-        if(SIAMIZE_GPU STREQUAL "tensorrt")
-            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_TENSORRT")
-        endif()
-        # CoreML: add the define so sliding.cpp's CoreML probe compiles
-        # in, and append the macOS framework link flags to LDFLAGS so
-        # mkoctfile passes them to clang.
-        if(SIAMIZE_GPU STREQUAL "coreml")
-            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_COREML")
-            set(_oct_ld "${_oct_ld} -framework CoreML -framework Foundation")
+        if(SIAMIZE_BACKEND STREQUAL "ort")
+            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_ORT")
+            if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+                set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_CUDA")
+            endif()
+            if(SIAMIZE_GPU STREQUAL "tensorrt")
+                set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_TENSORRT")
+            endif()
+            # CoreML: add the define so engine_ort.cpp's CoreML probe
+            # compiles in, and append the macOS framework link flags to
+            # LDFLAGS so mkoctfile passes them to clang.
+            if(SIAMIZE_GPU STREQUAL "coreml")
+                set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_COREML")
+                set(_oct_ld "${_oct_ld} -framework CoreML -framework Foundation")
+            endif()
+        else()  # SIAMIZE_BACKEND=mnn
+            set(_oct_cxxflags "${_oct_cxxflags} -DSIAMIZE_HAS_MNN")
         endif()
 
         # OpenMP flag is compiler-dependent. Linux GCC accepts plain

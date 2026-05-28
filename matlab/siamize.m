@@ -258,8 +258,19 @@ function nii = siamize(varargin)
 siamize_ensure_jsonlab_();
 [img, affine, src, outputfile, models, opts] = siamize_parse_inputs_(varargin{:});
 
+% Compile-time backend the MEX was built against ('ort' or 'mnn').
+% This drives three downstream choices:
+%   1. fold-shortcut filename:  fold_<N>_fp16.onnx (ORT) vs
+%                               fold_<N>_int8.mnn (MNN, served at
+%                               doc=mnn_i8a on NeuroJSON).
+%   2. cache subdirectory:      $SIAMIZE_CACHE_DIR/ (ORT default
+%                               variant) vs $SIAMIZE_CACHE_DIR/mnn_i8a/.
+%   3. NeuroJSON URL doc=:      'dynshape' vs 'mnn_i8a'.
+% siamize_resolve_model_ honors all three via the bk struct passed in.
+bk = siamize_backend_config_();
+
 if isempty(models)
-    models = {'fold_0_fp16.onnx'};
+    models = {bk.default_basename};
 elseif isnumeric(models)
     nums = models(:);
     models = cell(numel(nums), 1);
@@ -269,13 +280,13 @@ elseif isnumeric(models)
             error('siamize:models', ...
                   'numeric model index must be an integer 0..9, got %g', n);
         end
-        models{k} = sprintf('fold_%d_fp16.onnx', n);
+        models{k} = sprintf('fold_%d%s', n, bk.ext);
     end
 elseif ischar(models)
     parts = strsplit(strtrim(models), ',');
     models = cell(numel(parts), 1);
     for k = 1:numel(parts)
-        models{k} = siamize_expand_fold_(strtrim(parts{k}));
+        models{k} = siamize_expand_fold_(strtrim(parts{k}), bk);
     end
 elseif iscell(models)
     for k = 1:numel(models)
@@ -283,7 +294,7 @@ elseif iscell(models)
             error('siamize:models', ...
                   'cell entry %d must be a char string', k);
         end
-        models{k} = siamize_expand_fold_(strtrim(models{k}));
+        models{k} = siamize_expand_fold_(strtrim(models{k}), bk);
     end
 else
     error('siamize:models', ...
@@ -295,7 +306,7 @@ end
 
 resolved = cell(size(models));
 for k = 1:numel(models)
-    resolved{k} = siamize_resolve_model_(models{k}, opts);
+    resolved{k} = siamize_resolve_model_(models{k}, opts, bk);
 end
 
 here = fileparts(mfilename('fullpath'));
@@ -597,15 +608,72 @@ A = single([1, 0, 0, -(Nx - 1) / 2
             0, 0, 1, -(Nz - 1) / 2]);
 end
 
-function s = siamize_expand_fold_(s)
-% SIAMIZE_EXPAND_FOLD_  '0'..'9' -> 'fold_<N>_fp16.onnx'; pass through otherwise.
+function s = siamize_expand_fold_(s, bk)
+% SIAMIZE_EXPAND_FOLD_  '0'..'9' -> 'fold_<N>_<ext>' per the active backend.
+%   For SIAMIZE_BACKEND=ort the extension is '_fp16.onnx' (default);
+%   for SIAMIZE_BACKEND=mnn it is '_int8.mnn'. Pass through otherwise.
+if nargin < 2
+    bk = siamize_backend_config_();
+end
 if numel(s) == 1 && s >= '0' && s <= '9'
-    s = sprintf('fold_%s_fp16.onnx', s);
+    s = sprintf('fold_%s%s', s, bk.ext);
 end
 end
 
-function p = siamize_resolve_model_(spec, opts)
-% SIAMIZE_RESOLVE_MODEL_ Locate or download an .onnx fold file.
+function bk = siamize_backend_config_()
+% SIAMIZE_BACKEND_CONFIG_  Compile-time backend the MEX was built against.
+%   Returns a struct with .name ('ort' or 'mnn'), .ext (the fold-file
+%   suffix, including the dot), .default_basename, .cache_subdir
+%   (relative to $SIAMIZE_CACHE_DIR), and .url_doc (NeuroJSON doc=
+%   value). Cached in a persistent so subsequent calls are free.
+persistent CACHED
+if ~isempty(CACHED)
+    bk = CACHED;
+    return
+end
+
+% Make sure siamex is on the path. The auto-addpath block lower in
+% siamize() runs only after the model list is built, so we replicate
+% the same lookup here.
+here = fileparts(mfilename('fullpath'));
+if ~isempty(here) && exist(fullfile(here, ['siamex.', mexext]), 'file') == 3
+    if ~ismember(here, regexp(path, pathsep, 'split'))
+        addpath(here);
+    end
+end
+
+name = 'ort';
+try
+    if exist('siamex', 'file') == 3
+        name = siamex('backend');
+    end
+catch
+    % Older MEX without the 'backend' query: default to ORT, which
+    % matches the legacy semantics of this file.
+    name = 'ort';
+end
+
+bk = struct();
+bk.name = name;
+if strcmp(name, 'mnn')
+    bk.ext              = '_int8.mnn';
+    bk.default_basename = 'fold_0_int8.mnn';
+    bk.cache_subdir     = 'mnn_i8a';
+    bk.url_doc          = 'mnn_i8a';
+else
+    bk.ext              = '_fp16.onnx';
+    bk.default_basename = 'fold_0_fp16.onnx';
+    bk.cache_subdir     = '';
+    bk.url_doc          = 'dynshape';
+end
+CACHED = bk;
+end
+
+function p = siamize_resolve_model_(spec, opts, bk)
+% SIAMIZE_RESOLVE_MODEL_ Locate or download a fold file (ORT or MNN).
+if nargin < 3
+    bk = siamize_backend_config_();
+end
 if exist(spec, 'file') == 2
     p = spec;
     return
@@ -623,6 +691,11 @@ if isempty(cachedir)
         cachedir = fullfile(getenv('HOME'), '.cache', 'siamize', 'models');
     end
 end
+% Per-backend cache subdir mirrors weights.cpp's variant_str() so the
+% CLI binary and the MEX share the same on-disk cache layout.
+if ~isempty(bk.cache_subdir)
+    cachedir = fullfile(cachedir, bk.cache_subdir);
+end
 
 [~, name, ext] = fileparts(spec);
 basename = [name, ext];
@@ -636,13 +709,14 @@ if ~exist(cachedir, 'dir')
 end
 
 % NeuroJSON URL prefix; the filename is appended directly (no `/`
-% separator) since the prefix ends with `&file=`. The size= query
-% parameter is informational and not validated by the server, so a
-% single constant covers every fold.
+% separator) since the prefix ends with `&file=`. The doc= value
+% depends on the backend the MEX was built against -- 'dynshape' for
+% the fp16 .onnx folds (ORT), 'mnn_i8a' for the pre-converted int8
+% .mnn folds (MNN). Mirrors weights.cpp's default_weights_url().
 urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
 if isempty(urlbase)
     urlbase = ['https://neurojson.org/io/stat.cgi?action=get&db=siam_v03', ...
-               '&doc=dynshape&size=95360591&file='];
+               '&doc=', bk.url_doc, '&file='];
 end
 
 verbose = logical(jsonopt('verbose', false, opts));
@@ -669,7 +743,7 @@ try
     fetched_gz = true;
 catch err
     if verbose
-        fprintf('siamize: .gz path failed (%s); trying raw .onnx\n', err.message);
+        fprintf('siamize: .gz path failed (%s); trying raw %s\n', err.message, bk.ext);
     end
 end
 if exist(tmp_gz, 'file')

@@ -75,6 +75,7 @@ with matching options.
 #include "orient.h"
 #include "preprocess.h"
 #include "sliding.h"
+#include "engine.h"      // siam::backend_name() for the 'backend' query
 #include "weights.h"
 
 #ifdef _WIN32
@@ -242,6 +243,42 @@ std::array<float, 16> read_affine(const mxArray* a) {
     \param  a  the mxArray (char | cell-of-char | numeric scalar)
     \return    list of absolute .onnx paths
 */
+/**
+ * \brief Rewrite ORT-style basenames to the MNN equivalent when the
+ *        MEX was built against the MNN backend.
+ *
+ * The shipped MATLAB wrapper (matlab/siamize.m) expands digit
+ * shortcuts to `fold_<N>_fp16.onnx` regardless of which backend the
+ * MEX was compiled against -- the .m file is backend-agnostic. When
+ * SIAMIZE_HAS_MNN is defined, the MNN runtime can't consume .onnx
+ * files, so rewrite any incoming `fold_<N>_fp16.onnx` basename to
+ * the MNN equivalent `fold_<N>_int8.mnn` and let resolve_model_path
+ * fetch the right thing from doc=mnn_i8a. Anything else (absolute
+ * paths, custom basenames) passes through unchanged.
+ *
+ * Inert when SIAMIZE_HAS_MNN is not defined.
+ */
+std::string rewrite_for_backend(const std::string& m) {
+#ifdef SIAMIZE_HAS_MNN
+    static const std::string kOrtSuffix = "_fp16.onnx";
+    static const std::string kMnnSuffix = "_int8.mnn";
+
+    if (m.size() >= kOrtSuffix.size()
+            && m.compare(m.size() - kOrtSuffix.size(),
+                         kOrtSuffix.size(), kOrtSuffix) == 0) {
+        // Only rewrite the basename form. Absolute paths
+        // (containing '/' or '\\') were explicitly chosen by the
+        // caller and we shouldn't second-guess them.
+        if (m.find('/') == std::string::npos
+                && m.find('\\') == std::string::npos) {
+            return m.substr(0, m.size() - kOrtSuffix.size()) + kMnnSuffix;
+        }
+    }
+
+#endif
+    return m;
+}
+
 std::vector<std::string> read_models(const mxArray* a) {
     std::vector<std::string> out;
 
@@ -251,14 +288,14 @@ std::vector<std::string> read_models(const mxArray* a) {
     }
 
     if (mxIsChar(a)) {
-        out.push_back(mx_to_string(a));
+        out.push_back(rewrite_for_backend(mx_to_string(a)));
     } else if (mxIsCell(a)) {
         mwSize n = mxGetNumberOfElements(a);
         out.reserve(n);
 
         for (mwSize i = 0; i < n; ++i) {
             const mxArray* c = mxGetCell(a, i);
-            out.push_back(mx_to_string(c));
+            out.push_back(rewrite_for_backend(mx_to_string(c)));
         }
     } else {
         die("siamize:models", "models must be a char array, cellstr, or [] for default");
@@ -450,7 +487,29 @@ void read_opts(const mxArray* a, Opts& o) {
     }
 
     if ((f = mxGetField(a, 0, "gpu")) && !mxIsEmpty(f)) {
-        o.engine_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+        // Accept either a scalar deviceId (legacy / CUDA / single-ICD
+        // path) or a "P:D" string (MNN OpenCL platform P device D, for
+        // multi-ICD hosts -- mirrors the CLI's -G P:D form).
+        if (mxIsChar(f)) {
+            std::string s = mx_to_string(f);
+            size_t colon = s.find(':');
+
+            if (colon == std::string::npos) {
+                o.engine_tuning.gpuid = std::stoi(s);
+            } else {
+                o.engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
+                o.engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
+            }
+        } else {
+            o.engine_tuning.gpuid = static_cast<int>(mxGetScalar(f));
+        }
+    }
+
+    if ((f = mxGetField(a, 0, "gpu_platform")) && !mxIsEmpty(f)) {
+        // MNN OpenCL/Vulkan platform index (inert for ORT). Same field
+        // semantics as the P-half of "P:D" on opts.gpu, but settable
+        // independently for callers that prefer a struct-shaped opts.
+        o.engine_tuning.gpu_platform = static_cast<int>(mxGetScalar(f));
     }
 
     if ((f = mxGetField(a, 0, "arena")) && !mxIsEmpty(f)) {
@@ -533,9 +592,24 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
 #endif
 
+    // Query mode: siamex('backend') returns the compiled-in backend
+    // name ('ort' or 'mnn') as a MATLAB char array. The MATLAB
+    // dispatcher (matlab/siamize.m) calls this once at startup so it
+    // can build the right fold filename (_fp16.onnx vs _int8.mnn) and
+    // pick the right WeightVariant for download.
+    if (nrhs == 1 && mxIsChar(prhs[0])) {
+        std::string q = mx_to_string(prhs[0]);
+
+        if (q == "backend") {
+            plhs[0] = mxCreateString(siam::backend_name());
+            return;
+        }
+    }
+
     if (nrhs < 3) {
         die("siamize:nrhs",
             "Usage: labels = siamize(img, affine, models, [opts])\n"
+            "       backend = siamize('backend')\n"
             "See `help siamize` for details.");
     }
 
@@ -573,14 +647,22 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         // an existing local file, hits the shared cache, or curls the
         // weight in from the default URL.
         if (models.empty()) {
+#ifdef SIAMIZE_HAS_MNN
+            models.push_back("fold_0_int8.mnn");
+#else
             models.push_back("fold_0_fp16.onnx");
+#endif
         }
 
-        // Same CoreML weight-variant gating as siamize.cpp. The MEX
-        // inherits opts.device from the caller's struct, so the
-        // decision propagates identically.
+        // Same backend / EP gating as siamize.cpp. The MEX inherits
+        // opts.device from the caller's struct, so the decision
+        // propagates identically.
         siam::WeightVariant weight_variant_mex = siam::WeightVariant::DYNSHAPE;
-#ifdef SIAMIZE_HAS_COREML
+#ifdef SIAMIZE_HAS_MNN
+        // SIAMIZE_BACKEND=mnn: the MNN runtime cannot consume .onnx, so
+        // the mnn_i8a bundle is the only valid pre-baked weight set.
+        weight_variant_mex = siam::WeightVariant::MNN;
+#elif defined(SIAMIZE_HAS_COREML)
 
         if (opts.device == "coreml" || opts.device == "auto") {
             weight_variant_mex = siam::WeightVariant::COREML;
@@ -602,9 +684,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         // Mirrors the CLI auto-safe block. opts.lowmem forces the
         // preset; otherwise we detect tight host RAM via /proc/meminfo
         // and tight GPU VRAM via nvidia-smi.
+#ifdef SIAMIZE_HAS_MNN
+        bool gpu_active = (opts.device == "auto" ||
+                           opts.device == "opencl" ||
+                           opts.device == "vulkan" ||
+                           opts.device == "metal");
+#else
         bool gpu_active = (opts.device == "auto" ||
                            opts.device == "cuda" ||
                            opts.device == "tensorrt");
+#endif
         long avail_ram_mb_l  = 0;
         long avail_vram_mb_l = 0;
 #ifdef __linux__
