@@ -417,6 +417,25 @@ First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
 `MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`).
 
+For a self-contained binary with no `libMNN.so` to ship next to it,
+add `MNN_STATIC=1`:
+
+```bash
+MNN_STATIC=1 scripts/fetch_mnn.sh           # builds libMNN.a instead
+cmake -S . -B build-mnn -DSIAMIZE_BACKEND=mnn && cmake --build build-mnn -j
+```
+
+The siamize CMakeLists.txt auto-detects `.a` vs `.so/.dylib` under
+`third_party/mnn/lib/` and switches the link line accordingly. The
+static binary is ~8.4 MB unstripped / **~7.2 MB stripped** on Linux
+x86_64 (vs ~3 MB exe + ~7 MB `libMNN.so` for the shared build) and
+links only against `libm` / `libc` / `ld-linux` — `libpthread` /
+`libdl` are absorbed into glibc, `libstdc++` is statically linked
+via the existing `static link: ON` config. The OpenCL ICD is still
+dlopened at runtime (MNN is built with `MNN_USE_SYSTEM_LIB=OFF`),
+so the binary works on any host with a working `libOpenCL.so.1`
+without baking in an OpenCL link dep.
+
 MNN-relevant CLI:
 
 | Flag | Default | Effect |

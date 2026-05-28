@@ -31,6 +31,14 @@ set -euo pipefail
 MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-int64fix}}"
 MNN_TAG="$MNN_REF"   # used in stage-dir naming below
 MNN_OPENCL="${MNN_OPENCL:-1}"
+# MNN_STATIC=1 builds libMNN.a instead of libMNN.so/.dylib. Pair with
+# the siamize CMakeLists.txt's static-detection branch to produce a
+# self-contained binary (no libMNN.so to ship next to siamize). The
+# static archive is larger on disk (no dead-code stripping at link
+# time inside the .a) but the final stripped siamize binary is
+# typically smaller than `siamize + libMNN.so` because the linker
+# can drop unreferenced MNN objects.
+MNN_STATIC="${MNN_STATIC:-0}"
 FORCE="${FORCE:-0}"
 
 # Resolve siamize root regardless of where the script is invoked from.
@@ -40,12 +48,20 @@ MNN_STAGE="$SIAMIZE_ROOT/third_party/mnn"
 MNN_BUILD="$SIAMIZE_ROOT/third_party/mnn-build"
 
 OS_NAME="$(uname -s)"
-case "$OS_NAME" in
-    Linux)         LIB_NAME="libMNN.so" ;;
-    Darwin)        LIB_NAME="libMNN.dylib" ;;
-    MINGW*|MSYS*|CYGWIN*) LIB_NAME="MNN.dll" ;;
-    *) echo "[fetch_mnn] Unsupported OS: $OS_NAME" >&2; exit 1 ;;
-esac
+if [[ "$MNN_STATIC" == "1" ]]; then
+    case "$OS_NAME" in
+        Linux|Darwin)         LIB_NAME="libMNN.a" ;;
+        MINGW*|MSYS*|CYGWIN*) LIB_NAME="MNN.lib" ;;
+        *) echo "[fetch_mnn] Unsupported OS: $OS_NAME" >&2; exit 1 ;;
+    esac
+else
+    case "$OS_NAME" in
+        Linux)         LIB_NAME="libMNN.so" ;;
+        Darwin)        LIB_NAME="libMNN.dylib" ;;
+        MINGW*|MSYS*|CYGWIN*) LIB_NAME="MNN.dll" ;;
+        *) echo "[fetch_mnn] Unsupported OS: $OS_NAME" >&2; exit 1 ;;
+    esac
+fi
 
 if [[ -z "${MNN_JOBS:-}" ]]; then
     if command -v nproc >/dev/null 2>&1; then
@@ -109,14 +125,25 @@ fi
 CMAKE_BUILD="$SRC_DIR/build-siamize"
 mkdir -p "$CMAKE_BUILD"
 
+if [[ "$MNN_STATIC" == "1" ]]; then
+    SHARED_LIBS_FLAG=OFF
+else
+    SHARED_LIBS_FLAG=ON
+fi
+
 CMAKE_FLAGS=(
     -DCMAKE_BUILD_TYPE=Release
-    -DMNN_BUILD_SHARED_LIBS=ON
-    -DMNN_SEP_BUILD=OFF         # fold every backend into libMNN.so so
+    -DMNN_BUILD_SHARED_LIBS=${SHARED_LIBS_FLAG}
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON  # needed when linking .a into a
+                                          # PIE executable (modern toolchain
+                                          # default) and harmless for .so.
+    -DMNN_SEP_BUILD=OFF         # fold every backend into libMNN.so/.a so
                                 # siamize links a single library; with
                                 # SEP_BUILD=ON the OpenCL backend lives in
                                 # a separate libMNN_CL.so that siamize
-                                # would need to dlopen explicitly.
+                                # would need to dlopen explicitly. MNN's
+                                # own CMakeLists also force-sets SEP_BUILD
+                                # to OFF when SHARED_LIBS=OFF.
     -DMNN_USE_THREAD_POOL=ON
     -DMNN_OPENMP=OFF
     -DMNN_BUILD_CONVERTER=OFF   # we only ship the runtime, not mnnconvert
@@ -131,7 +158,7 @@ if [[ "$MNN_OPENCL" == "1" ]]; then
     CMAKE_FLAGS+=(-DMNN_OPENCL=ON)
 fi
 
-echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL)"
+echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL, static=$MNN_STATIC)"
 (cd "$CMAKE_BUILD" && cmake "${CMAKE_FLAGS[@]}" "$SRC_DIR")
 
 echo "[fetch_mnn] cmake build -j$MNN_JOBS (this is the slow step, ~15-20 min)"
@@ -143,6 +170,9 @@ cp -r "$SRC_DIR/include/MNN" "$MNN_STAGE/include/"
 
 echo "[fetch_mnn] staging $LIB_NAME"
 case "$LIB_NAME" in
+    libMNN.a)
+        cp "$CMAKE_BUILD/libMNN.a" "$MNN_STAGE/lib/"
+        ;;
     libMNN.so)
         # The build may produce libMNN.so or libMNN.so.<version>; copy
         # whatever exists and symlink the canonical name.
@@ -162,6 +192,10 @@ case "$LIB_NAME" in
         if [[ -f "$CMAKE_BUILD/MNN.lib" ]]; then
             cp "$CMAKE_BUILD/MNN.lib" "$MNN_STAGE/lib/"
         fi
+        ;;
+    MNN.lib)
+        # Static Windows build: a single MNN.lib archive, no DLL.
+        cp "$CMAKE_BUILD/MNN.lib" "$MNN_STAGE/lib/"
         ;;
 esac
 

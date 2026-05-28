@@ -117,17 +117,37 @@ if(SIAMIZE_BACKEND STREQUAL "mnn")
     if(NOT EXISTS ${MNN_ROOT}/include/MNN/Interpreter.hpp)
         message(FATAL_ERROR
             "MNN not found at ${MNN_ROOT}/include/MNN/Interpreter.hpp.\n"
-            "Apply tools/mnn_probe/patches/mnn-int64-fixes-for-siam.patch to a \n"
-            "MNN checkout, build it with -DMNN_OPENCL=ON -DMNN_BUILD_CONVERTER=ON, \n"
-            "and stage include/ + lib/libMNN.so under ${MNN_ROOT}/.")
+            "Run scripts/fetch_mnn.sh (set MNN_STATIC=1 for a static build) \n"
+            "or apply tools/mnn_probe/patches/mnn-int64-fixes-for-siam.patch \n"
+            "to your own MNN checkout and stage include/ + lib/libMNN.{so,a} \n"
+            "under ${MNN_ROOT}/.")
     endif()
+    # Auto-detect static vs dynamic stage. fetch_mnn.sh stages one or the
+    # other; siamize honors whichever is present. Static is preferred
+    # when both somehow coexist because the user explicitly asked for it
+    # via fetch_mnn.sh's MNN_STATIC=1.
+    set(MNN_STATIC_LIB "")
+    set(MNN_RUNTIME_DLL "")
+    set(MNN_IMPORT_LIB  "")
     if(WIN32)
-        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/MNN.dll)
-        set(MNN_IMPORT_LIB  ${MNN_LIB_DIR}/MNN.lib)
+        if(EXISTS ${MNN_LIB_DIR}/MNN.dll)
+            set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/MNN.dll)
+            set(MNN_IMPORT_LIB  ${MNN_LIB_DIR}/MNN.lib)
+        elseif(EXISTS ${MNN_LIB_DIR}/MNN.lib)
+            set(MNN_STATIC_LIB ${MNN_LIB_DIR}/MNN.lib)
+        endif()
     elseif(APPLE)
-        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.dylib)
+        if(EXISTS ${MNN_LIB_DIR}/libMNN.a)
+            set(MNN_STATIC_LIB ${MNN_LIB_DIR}/libMNN.a)
+        else()
+            set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.dylib)
+        endif()
     else()
-        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.so)
+        if(EXISTS ${MNN_LIB_DIR}/libMNN.a)
+            set(MNN_STATIC_LIB ${MNN_LIB_DIR}/libMNN.a)
+        else()
+            set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.so)
+        endif()
     endif()
 endif()
 
@@ -216,11 +236,34 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
         ${MNN_ROOT}/include
         ${ZMAT_INCLUDE}
     )
-    target_link_directories(siamize PRIVATE ${MNN_LIB_DIR})
-    if(WIN32)
-        target_link_libraries(siamize PRIVATE ${MNN_IMPORT_LIB})
+    if(MNN_STATIC_LIB)
+        # Static link: pass the .a/.lib by path so CMake picks STATIC
+        # over any sibling shared (linker rule prefers .so otherwise).
+        # Then add system libs MNN's CPU + OpenCL backends pull in:
+        #   pthread + dl + m for the CPU runtime
+        #   dl (already listed) for the runtime dlopen of libOpenCL.so.1
+        #     -- MNN was built with MNN_USE_SYSTEM_LIB=OFF so the OpenCL
+        #     ICD is loaded at runtime, not link time. No -lOpenCL.
+        #   stdc++/c++ is brought in automatically by the C++ linker.
+        target_link_libraries(siamize PRIVATE ${MNN_STATIC_LIB})
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(siamize PRIVATE pthread dl m)
+        elseif(APPLE)
+            target_link_libraries(siamize PRIVATE pthread dl m
+                "-framework Foundation")
+        elseif(WIN32)
+            # Windows: psapi for memory queries, ws2_32 if any networking.
+            # MNN doesn't pull in ws2_32, but psapi is referenced by
+            # threadpool/tasking.
+            target_link_libraries(siamize PRIVATE psapi)
+        endif()
     else()
-        target_link_libraries(siamize PRIVATE MNN)
+        target_link_directories(siamize PRIVATE ${MNN_LIB_DIR})
+        if(WIN32)
+            target_link_libraries(siamize PRIVATE ${MNN_IMPORT_LIB})
+        else()
+            target_link_libraries(siamize PRIVATE MNN)
+        endif()
     endif()
     target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_MNN)
 endif()
@@ -352,13 +395,15 @@ else()
     set(_lib_dir ${MNN_LIB_DIR})
 endif()
 
-if(WIN32)
+if(WIN32 AND _runtime_dll)
     # Always copy the main runtime DLL next to siamize.exe (no RPATH on Windows).
+    # Skipped for static MNN builds (_runtime_dll empty == no DLL to copy).
     add_custom_command(TARGET siamize POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_runtime_dll} $<TARGET_FILE_DIR:siamize>
         COMMENT "Copying ${SIAMIZE_BACKEND} runtime DLL next to siamize.exe")
-
+endif()
+if(WIN32)
     # For ORT GPU builds, also copy the provider plugin DLLs so ORT can dlopen them.
     if(SIAMIZE_BACKEND STREQUAL "ort"
        AND (SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt"))
