@@ -56,7 +56,8 @@ Accuracy vs original SIAM on the bundled `sub-01_T1w.nii.gz`
 |---|---|---|
 | `py/siam_ref.py`                    | 99.989%  | 0.9990 |
 | `tools/onnx_export/siam_ort.py`     | 99.989%  | 0.9990 |
-| C++ binary (`build/siamize`)        | 99.715%  | 0.9697 (Anomalies, 17 voxels) |
+| C++ binary, ORT backend (`build/siamize`)              | 99.715%  | 0.9697 (Anomalies, 17 voxels) |
+| C++ binary, MNN backend, int8 quant (`make opencl`)    | 99.632%  | 0.9412 (Anomalies) |
 
 ## Quickstart
 
