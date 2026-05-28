@@ -14,6 +14,7 @@
 
 - [Overview](#overview)
 - [Quickstart](#quickstart)
+  - [Optional: MNN backend (vendor-neutral GPU)](#optional-mnn-backend-vendor-neutral-gpu)
 - [MATLAB / GNU Octave bindings](#matlab--gnu-octave-bindings)
 - [Layers, in dependency order](#layers-in-dependency-order)
 - [Footprint](#footprint)
@@ -41,7 +42,12 @@ without PyTorch, nnU-Net, or torchio at deployment time.
    of the SIAM v0.3 ResEnc-UNet to fp16 `.onnx`, validating against (1).
 3. A **C++ standalone binary** (`src/`) — 232 KB executable + 23 MB
    `libonnxruntime.so` + per-fold 270 MB `.onnx` — drop-in for `siam-pred`
-   with no Python at runtime.
+   with no Python at runtime. An alternative
+   [MNN](https://github.com/alibaba/MNN) backend (~7 MB `libMNN.so` +
+   143 MB per-fold int8 `.mnn`) is available via
+   `-DSIAMIZE_BACKEND=mnn` for vendor-neutral GPU support
+   (OpenCL / Vulkan / Metal); see [the MNN section](#optional-mnn-backend-vendor-neutral-gpu)
+   below.
 
 Accuracy vs original SIAM on the bundled `sub-01_T1w.nii.gz`
 (5-fold ensemble, 18 classes):
@@ -377,6 +383,86 @@ InstanceNorm rewrite to any fp16/fp32 SIAM ONNX; it's how the
 `doc=dynshape`. Useful if you want to re-export with different
 fold or quantization choices.
 
+### Optional: MNN backend (vendor-neutral GPU)
+
+siamize can also build against [Alibaba's MNN](https://github.com/alibaba/MNN)
+runtime instead of ONNX Runtime. Pick this when you want GPU acceleration
+on hardware that ORT doesn't cover (AMD via OpenCL, Intel iGPU, Apple
+Silicon via Metal, embedded ARM via Vulkan/OpenCL) or when you want a
+single small `libMNN.so` (~7 MB) instead of the ~23 MB ORT shared
+library plus per-EP runtime stacks.
+
+```bash
+scripts/fetch_mnn.sh                            # fetches + builds patched MNN
+cmake -S . -B build-mnn -DSIAMIZE_BACKEND=mnn   # build against MNN instead of ORT
+cmake --build build-mnn -j
+build-mnn/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl
+```
+
+What `scripts/fetch_mnn.sh` does:
+
+1. Downloads the `v3.5-int64fix` source archive from
+   [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN/releases/tag/v3.5-int64fix)
+   — a fork of upstream MNN with a 12-file `int64`-overflow audit
+   applied. The fixes are necessary because upstream MNN's CPU
+   runtime overflows `int32` byte offsets on tensors larger than
+   2 GB, which happens routinely after MNN decomposes SIAM's 3D
+   convolutions into 2D (`Convolution3DTurn2D`); without them the
+   network silently produces garbage logits.
+2. Configures with `-DMNN_OPENCL=ON -DMNN_SEP_BUILD=OFF` so the
+   OpenCL backend folds into a single `libMNN.so`.
+3. Stages headers + library at `third_party/mnn/{include,lib}/`.
+
+First run takes ~15-20 min for the MNN compile; subsequent runs are
+cached at `third_party/mnn-build/`. Override the ref by passing
+`MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`).
+
+MNN-relevant CLI:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `-c {auto\|cpu\|opencl\|vulkan\|metal}` | `auto` | MNN forward type. `auto` picks OpenCL when MNN was built with `MNN_OPENCL=ON`, else CPU. `vulkan` / `metal` require the corresponding MNN build flag. |
+| `-G N\|P:D` | `0` | OpenCL/Vulkan device. `-G N` = device `N` on platform 0. `-G P:D` = platform `P`, device `D` (needed on multi-ICD hosts where the GPU lives on a non-zero platform — e.g. PoCL on platform 0 + NVIDIA on platform 1). List with `clinfo -l`. |
+
+Weights are served as pre-converted `.mnn` binaries (int8 asymmetric
+block-64 weight quant) from `doc=mnn_i8a` on NeuroJSON. The `-M 0`
+shortcut expands to `fold_0_int8.mnn` on this build and the resolver
+caches under `~/.cache/siamize/models/mnn_i8a/`. Each fold is ~143 MB
+uncompressed (~35 MB gzipped on the wire); the full 5-fold ensemble
+is ~684 MB on disk vs ~1.4 GB for the fp16 ONNX bundle.
+
+Accuracy vs the fp16 ONNX reference on `tests/sub-01_T1w.nii.gz`:
+
+| Backend | Argmax match | Mean foreground Dice |
+|---|---|---|
+| MNN-CPU (fp32 weights `.mnn`) | 99.39% | 0.9862 |
+| MNN-CPU (`--fp16` weights) | 99.39% | 0.9862 |
+| MNN-CPU (`int8` asym block-64, *shipped*) | 99.35% | 0.9856 |
+| MNN-OpenCL (`int8` asym block-64) | 99.35% | 0.9856 *(bit-identical to MNN-CPU)* |
+
+Trade-offs vs the ORT path:
+
+- **+** Single-vendor-free build. The same `libMNN.so` runs on
+  NVIDIA, AMD, Intel, Apple Silicon, and ARM SBCs without per-EP
+  prebuilt bundles.
+- **+** Smaller weights (~143 MB vs 283 MB per fold) thanks to
+  int8 quant — actual loss vs fp16 is < 0.1 % Dice on this task.
+- **-** MNN's OpenCL kernels are not 3D-aware, so the runtime
+  decomposes Conv3D into ~3300 2D ops. The resulting kernel-launch
+  overhead means MNN-OpenCL is **slower** than MNN-CPU and ORT-CPU
+  on a modern desktop CPU. The portability is the win, not the
+  speed.
+- **-** No MATLAB/Octave MEX targets yet for the MNN backend (the
+  `make mex-*` targets are ORT-only for now).
+- **-** Multi-thread CPU runs cap at 2 threads because numThread
+  >= 4 segfaults in `CPURaster` on SIAM-class workloads even with
+  the `int64` patches. See `tools/mnn_probe/patches/README.md`.
+
+The MNN backend is an exclusive build-time alternative to ORT — you
+pick one with `-DSIAMIZE_BACKEND={ort,mnn}` and the binary ships
+only that runtime. To keep both around for comparison, use separate
+build directories (`build/` for ORT, `build-mnn/` for MNN).
+
 ### 3. Run
 
 ```bash
@@ -404,7 +490,7 @@ The most-used options beyond `-i / -o / -M / -c`:
 | Flag | Effect |
 |---|---|
 | `-v / --verbose` | progress messages (default ON since 0.1.0). Pair with `-q / --quiet` to silence. |
-| `-G N` | CUDA / TensorRT device id. Matches `nvidia-smi -L` indices (siamize sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`). |
+| `-G N` or `-G P:D` | GPU device id. `-G N` = CUDA / TensorRT device id (matches `nvidia-smi -L`; siamize sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`), or device `N` on platform 0 for MNN OpenCL/Vulkan. `-G P:D` = OpenCL platform `P` + device `D` (MNN only — needed on multi-ICD hosts). |
 | `-t N` | ORT intra-op thread count. Default `min(hc, 16)`. |
 | `-P ZxYxX` | Sliding-window patch size, default `256x256x192`. Smaller patches → lower peak memory, more tiles. Requires dynamic-axes ONNX. |
 | `-u S` | Target isotropic spacing in mm, default `0.75`. |
@@ -767,36 +853,60 @@ in; in practice 8 GB has been sufficient.
 
 ## Engine choice / GPU portability
 
-The C++ binary uses **ONNX Runtime** with one of four execution
-providers, selected by `-DSIAMIZE_GPU=<backend>` at build time and by
-`-c` at run time. All four are wired in and CI-tested:
+The C++ binary ships with two mutually-exclusive runtime backends,
+picked at configure time via `-DSIAMIZE_BACKEND={ort,mnn}` (default
+`ort`). The ORT backend itself supports four execution providers
+selected by `-DSIAMIZE_GPU=<ep>` + `-c <ep>`. All paths below are
+wired in and CI-tested for the ORT backend; the MNN backend is
+covered by a separate smoke-test job.
 
-| `-DSIAMIZE_GPU=` | `-c` | Hardware | Status |
-|---|---|---|---|
-| `none` (default) | `cpu` | any CPU | always available |
-| `cuda` | `cuda` | NVIDIA via ORT CUDA EP | CI: Linux + Windows builds |
-| `tensorrt` | `tensorrt` | NVIDIA via ORT TensorRT EP (+ CUDA fallback) | opt-in build |
-| `coreml` | `coreml` | Apple Silicon CPU + Metal GPU + ANE via ORT CoreML EP | CI: macos-14 build |
+| `-DSIAMIZE_BACKEND=` | `-DSIAMIZE_GPU=` | `-c` | Hardware | Status |
+|---|---|---|---|---|
+| `ort` (default) | `none` (default) | `cpu` | any CPU | always available |
+| `ort` | `cuda` | `cuda` | NVIDIA via ORT CUDA EP | CI: Linux + Windows builds |
+| `ort` | `tensorrt` | `tensorrt` | NVIDIA via ORT TensorRT EP (+ CUDA fallback) | opt-in build |
+| `ort` | `coreml` | `coreml` | Apple Silicon CPU + Metal GPU + ANE via ORT CoreML EP | CI: macos-14 build |
+| `mnn` | (n/a — picked at runtime) | `cpu` | any CPU | vendor-neutral path |
+| `mnn` | | `opencl` | any OpenCL 1.2+ GPU (NVIDIA, AMD, Intel, Mali, Adreno) | shipped, see [MNN section](#optional-mnn-backend-vendor-neutral-gpu) |
+| `mnn` | | `vulkan` | Vulkan 1.0+ GPU (if MNN was built with `MNN_VULKAN=ON`) | build-flag opt-in |
+| `mnn` | | `metal` | Apple Metal GPU (if MNN was built with `MNN_METAL=ON`) | build-flag opt-in |
 
 On a given host you build with the backend(s) you want; siamize's `-c
 auto` then picks the best available one at run time (TRT > CUDA >
-CoreML > CPU). MEX builds have matching `cudamex` / `cudaoct` /
-`coremlmex` / `coremloct` targets so MATLAB / Octave callers get the
-same EP coverage.
+CoreML > CPU for ORT; OpenCL > CPU for MNN). MEX builds currently
+only target the ORT backend (matching `cudamex` / `cudaoct` /
+`coremlmex` / `coremloct` targets); MNN-MEX is a TODO.
 
 ORT does also offer DirectML (any DX12 GPU on Windows), OpenVINO
 (Intel CPU/GPU), and ROCm (AMD) EPs — siamize doesn't wire them up
-today, but adding any of them is a CMake + sliding.cpp probe-block
-change rather than a code-change. The CoreML wiring (`sliding.cpp`'s
-`#ifdef SIAMIZE_HAS_COREML` block + `CMakeLists.txt` GPU-backend
-switch) is the cleanest template if you want to send a PR for one
-of these.
+today, but adding any of them is a CMake + `engine_ort.cpp`
+probe-block change rather than a code-change. The CoreML wiring
+(`engine_ort.cpp`'s `#ifdef SIAMIZE_HAS_COREML` block +
+`CMakeLists.txt` GPU-backend switch) is the cleanest template if
+you want to send a PR for one of these.
 
-For a vendor-neutral GPU path on Linux (Vulkan / OpenCL) the same
-`.onnx` files can feed [MNN](https://github.com/alibaba/MNN) (OpenCL)
-or [TVM](https://tvm.apache.org/) (Vulkan / OpenCL / SPIR-V). Initial
-exploration of [ncnn](https://github.com/Tencent/ncnn) found its
-Vulkan backend lacks 3D conv kernels for this model.
+When to pick MNN over ORT:
+
+- The host has no NVIDIA GPU and isn't Apple Silicon (i.e. ORT's
+  GPU EPs don't help). ORT-CPU is fast but a single `libMNN.so` can
+  still talk to AMD / Intel / Mali / Adreno GPUs.
+- You want a smaller deployable artifact. `libMNN.so` is ~7 MB vs
+  ~23 MB for `libonnxruntime.so` + per-EP runtime DLLs.
+- You're packaging for an embedded ARM SBC where the OpenCL or
+  Vulkan ICD is the only acceleration path available.
+
+When to stay on ORT:
+
+- NVIDIA GPU (CUDA / TensorRT EP) — MNN's OpenCL backend is real
+  but slower than ORT-CUDA, because MNN decomposes Conv3D into 2D.
+- Apple Silicon — ORT-CoreML routes through ANE; MNN-Metal would
+  fall back to GPU only.
+- MATLAB / Octave deployment — MEX is ORT-only today.
+
+[TVM](https://tvm.apache.org/) is another candidate for a
+vendor-neutral GPU path (Vulkan / OpenCL / SPIR-V) but has not
+been wired up. Initial exploration of [ncnn](https://github.com/Tencent/ncnn)
+found its Vulkan backend lacks 3D conv kernels for this model.
 
 ## Known precision gap (~0.3% vs Python)
 
