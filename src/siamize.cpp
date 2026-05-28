@@ -54,7 +54,9 @@ single-binary with no Python runtime.
 #include "sliding.h"
 #include "weights.h"
 
-#include <onnxruntime_cxx_api.h>
+#ifdef SIAMIZE_HAS_ORT
+    #include <onnxruntime_cxx_api.h>
+#endif
 
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
@@ -303,11 +305,19 @@ void usage(const char* exe) {
                  "                      basenames are looked up under $SIAMIZE_CACHE_DIR\n"
                  "                      (default $HOME/.cache/siamize/models/) and auto-downloaded\n"
                  "                      from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
+#ifdef SIAMIZE_HAS_MNN
+                 "  -c, --compute D     MNN forward type: auto|cpu|opencl|vulkan|metal (default auto).\n"
+                 "                      auto -> OpenCL when MNN was built with MNN_OPENCL=ON, else CPU.\n"
+                 "                      opencl uses MNN's OpenCL backend (NVIDIA via ICD, AMD, Intel iGPU).\n"
+                 "                      vulkan/metal require MNN_VULKAN / MNN_METAL at MNN build time.\n"
+                 "                      No CUDA/TensorRT/CoreML in this build (SIAMIZE_BACKEND=mnn).\n"
+#else
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
                  "                      tensorrt tries TRT > CUDA > CPU (first run builds engines).\n"
                  "                      coreml uses Apple Silicon CPU + Metal GPU + ANE via the ORT\n"
                  "                      CoreML EP (macOS only; requires -DSIAMIZE_GPU=coreml).\n"
+#endif
                  "      --trt-cache-dir P  TensorRT engine cache dir (default ~/.cache/siamize/trt).\n"
                  "                         Engines are GPU- and TRT-version-specific; cached on first run.\n"
                  "      --coreml-units U   CoreML compute target: all (default; CPU+GPU+ANE, Core ML\n"
@@ -563,6 +573,22 @@ int main(int argc, char** argv) {
                 device = "tensorrt";
             }
 
+#ifdef SIAMIZE_HAS_MNN
+
+            // MNN-backend build: device vocabulary is auto|cpu|opencl|vulkan|metal.
+            // The MNN runtime picks the forward type at runtime via
+            // MNNForwardType (no CUDA/CoreML/TensorRT EPs to register).
+            if (device != "auto" && device != "cpu" && device != "opencl"
+                    && device != "vulkan" && device != "metal") {
+                std::fprintf(stderr,
+                             "-c/--compute must be auto|cpu|opencl|vulkan|metal "
+                             "for the MNN backend (got '%s')\n",
+                             device.c_str());
+                return 2;
+            }
+
+#else
+
             if (device != "auto" && device != "cpu" && device != "cuda"
                     && device != "tensorrt" && device != "coreml") {
                 std::fprintf(stderr,
@@ -570,6 +596,8 @@ int main(int argc, char** argv) {
                              device.c_str());
                 return 2;
             }
+
+#endif
         } else if (a == "--trt-cache-dir") {
             trt_cache_dir = need();
         } else if (a == "--coreml-units") {
@@ -810,9 +838,20 @@ int main(int argc, char** argv) {
     //   --cudnn-max-workspace 0, --gpu-mem-limit 6G
     //   targets ~3-4 GB peak VRAM (fits 8 GB GPU)
     const long avail_ram_mb  = available_ram_mb();
+#ifdef SIAMIZE_HAS_MNN
+    // MNN backend: GPU devices are opencl/vulkan/metal. "auto" goes
+    // through engine_mnn.cpp's resolve_forward_type which picks OpenCL
+    // if MNN_OPENCL was on at build time, else CPU -- treat it as
+    // GPU-active so the VRAM check below uses the right thresholds.
+    const bool gpu_active    = (device == "auto" ||
+                                device == "opencl" ||
+                                device == "vulkan" ||
+                                device == "metal");
+#else
     const bool gpu_active    = (device == "auto" ||
                                 device == "cuda" ||
                                 device == "tensorrt");
+#endif
     const long avail_vram_mb = gpu_active
                                ? available_vram_mb(engine_tuning.gpuid)
                                : 0;
@@ -1077,6 +1116,8 @@ int main(int argc, char** argv) {
     // asked for.
     LogitsVolume logits;
 
+#ifdef SIAMIZE_HAS_ORT
+
     try {
         logits = siam::sliding_window(
                      resampled, model_paths, patch, num_classes,
@@ -1171,6 +1212,17 @@ int main(int argc, char** argv) {
             return 4;
         }
     }
+
+#else
+    // MNN backend: no EP-specific recovery (no CUDA/CoreML/TRT to fall
+    // back from). MnnEngine throws std::runtime_error on failure; let
+    // it propagate up to main()'s top-level catch, which prints a clean
+    // diagnostic and exits 1. If we ever add an "auto fall back to cpu
+    // on OpenCL session failure" path, this is where it belongs.
+    logits = siam::sliding_window(
+                 resampled, model_paths, patch, num_classes,
+                 threads, 0.5f, verbose, device, trt_cache_dir, engine_tuning);
+#endif
 
     resampled = Volume{};  // free
 

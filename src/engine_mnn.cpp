@@ -73,8 +73,8 @@ MNNForwardType resolve_forward_type(const std::string& device, bool verbose) {
 #else
 
         if (verbose) {
-            siam_log("[mnn] device=metal requested on non-Apple host; "
-                     "falling back to cpu\n");
+            siam::log_warn("[mnn] device=metal requested on non-Apple host; "
+                           "falling back to cpu");
         }
 
         return MNN_FORWARD_CPU;
@@ -90,8 +90,8 @@ MNNForwardType resolve_forward_type(const std::string& device, bool verbose) {
     }
 
     if (verbose) {
-        siam_log("[mnn] unknown device='%s'; falling back to cpu\n",
-                 device.c_str());
+        siam::log_warn("[mnn] unknown device='%s'; falling back to cpu",
+                       device.c_str());
     }
 
     return MNN_FORWARD_CPU;
@@ -242,9 +242,9 @@ MnnEngine::MnnEngine(const std::string& model_path,
                 break;
         }
 
-        siam_log("[mnn] %s device=%s numThread=%d num_classes=%lld\n",
-                 model_path.c_str(), dev_name, cfg.numThread,
-                 static_cast<long long>(mNumClasses));
+        siam::log_tag("mnn", "%s device=%s numThread=%d num_classes=%lld",
+                      model_path.c_str(), dev_name, cfg.numThread,
+                      static_cast<long long>(mNumClasses));
     }
 }
 
