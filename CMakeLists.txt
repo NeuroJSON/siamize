@@ -31,21 +31,44 @@ option(SIAMIZE_BUILD_OCTAVE_MEX
     "Build the GNU Octave MEX wrapper via mkoctfile. Auto-skipped if mkoctfile \
 is not found." OFF)
 
-# GPU backend selection. "none" = CPU only (the smallest deployable bundle).
+# Inference backend selection (build-time, exclusive). "ort" is the
+# default and links ONNX Runtime; "mnn" links MNN (with the int64
+# patches from tools/mnn_probe/patches/ for SIAM-class workloads).
+# Both produce the same `siamize` binary -- the user picks one at
+# build time depending on which runtime / hardware target they want.
+set(SIAMIZE_BACKEND "ort" CACHE STRING
+    "Inference backend: ort (ONNX Runtime, default) or mnn (Alibaba MNN). \
+Exactly one is linked per build. ORT supports CPU + CUDA + TensorRT + \
+CoreML; MNN supports CPU + OpenCL + Vulkan + Metal. See README for \
+the per-backend trade-offs.")
+set_property(CACHE SIAMIZE_BACKEND PROPERTY STRINGS ort mnn)
+if(NOT (SIAMIZE_BACKEND STREQUAL "ort" OR SIAMIZE_BACKEND STREQUAL "mnn"))
+    message(FATAL_ERROR
+        "SIAMIZE_BACKEND must be one of: ort, mnn (got '${SIAMIZE_BACKEND}')")
+endif()
+
+# GPU backend selection. Only meaningful when SIAMIZE_BACKEND=ort.
+# "none" = CPU only (the smallest deployable bundle).
 # "cuda" = enable the ONNX Runtime CUDA Execution Provider; requires the
 # onnxruntime-gpu prebuilt (fetched via ORT_BUILD=gpu scripts/fetch_deps.sh)
 # and a runtime CUDA + cuDNN install. At runtime the binary tries CUDA first
 # and falls back to CPU if libcudart / libcudnn cannot be loaded.
 set(SIAMIZE_GPU "none" CACHE STRING
-    "Hardware-acceleration backend: none, cuda, tensorrt, coreml. \
-'cuda' uses the ORT CUDA EP (NVIDIA GPUs). 'tensorrt' layers the \
-ORT TensorRT EP on top of CUDA. 'coreml' uses the ORT CoreML EP \
+    "Hardware-acceleration backend (ORT-only): none, cuda, tensorrt, coreml. \
+Ignored when SIAMIZE_BACKEND=mnn (MNN's device is picked at runtime via \
+--device). 'cuda' uses the ORT CUDA EP (NVIDIA GPUs). 'tensorrt' layers \
+the ORT TensorRT EP on top of CUDA. 'coreml' uses the ORT CoreML EP \
 on Apple Silicon (CPU + Metal GPU + Neural Engine, selectable via \
 --coreml-units). 'coreml' is macOS-only.")
 set_property(CACHE SIAMIZE_GPU PROPERTY STRINGS none cuda tensorrt coreml)
 if(SIAMIZE_GPU STREQUAL "coreml" AND NOT APPLE)
     message(FATAL_ERROR
         "SIAMIZE_GPU=coreml is macOS-only (CoreML EP needs the CoreML.framework).")
+endif()
+if(SIAMIZE_BACKEND STREQUAL "mnn" AND NOT SIAMIZE_GPU STREQUAL "none")
+    message(WARNING
+        "SIAMIZE_GPU=${SIAMIZE_GPU} is ignored when SIAMIZE_BACKEND=mnn. "
+        "Pass --device=opencl|vulkan|metal at runtime instead.")
 endif()
 
 # ---- platform detection -----------------------------------------------------
@@ -58,27 +81,61 @@ else()
 endif()
 
 # ---- ORT (prebuilt) under third_party/onnxruntime/ --------------------------
+# Only required when SIAMIZE_BACKEND=ort. Skipped entirely when building
+# the MNN backend so the user doesn't need an ORT install at all.
 set(ORT_ROOT ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
 set(ORT_LIB_DIR ${ORT_ROOT}/lib)
-if(NOT EXISTS ${ORT_ROOT}/include/onnxruntime_cxx_api.h)
+if(SIAMIZE_BACKEND STREQUAL "ort" AND NOT EXISTS ${ORT_ROOT}/include/onnxruntime_cxx_api.h)
     message(FATAL_ERROR
         "ORT not found at ${ORT_ROOT}. Run scripts/fetch_deps.sh (Linux/macOS) "
         "or scripts/fetch_deps.ps1 (Windows) first.")
 endif()
 
-if(WIN32)
-    set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/onnxruntime.dll)
-    set(ORT_IMPORT_LIB  ${ORT_ROOT}/lib/onnxruntime.lib)
-elseif(APPLE)
-    set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.dylib)
-else()
-    set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.so.1)
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    if(WIN32)
+        set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/onnxruntime.dll)
+        set(ORT_IMPORT_LIB  ${ORT_ROOT}/lib/onnxruntime.lib)
+    elseif(APPLE)
+        set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.dylib)
+    else()
+        set(ORT_RUNTIME_DLL ${ORT_ROOT}/lib/libonnxruntime.so.1)
+    endif()
+endif()
+
+# ---- MNN (prebuilt under third_party/mnn/) ---------------------------------
+# Required when SIAMIZE_BACKEND=mnn. The expected layout is:
+#   third_party/mnn/include/MNN/Interpreter.hpp
+#   third_party/mnn/lib/libMNN.so          (Linux)
+#                       libMNN.dylib       (macOS)
+#                       MNN.dll / MNN.lib  (Windows)
+# Build MNN from the patched source at
+# tools/mnn_probe/patches/mnn-int64-fixes-for-siam.patch -- stock MNN
+# 3.5.0 silently produces wrong logits on SIAM-class workloads.
+set(MNN_ROOT ${CMAKE_SOURCE_DIR}/third_party/mnn)
+set(MNN_LIB_DIR ${MNN_ROOT}/lib)
+if(SIAMIZE_BACKEND STREQUAL "mnn")
+    if(NOT EXISTS ${MNN_ROOT}/include/MNN/Interpreter.hpp)
+        message(FATAL_ERROR
+            "MNN not found at ${MNN_ROOT}/include/MNN/Interpreter.hpp.\n"
+            "Apply tools/mnn_probe/patches/mnn-int64-fixes-for-siam.patch to a \n"
+            "MNN checkout, build it with -DMNN_OPENCL=ON -DMNN_BUILD_CONVERTER=ON, \n"
+            "and stage include/ + lib/libMNN.so under ${MNN_ROOT}/.")
+    endif()
+    if(WIN32)
+        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/MNN.dll)
+        set(MNN_IMPORT_LIB  ${MNN_LIB_DIR}/MNN.lib)
+    elseif(APPLE)
+        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.dylib)
+    else()
+        set(MNN_RUNTIME_DLL ${MNN_LIB_DIR}/libMNN.so)
+    endif()
 endif()
 
 # If a GPU backend was requested, sanity-check that the fetched ORT actually
 # contains the right provider plugin(s). The CPU-only tarball does not ship
 # them; the GPU tarball ships both CUDA and TensorRT plugin shared libs.
-if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+if(SIAMIZE_BACKEND STREQUAL "ort"
+   AND (SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt"))
     if(WIN32)
         set(_cuda_provider "${ORT_ROOT}/lib/onnxruntime_providers_cuda.dll")
         set(_trt_provider  "${ORT_ROOT}/lib/onnxruntime_providers_tensorrt.dll")
@@ -118,7 +175,11 @@ else()
 endif()
 
 # ---- main binary ------------------------------------------------------------
-add_executable(siamize
+# Build-time backend selection. The backend-specific implementation file
+# (engine_mnn.cpp at minimum; an engine_ort.cpp refactor of sliding.cpp's
+# inner ORT calls is the natural follow-up) is appended to the source list
+# based on SIAMIZE_BACKEND.
+set(SIAMIZE_SOURCES
     src/siamize.cpp
     src/nifti_io.cpp
     src/jnifti_io.cpp
@@ -128,16 +189,38 @@ add_executable(siamize
     src/weights.cpp
     src/siam_log.cpp
 )
-target_include_directories(siamize PRIVATE
-    src
-    ${ORT_ROOT}/include
-    ${ZMAT_INCLUDE}
-)
-target_link_directories(siamize PRIVATE ${ORT_ROOT}/lib)
-if(WIN32)
-    target_link_libraries(siamize PRIVATE ${ORT_IMPORT_LIB})
-else()
-    target_link_libraries(siamize PRIVATE onnxruntime)
+if(SIAMIZE_BACKEND STREQUAL "mnn")
+    list(APPEND SIAMIZE_SOURCES src/engine_mnn.cpp)
+endif()
+
+add_executable(siamize ${SIAMIZE_SOURCES})
+
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    target_include_directories(siamize PRIVATE
+        src
+        ${ORT_ROOT}/include
+        ${ZMAT_INCLUDE}
+    )
+    target_link_directories(siamize PRIVATE ${ORT_ROOT}/lib)
+    if(WIN32)
+        target_link_libraries(siamize PRIVATE ${ORT_IMPORT_LIB})
+    else()
+        target_link_libraries(siamize PRIVATE onnxruntime)
+    endif()
+    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_ORT)
+elseif(SIAMIZE_BACKEND STREQUAL "mnn")
+    target_include_directories(siamize PRIVATE
+        src
+        ${MNN_ROOT}/include
+        ${ZMAT_INCLUDE}
+    )
+    target_link_directories(siamize PRIVATE ${MNN_LIB_DIR})
+    if(WIN32)
+        target_link_libraries(siamize PRIVATE ${MNN_IMPORT_LIB})
+    else()
+        target_link_libraries(siamize PRIVATE MNN)
+    endif()
+    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_MNN)
 endif()
 
 # zmat / miniz are C code inside a header; silence a few stylistic warnings
@@ -156,23 +239,26 @@ else()
 endif()
 
 
-# GPU backend preprocessor defines — drive the runtime EP-try blocks.
+# GPU backend preprocessor defines — drive sliding.cpp's runtime EP-try
+# blocks. These are ORT-EP-specific and inert for the MNN backend.
 # tensorrt implies cuda (TRT EP is registered first, CUDA second as fallback).
-if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
-    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_CUDA)
-endif()
-if(SIAMIZE_GPU STREQUAL "tensorrt")
-    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_TENSORRT)
-endif()
-# CoreML EP is statically baked into ORT's macOS dylib (no separate
-# provider plugin .so to fetch). We only need the system frameworks
-# CoreML uses underneath at runtime, plus the SIAMIZE_HAS_COREML define
-# that gates sliding.cpp's CoreML probe block.
-if(SIAMIZE_GPU STREQUAL "coreml")
-    target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_COREML)
-    target_link_libraries(siamize PRIVATE
-        "-framework CoreML"
-        "-framework Foundation")
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+        target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_CUDA)
+    endif()
+    if(SIAMIZE_GPU STREQUAL "tensorrt")
+        target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_TENSORRT)
+    endif()
+    # CoreML EP is statically baked into ORT's macOS dylib (no separate
+    # provider plugin .so to fetch). We only need the system frameworks
+    # CoreML uses underneath at runtime, plus the SIAMIZE_HAS_COREML define
+    # that gates sliding.cpp's CoreML probe block.
+    if(SIAMIZE_GPU STREQUAL "coreml")
+        target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_COREML)
+        target_link_libraries(siamize PRIVATE
+            "-framework CoreML"
+            "-framework Foundation")
+    endif()
 endif()
 
 # OpenMP linkage
@@ -256,15 +342,24 @@ if(SIAMIZE_STATIC_LINK)
 endif()
 
 # ---- RPATH / DLL placement --------------------------------------------------
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    set(_runtime_dll ${ORT_RUNTIME_DLL})
+    set(_lib_dir ${ORT_ROOT}/lib)
+else()
+    set(_runtime_dll ${MNN_RUNTIME_DLL})
+    set(_lib_dir ${MNN_LIB_DIR})
+endif()
+
 if(WIN32)
-    # Always copy the main ORT DLL next to siamize.exe (no RPATH on Windows).
+    # Always copy the main runtime DLL next to siamize.exe (no RPATH on Windows).
     add_custom_command(TARGET siamize POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${ORT_RUNTIME_DLL} $<TARGET_FILE_DIR:siamize>
-        COMMENT "Copying onnxruntime.dll next to siamize.exe")
+            ${_runtime_dll} $<TARGET_FILE_DIR:siamize>
+        COMMENT "Copying ${SIAMIZE_BACKEND} runtime DLL next to siamize.exe")
 
-    # For GPU builds, also copy the provider plugin DLLs so ORT can dlopen them.
-    if(SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt")
+    # For ORT GPU builds, also copy the provider plugin DLLs so ORT can dlopen them.
+    if(SIAMIZE_BACKEND STREQUAL "ort"
+       AND (SIAMIZE_GPU STREQUAL "cuda" OR SIAMIZE_GPU STREQUAL "tensorrt"))
         add_custom_command(TARGET siamize POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${ORT_ROOT}/lib/onnxruntime_providers_shared.dll"
@@ -272,7 +367,7 @@ if(WIN32)
                 $<TARGET_FILE_DIR:siamize>
             COMMENT "Copying ORT CUDA provider DLLs next to siamize.exe")
     endif()
-    if(SIAMIZE_GPU STREQUAL "tensorrt")
+    if(SIAMIZE_BACKEND STREQUAL "ort" AND SIAMIZE_GPU STREQUAL "tensorrt")
         add_custom_command(TARGET siamize POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${ORT_ROOT}/lib/onnxruntime_providers_tensorrt.dll"
@@ -281,12 +376,12 @@ if(WIN32)
     endif()
 elseif(APPLE)
     set_target_properties(siamize PROPERTIES
-        BUILD_RPATH   "${ORT_ROOT}/lib;@executable_path;@loader_path"
+        BUILD_RPATH   "${_lib_dir};@executable_path;@loader_path"
         INSTALL_RPATH "@executable_path"
     )
 else()
     set_target_properties(siamize PROPERTIES
-        BUILD_RPATH   "${ORT_ROOT}/lib;\$ORIGIN"
+        BUILD_RPATH   "${_lib_dir};\$ORIGIN"
         INSTALL_RPATH "\$ORIGIN"
     )
 endif()
@@ -553,11 +648,17 @@ message(STATUS "  platform:         ${SIAMIZE_PLATFORM}")
 message(STATUS "  compiler:         ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  binary:           siamize${CMAKE_EXECUTABLE_SUFFIX}")
 message(STATUS "  static link:      ${SIAMIZE_STATIC_LINK}")
-message(STATUS "  ORT:              ${ORT_ROOT}")
+message(STATUS "  backend:          ${SIAMIZE_BACKEND}")
+if(SIAMIZE_BACKEND STREQUAL "ort")
+    message(STATUS "  ORT:              ${ORT_ROOT}")
+    message(STATUS "  GPU backend:      ${SIAMIZE_GPU}")
+else()
+    message(STATUS "  MNN:              ${MNN_ROOT}")
+    message(STATUS "  GPU backend:      runtime --device (cpu / opencl / vulkan / metal)")
+endif()
 message(STATUS "  zmat header:      ${ZMAT_INCLUDE}/zmat.h (bundled)")
 message(STATUS "  build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  OpenMP:           ${OpenMP_CXX_FOUND}")
-message(STATUS "  GPU backend:      ${SIAMIZE_GPU}")
 message(STATUS "  MATLAB MEX:       ${SIAMIZE_BUILD_MATLAB_MEX}")
 message(STATUS "  Octave MEX:       ${SIAMIZE_BUILD_OCTAVE_MEX}")
 message(STATUS "")
