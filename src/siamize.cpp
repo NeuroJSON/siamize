@@ -258,7 +258,13 @@ long available_vram_mb(int gpuid = 0) {
 */
 std::string expand_fold_shortcut(const std::string& tok) {
     if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= '9') {
+#ifdef SIAMIZE_HAS_MNN
+        // MNN backend: pre-converted .mnn binaries with int8
+        // asymmetric block-64 weight quant (see WeightVariant::MNN).
+        return "fold_" + tok + "_int8.mnn";
+#else
         return "fold_" + tok + "_fp16.onnx";
+#endif
     }
 
     return tok;
@@ -298,6 +304,17 @@ void usage(const char* exe) {
                  "                      interoperates with jsonlab / the NeuroJSON ecosystem\n"
                  "                      and indexers can walk its structured keys; .jnii is\n"
                  "                      human-readable JSON.\n"
+#ifdef SIAMIZE_HAS_MNN
+                 "  -M, --models        comma-separated .mnn files (one per fold), logits are averaged.\n"
+                 "                      Defaults to single-fold 'fold_0_int8.mnn'. Each entry can be\n"
+                 "                      a full path, a basename, or a single digit shortcut (e.g.\n"
+                 "                      -M 0,1,2,3,4 expands to fold_<N>_int8.mnn). Bare basenames\n"
+                 "                      are looked up under $SIAMIZE_CACHE_DIR/mnn/ (default\n"
+                 "                      $HOME/.cache/siamize/models/mnn/) and auto-downloaded from\n"
+                 "                      $SIAMIZE_WEIGHTS_BASE_URL on miss. The shipped .mnn files\n"
+                 "                      use int8 asymmetric block-64 weight quant (~143 MB / fold,\n"
+                 "                      <0.1 %% Dice loss vs fp16 reference).\n"
+#else
                  "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
@@ -305,6 +322,7 @@ void usage(const char* exe) {
                  "                      basenames are looked up under $SIAMIZE_CACHE_DIR\n"
                  "                      (default $HOME/.cache/siamize/models/) and auto-downloaded\n"
                  "                      from $SIAMIZE_WEIGHTS_BASE_URL on miss.\n"
+#endif
 #ifdef SIAMIZE_HAS_MNN
                  "  -c, --compute D     MNN forward type: auto|cpu|opencl|vulkan|metal (default auto).\n"
                  "                      auto -> OpenCL when MNN was built with MNN_OPENCL=ON, else CPU.\n"
@@ -1020,10 +1038,17 @@ int main(int argc, char** argv) {
     }
 
     if (models_csv.empty()) {
+#ifdef SIAMIZE_HAS_MNN
+        models_csv = "fold_0_int8.mnn";
+        siam::log_tag("models",
+                      "-M/--models not given; defaulting to single-fold "
+                      "fold_0_int8.mnn (auto-downloaded if missing).");
+#else
         models_csv = "fold_0_fp16.onnx";
         siam::log_tag("models",
                       "-M/--models not given; defaulting to single-fold "
                       "fold_0_fp16.onnx (auto-downloaded if missing).");
+#endif
     }
 
     auto model_paths = split_csv(models_csv);
@@ -1100,7 +1125,13 @@ int main(int argc, char** argv) {
     // builds the `auto` branch never targets CoreML, so we always
     // fall back to the dynshape default.
     siam::WeightVariant weight_variant = siam::WeightVariant::DYNSHAPE;
-#ifdef SIAMIZE_HAS_COREML
+#ifdef SIAMIZE_HAS_MNN
+    // SIAMIZE_BACKEND=mnn: always pull the `mnn` variant. The MNN
+    // backend cannot consume .onnx directly, so this is the only
+    // valid pre-baked weight bundle for this build.
+    weight_variant = siam::WeightVariant::MNN;
+    (void)device;
+#elif defined(SIAMIZE_HAS_COREML)
 
     if (device == "coreml" || device == "auto") {
         weight_variant = siam::WeightVariant::COREML;

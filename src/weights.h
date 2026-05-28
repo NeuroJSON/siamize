@@ -92,6 +92,13 @@ enum class WeightVariant {
                      Reshape ops (see tools/onnx_export/
                      rewrite_for_coreml.py) so Apple's mlcompilerd
                      accepts it. Used when the CoreML EP is active. */
+    MNN,        /**< doc=mnn_i8a: pre-converted .mnn binaries with
+                     int8 asymmetric block-64 weight quant. Used by
+                     the SIAMIZE_BACKEND=mnn build. ~143 MB / fold
+                     uncompressed (~35 MB gzipped) vs 283 MB for the
+                     fp16 ONNX, with <0.1% Dice loss vs the fp16
+                     reference. Files use the `fold_<N>_int8.mnn`
+                     naming. */
 };
 
 std::string default_weights_url(WeightVariant variant = WeightVariant::DYNSHAPE);
