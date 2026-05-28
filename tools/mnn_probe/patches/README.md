@@ -31,7 +31,8 @@ in MNN's CPU runtime that triggers on tensors larger than 2 GB:
 ## Effect on SIAM v0.3
 
 Single-threaded CPU inference now produces correct logits at every input
-shape:
+shape. Synthetic-Gaussian input (the worst case — every voxel is a
+boundary):
 
 | Input shape | argmax agreement vs ORT |
 |---|---|
@@ -46,6 +47,33 @@ SIAM's 76 conv layers — the same noise floor seen at small scales,
 *not* a correctness bug. ORT and MNN agree on logit ranges
 (`[-52.9, 69.3]` vs `[-52.5, 71.6]`) and on the location of
 classifications.
+
+**End-to-end on a real T1 brain volume** (`tests/sub-01_T1w.nii.gz`,
+full siamize sliding-window pipeline, single fold), MNN vs ORT:
+
+- **Voxel-level argmax agreement: 99.67 %**
+- **Mean foreground Dice: 0.992**
+- Per-class Dice ranges from 0.972 (vascular) to 1.000 (anomalies)
+- MNN-vs-PyTorch-reference Dice (0.928) is within 0.001 of
+  ORT-vs-PyTorch-reference Dice (0.929) — MNN adds essentially no
+  error beyond what ORT already adds.
+
+The synthetic-Gaussian 93.5 % was a worst-case diagnostic; real brain
+anatomy is dominated by easy interior voxels and only the <0.4 %
+boundary fringe sees fp16 drift.
+
+**OpenCL backend** (NVIDIA OpenCL ICD on A100, no additional patches
+needed — the CPU patches in this directory are sufficient):
+
+- Correctness: 93.5 % argmax / matches ORT logit range, GPU sm-util
+  actually hits 100 % (no silent CPU fallback).
+- Performance: 65 s warm wall vs ORT-CPU 27 s — *slower* than CPU on
+  this many-core host. The Conv3D-to-Conv2D decomposition produces a
+  3382-op graph whose OpenCL kernel-launch overhead dominates wall
+  time. ORT CUDA on the same A100 is ~6× faster than MNN OpenCL.
+
+Per-host verification reports are in `tools/mnn_probe/reports/`
+(gitignored).
 
 Before the patch, the same model produced `[-13.2, 30.0]` with only
 26.7% argmax agreement — a scale-dependent collapse triggered by any
