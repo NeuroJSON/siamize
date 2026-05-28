@@ -764,14 +764,24 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 
         if (ram_tight) {
-            // Patch shrink is gated on EXPLICIT opts.lowmem only. Auto-
-            // detection doesn't touch opts.patch because the network only
-            // accepts smaller patches if its ONNX was exported with
-            // dynamic spatial axes (an assertion the user must make, not
-            // something we can probe). opts.lowmem mirrors CLI --lowmem
-            // and is the user opting in to the patch shrink.
-            if (opts.lowmem && !opts.patch_set) {
-                opts.patch = {192, 192, 128};
+            // Patch shrink: for ORT, gated on EXPLICIT opts.lowmem
+            // because old fixed-shape .onnx may not accept smaller
+            // patches. For MNN, the shipped doc=mnn_i8a bundle is
+            // always dyn-shape, so we auto-shrink without the opt-in.
+            // The 128x128x96 tier kicks in when BOTH RAM and VRAM are
+            // tight + a GPU device is active -- MNN-OpenCL allocates
+            // the full forward-pass workspace ahead of the first tile.
+            bool patch_shrink_allowed = opts.lowmem;
+#ifdef SIAMIZE_HAS_MNN
+            patch_shrink_allowed = true;
+#endif
+
+            if (patch_shrink_allowed && !opts.patch_set) {
+                if (vram_tight && gpu_active) {
+                    opts.patch = {128, 128, 96};
+                } else {
+                    opts.patch = {192, 192, 128};
+                }
             }
 
             if (!opts.cpu_arena_set) {

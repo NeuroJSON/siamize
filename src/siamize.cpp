@@ -870,9 +870,21 @@ int main(int argc, char** argv) {
     //   -P 192x192x128, --no-arena, -t auto-cap = 8
     //   targets ~5-7 GB peak RSS (fits 16 GB host with OS overhead)
     //
-    // GPU lowmem set:
+    // GPU lowmem set (ORT EPs):
     //   --cudnn-max-workspace 0, --gpu-mem-limit 6G
     //   targets ~3-4 GB peak VRAM (fits 8 GB GPU)
+    //
+    // MNN backend (-DSIAMIZE_BACKEND=mnn) -- the cudnn / arena knobs
+    // above are inert. Memory pressure shows up via MNN's own
+    // workspace allocation at first run_tile; we mitigate by:
+    //   - auto-applying -P 192x192x128 on a RAM-tight host (no
+    //     --lowmem opt-in required, since the shipped doc=mnn_i8a
+    //     bundle is always dyn-shape).
+    //   - auto-applying -P 128x128x96 when BOTH RAM and VRAM are
+    //     tight on a GPU device (MNN-OpenCL allocates the full
+    //     forward-pass workspace ahead of the first tile, so a
+    //     192x192x128 patch on a 10 GB GPU + 12 GB host can still
+    //     OOM-kill the process).
     const long avail_ram_mb  = available_ram_mb();
 #ifdef SIAMIZE_HAS_MNN
     // MNN backend: GPU devices are opencl/vulkan/metal. "auto" goes
@@ -899,17 +911,36 @@ int main(int argc, char** argv) {
     std::vector<std::string> auto_applied;
 
     if (ram_tight) {
-        // Patch shrink is gated on EXPLICIT --lowmem only. Auto-detection
-        // doesn't touch -P because the network only accepts smaller
-        // patches if its ONNX was exported with dynamic spatial axes
-        // (the tools/onnx_export/ default since the dynamic_axes change,
-        // but old uploads / cached files may still be fixed-shape).
-        // --lowmem is the user's assertion that their weights support
-        // variable patch sizes; auto-detect can't make that assertion
-        // and stays at the default -P which always works.
-        if (lowmem_mode && !patch_set) {
-            patch = {192, 192, 128};
-            auto_applied.push_back("-P 192x192x128");
+        // Patch shrink. For ORT, this stays gated on EXPLICIT --lowmem
+        // because the network only accepts smaller patches if its ONNX
+        // was exported with dynamic spatial axes; auto-detect can't
+        // make that assertion since old uploads / cached .onnx files
+        // may still be fixed-shape.
+        //
+        // For MNN, the assumption is safe: the shipped doc=mnn_i8a
+        // bundle is built from the dynshape ONNX and resizeTensor +
+        // resizeSession at run_tile time accepts any patch. So we
+        // auto-shrink without requiring --lowmem.
+        //
+        // The two-tier choice (192x192x128 vs 128x128x96) keys off
+        // vram_tight + GPU active so MNN-OpenCL on a 10 GB GPU drops
+        // all the way to 128x128x96 -- MNN's OpenCL backend allocates
+        // the full forward-pass workspace ahead of the first tile and
+        // a 192x192x128 patch plus the int8-asymmetric weight layout
+        // can still OOM-kill a 12 GB host.
+        bool patch_shrink_allowed = lowmem_mode;
+#ifdef SIAMIZE_HAS_MNN
+        patch_shrink_allowed = true;
+#endif
+
+        if (patch_shrink_allowed && !patch_set) {
+            if (vram_tight && gpu_active) {
+                patch = {128, 128, 96};
+                auto_applied.push_back("-P 128x128x96");
+            } else {
+                patch = {192, 192, 128};
+                auto_applied.push_back("-P 192x192x128");
+            }
         }
 
         if (!cpu_arena_set) {
