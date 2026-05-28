@@ -318,6 +318,8 @@ OrtEngine::OrtEngine(const std::string& model_path,
 #ifdef SIAMIZE_HAS_TENSORRT
 
     if (trt_try) {
+        siam::log_tag("trt", "probing TensorRT EP...");
+
         try {
             OrtTensorRTProviderOptionsV2* trt_opts = nullptr;
             Ort::ThrowOnError(Ort::GetApi().CreateTensorRTProviderOptions(&trt_opts));
@@ -358,6 +360,8 @@ OrtEngine::OrtEngine(const std::string& model_path,
 #ifdef SIAMIZE_HAS_CUDA
 
     if (cuda_try && (use_trt || cuda_required || device == "cuda" || device == "auto")) {
+        siam::log_tag("cuda", "probing CUDA EP...");
+
         try {
             OrtCUDAProviderOptionsV2* cuda_opts = nullptr;
             Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
@@ -436,6 +440,8 @@ OrtEngine::OrtEngine(const std::string& model_path,
 #ifdef SIAMIZE_HAS_COREML
 
     if (coreml_try) {
+        siam::log_tag("coreml", "probing CoreML EP...");
+
         try {
             std::unordered_map<std::string, std::string> co_opts;
 

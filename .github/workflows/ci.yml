@@ -514,13 +514,36 @@ jobs:
       - name: Smoke-run --help
         run: ${{ matrix.binary }} --help
 
+      - name: Runner CPU / memory profile (diagnostic)
+        # Helps triage MNN crashes that depend on the runner's
+        # /proc/cpuinfo, /sys/devices/system/cpu/cpufreq, or memory
+        # layout -- MNN's CPU runtime probes all three at session
+        # creation time.
+        run: |
+          echo "--- CPU ---"
+          lscpu | head -25
+          echo "--- memory ---"
+          free -h
+          echo "--- /sys/devices/system/cpu/cpufreq ---"
+          ls /sys/devices/system/cpu/cpufreq/ 2>&1 | head -10 || true
+          echo "--- ulimit ---"
+          ulimit -a
+
       - name: Run single-fold MNN-CPU inference
         # int8-quantized .mnn weight auto-downloads from doc=mnn_i8a
         # (~35 MB gzipped -> 143 MB on disk). MNN's CPU forward type
         # is the safe choice on GHA -- no OpenCL ICD to depend on.
         # numThread capped at 2 in MnnEngine to avoid the known
-        # CPURaster MT crash on SIAM-class workloads. 8 tiles,
-        # end-to-end ~5-7 min on a 4-vCPU GHA runner.
+        # CPURaster MT crash on SIAM-class workloads.
+        #
+        # -P 192x192x128 (instead of the default 256x256x192) so
+        # MNN's resizeSession workspace allocation stays under the
+        # ~14 GB GHA cgroup. The default patch pre-allocates the
+        # full intermediate-tensor pyramid at ctor time, which on
+        # this runner segfaults inside MNN before the engine prints
+        # its first log line. The smaller patch is the same one
+        # siamize's auto-lowmem heuristic picks on RAM-tight hosts;
+        # Dice stays in spec across patch sizes.
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
@@ -528,7 +551,8 @@ jobs:
               -o pred_ci.nii.gz \
               -M 0 \
               -c cpu \
-              -t 2 2>&1 | tee siamize.log
+              -t 2 \
+              -P 192x192x128 2>&1 | tee siamize.log
 
       - name: Verify MNN backend was used
         run: |
