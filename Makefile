@@ -8,6 +8,14 @@
 #   make cuda             configure + build CUDA CLI (re-fetches GPU ORT if needed)
 #   make tensorrt         configure + build TensorRT CLI (re-fetches GPU ORT if needed)
 #
+#   make opencl           configure + build the MNN-backed CLI with the OpenCL
+#                         backend enabled (NVIDIA via ICD, AMD, Intel iGPU,
+#                         Mali, Adreno). First run also builds libMNN via
+#                         scripts/fetch_mnn.sh; pass MNN_STATIC=1 to get a
+#                         self-contained binary (no libMNN.so to ship).
+#   make openclmex        MATLAB MEX, MNN backend (siamex.mex<a64|maca64|w64>)
+#   make opencloct        Octave  MEX, MNN backend (siamex.mex)
+#
 #   make mex-octave       build the Octave MEX (siamex.mex)
 #   make mex-matlab       build the MATLAB MEX (siamex.mex{a64,maca64,w64})
 #   make mex-test         run matlab/tests/run_tests.m in Octave (30 unit tests)
@@ -38,15 +46,22 @@
 BUILD_DIR  ?= build
 BUILD_TYPE ?= Release
 ORT_DIR    := third_party/onnxruntime
+MNN_DIR    := third_party/mnn
 
 # Filenames used to detect which ORT prebuilt (CPU vs GPU) is currently
 # installed under third_party/onnxruntime/.
 ORT_GPU_MARKER := $(ORT_DIR)/lib/libonnxruntime_providers_cuda.so
 ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 
+# MNN stage marker. fetch_mnn.sh writes either libMNN.a (MNN_STATIC=1)
+# or libMNN.{so,dylib,dll}; checking the include header is the cheapest
+# stable signal that the stage is populated.
+MNN_MARKER := $(MNN_DIR)/include/MNN/Interpreter.hpp
+
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
         cudaoct cudamex coreml coremloct coremlmex \
+        opencl openclmex opencloct mnn-deps \
         ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
         doc doc-clean
 
@@ -83,6 +98,37 @@ coreml: ort-cpu
 	@echo
 	@echo "[make coreml] built $(BUILD_DIR)/siamize with CoreML EP."
 	@echo "First run compiles the ONNX -> .mlmodelc (~10-30 s, cached)."
+
+# ---- MNN-backed builds ------------------------------------------------------
+# `opencl` is the user-facing name for the MNN backend's headline GPU
+# path (also covers Vulkan / Metal at runtime via -c). Build-time, this
+# is `-DSIAMIZE_BACKEND=mnn` -- MNN's OpenCL backend gets enabled at
+# fetch_mnn.sh time (MNN_OPENCL=1, default). The CLI's -c flag then
+# picks the actual runtime (cpu | opencl | vulkan | metal).
+#
+# MNN_STATIC=1 builds libMNN.a and produces a self-contained binary.
+# Pass it on the make line and it propagates to scripts/fetch_mnn.sh.
+opencl: mnn-deps
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DSIAMIZE_BACKEND=mnn
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo
+	@echo "[make opencl] built $(BUILD_DIR)/siamize with MNN backend."
+	@echo "Runtime: pass -c {cpu|opencl|vulkan|metal}. Default auto picks"
+	@echo "OpenCL when MNN was built with MNN_OPENCL=ON, else CPU."
+
+# ---- MNN prebuilt management ------------------------------------------------
+
+# Build (or skip if cached) the MNN runtime under third_party/mnn/.
+# fetch_mnn.sh is itself idempotent (skips when the stage is populated
+# unless FORCE=1), but having a Make-level marker dep is faster than
+# spawning bash every invocation.
+mnn-deps:
+	@if [ -f $(MNN_MARKER) ]; then \
+	    echo "[mnn] already staged under $(MNN_DIR)"; \
+	else \
+	    echo "[mnn] building libMNN (this takes ~15-20 min first time)"; \
+	    scripts/fetch_mnn.sh; \
+	fi
 
 # ---- ORT prebuilt management ------------------------------------------------
 
@@ -152,6 +198,24 @@ coremlmex: ort-cpu
 	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
 	@echo "[make coremlmex] built matlab/siamex.mex<maca64|maci64> (CoreML-enabled MATLAB MEX)"
 
+# MNN-backed MEX variants. siamex.mex (Octave) or siamex.mex<a64|w64|...>
+# (MATLAB) gets a tiny libMNN-static link line if MNN_STATIC=1 was set
+# at scripts/fetch_mnn.sh time. The MATLAB-side wrapper queries
+# siamex('backend') at runtime to pick the right fold filename
+# (_int8.mnn) and the matching NeuroJSON doc=mnn_i8a URL, so callers
+# don't need backend-specific changes to their .m scripts.
+opencloct: mnn-deps
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_BACKEND=mnn -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make opencloct] built matlab/siamex.mex (MNN-backed Octave MEX)"
+
+openclmex: mnn-deps
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DSIAMIZE_BACKEND=mnn -DSIAMIZE_BUILD_MATLAB_MEX=ON
+	cmake --build $(BUILD_DIR) --config $(BUILD_TYPE) --parallel
+	@echo "[make openclmex] built matlab/siamex.mex<a64|maca64|w64> (MNN-backed MATLAB MEX)"
+
 mex-test:
 	octave-cli --no-gui --eval "cd matlab/tests; run_tests('--exit')"
 
@@ -200,7 +264,7 @@ clean:
 	rm -rf $(BUILD_DIR) dist/ siamize-cpu.zip siamize-cuda.zip siamize-tensorrt.zip siamex.zip
 
 distclean: clean
-	rm -rf $(ORT_DIR)
+	rm -rf $(ORT_DIR) $(MNN_DIR) third_party/mnn-build
 
 pretty: pretty-cpp pretty-py
 
