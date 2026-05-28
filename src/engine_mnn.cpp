@@ -240,10 +240,31 @@ MnnEngine::MnnEngine(const std::string& model_path,
 
     MNN::ScheduleConfig cfg;
     cfg.type = resolve_forward_type(device, verbose);
-    // Workaround: numThread >= 4 segfaults in CPURaster::lambda#4 on
-    // SIAM-class workloads even with the int64 patches. See
-    // tools/mnn_probe/patches/README.md. Cap at 2 for safety.
-    cfg.numThread = std::max(1, std::min(intra_threads, 2));
+    const bool gpu_dev = (cfg.type == MNN_FORWARD_OPENCL ||
+                          cfg.type == MNN_FORWARD_VULKAN ||
+                          cfg.type == MNN_FORWARD_METAL);
+
+    // ScheduleConfig::numThread is a UNION with `mode` and means very
+    // different things depending on the backend:
+    //
+    //   CPU   : literal host thread count for MNN's thread pool.
+    //   GPU   : bitfield of MNN_GPU_TUNING_* flags (Interpreter.h).
+    //           Default is MNN_GPU_TUNING_WIDE (= 4) which MNN's own
+    //           header recommends. Setting it to 2 silently selects
+    //           MNN_GPU_TUNING_HEAVY which the same header documents
+    //           as "usually not suggested" -- worse perf AND triggers
+    //           "Error tunning info" cache-load spam from configurations
+    //           that fail to tune cleanly. Picking WIDE here was the
+    //           single biggest siamize-MNN bug.
+    if (gpu_dev) {
+        cfg.numThread = MNN_GPU_TUNING_WIDE;
+    } else {
+        // CPU path: numThread >= 4 segfaults in CPURaster::lambda#4 on
+        // SIAM-class workloads even with the int64 patches. See
+        // tools/mnn_probe/patches/README.md. Cap at 2 for safety.
+        cfg.numThread = std::max(1, std::min(intra_threads, 2));
+    }
+
     // "high" -> fp32 accumulators; "low" -> fp16. We default to high
     // because SIAM cascades fp16 noise across 76 layers and we already
     // see ~6 % logit drift even at high precision; low would compound.
@@ -278,8 +299,9 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // lifetime to be safe against future MNN changes that might
     // retain the pointer. See OpenCLBackend.cpp:38-43.
     MNNDeviceContext dev_ctx{};
-    const bool gpu_dev = (cfg.type == MNN_FORWARD_OPENCL ||
-                          cfg.type == MNN_FORWARD_VULKAN);
+    // gpu_dev above (set near ScheduleConfig::numThread) already covers
+    // OpenCL / Vulkan / Metal; reuse it here to keep the device-set
+    // decision in one place.
 
     if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
         dev_ctx.platformId = static_cast<uint32_t>(gpu_platform);
@@ -389,14 +411,20 @@ MnnEngine::MnnEngine(const std::string& model_path,
                 break;
         }
 
+        // For the GPU backends the same field is a tuning-mode bitfield,
+        // not a thread count. Print it under the right label so the log
+        // line doesn't claim "numThread=4" for a one-thread dispatch.
+        const char* sched_label = gpu_dev ? "gpu_mode" : "numThread";
+
         if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
-            siam::log_tag("mnn", "%s device=%s[platform=%d,device=%d] numThread=%d num_classes=%lld",
+            siam::log_tag("mnn", "%s device=%s[platform=%d,device=%d] %s=%d num_classes=%lld",
                           model_path.c_str(), dev_name, gpu_platform, gpuid,
-                          cfg.numThread, static_cast<long long>(mNumClasses));
-        } else {
-            siam::log_tag("mnn", "%s device=%s numThread=%d num_classes=%lld",
-                          model_path.c_str(), dev_name, cfg.numThread,
+                          sched_label, cfg.numThread,
                           static_cast<long long>(mNumClasses));
+        } else {
+            siam::log_tag("mnn", "%s device=%s %s=%d num_classes=%lld",
+                          model_path.c_str(), dev_name, sched_label,
+                          cfg.numThread, static_cast<long long>(mNumClasses));
         }
     }
 }
