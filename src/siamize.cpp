@@ -910,26 +910,36 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> auto_applied;
 
-    // Patch shrink (lives OUTSIDE the ram_tight block so it also fires
-    // on RAM-comfortable but VRAM-tight hosts -- common case: 16 GB+
+    // Patch shrink. Lives outside ram_tight so it also fires on
+    // RAM-comfortable but VRAM-tight hosts (common case: 16 GB+
     // workstation with a 10-12 GB GPU). For ORT, still gated on
-    // EXPLICIT --lowmem because old fixed-shape .onnx may reject
-    // smaller patches. For MNN, the shipped doc=mnn_i8a bundle is
-    // always dyn-shape so auto-shrink is safe without the opt-in.
+    // EXPLICIT --lowmem (old fixed-shape .onnx rejects smaller
+    // patches). For MNN, the shipped doc=mnn_i8a is dyn-shape so
+    // auto-shrink is safe without the opt-in.
     //
-    // Two-tier choice:
-    //   vram_tight + gpu_active  -> 128x128x96  (MNN-OpenCL allocates
-    //     the full forward-pass workspace ahead of the first tile, so
-    //     a 192x192x128 patch on a ~10 GB GPU can still OOM)
-    //   otherwise (ram_tight)    -> 192x192x128
+    // Tier choice (workspace estimate is for MNN-OpenCL):
+    //   patch       workspace    tiles on 340x340x213    tile count
+    //   256x256x192 ~6-10 GB     default                   8
+    //   192x192x128 ~3-5  GB                              27
+    //   128x128x96  ~1.5-2 GB                            100
+    //
+    // We avoid the 128x128x96 tier for vanilla ram_tight / vram_tight
+    // because going below 192x192x128 triples the tile count and
+    // shifts the Gaussian-blend pattern enough to cost ~0.05 Dice
+    // vs the canonical patch -- only worth it on really tight GPUs.
+    // Threshold for the very-tight branch: VRAM < 8 GB AND a GPU
+    // device is actually being used.
     {
         bool patch_shrink_allowed = lowmem_mode;
 #ifdef SIAMIZE_HAS_MNN
         patch_shrink_allowed = true;
 #endif
+        const bool vram_very_tight = gpu_active
+                                     && avail_vram_mb > 0
+                                     && avail_vram_mb < 8 * 1024;
 
         if (patch_shrink_allowed && !patch_set && (ram_tight || vram_tight)) {
-            if (vram_tight && gpu_active) {
+            if (vram_very_tight) {
                 patch = {128, 128, 96};
                 auto_applied.push_back("-P 128x128x96");
             } else {

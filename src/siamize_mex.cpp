@@ -763,20 +763,23 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         bool vram_tight = (opts.lowmem && gpu_active)
                           || (avail_vram_mb_l > 0 && avail_vram_mb_l < 12 * 1024);
 
-        // Patch shrink: lives outside ram_tight so it fires on
-        // RAM-comfortable but VRAM-tight hosts too (the common
-        // workstation-with-10GB-GPU case). ORT keeps the explicit
-        // opts.lowmem gate; MNN's shipped doc=mnn_i8a is always
-        // dyn-shape so auto-shrink is safe.
+        // Patch shrink: same tiering as the CLI's main() block.
+        // 128x128x96 only kicks in on really tight GPUs (< 8 GB);
+        // for 8-12 GB GPUs we stay at 192x192x128, which more than
+        // triples tile count vs the canonical 256x256x192 but avoids
+        // the 12.5x explosion the 128x128x96 tier would cause.
         {
             bool patch_shrink_allowed = opts.lowmem;
 #ifdef SIAMIZE_HAS_MNN
             patch_shrink_allowed = true;
 #endif
+            const bool vram_very_tight = gpu_active
+                                         && avail_vram_mb_l > 0
+                                         && avail_vram_mb_l < 8 * 1024;
 
             if (patch_shrink_allowed && !opts.patch_set
                     && (ram_tight || vram_tight)) {
-                if (vram_tight && gpu_active) {
+                if (vram_very_tight) {
                     opts.patch = {128, 128, 96};
                 } else {
                     opts.patch = {192, 192, 128};
