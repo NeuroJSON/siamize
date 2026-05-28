@@ -8,7 +8,9 @@
 #   cpu       CLI binary + libonnxruntime
 #   cuda      CLI binary + libonnxruntime + ORT CUDA provider plugins
 #   tensorrt  CLI binary + libonnxruntime + ORT CUDA + TensorRT plugins
+#   opencl    CLI binary, MNN backend (self-contained, no runtime .so)
 #   mex       siamex.mex* + siamize.m + matlab/jsonlab + libonnxruntime
+#   openclmex siamex.mex* + siamize.m + matlab/jsonlab (MNN, no runtime .so)
 #
 # Output: ./${output_name}.zip
 #
@@ -72,6 +74,71 @@ copy_trt_eps() {
     fi
 }
 
+copy_cli_opencl() {
+    # MNN backend, static-linked libMNN.a. The binary is self-contained
+    # -- no runtime .so to bundle alongside it. We do copy libMNN.so /
+    # .dylib / .dll if it's present (i.e. the user built the shared-MNN
+    # variant) so the same bundle name covers both link modes.
+    case "${os}" in
+        linux)
+            cp build/siamize "${stagedir}/"
+            if [ -f third_party/mnn/lib/libMNN.so ]; then
+                cp third_party/mnn/lib/libMNN.so "${stagedir}/"
+            fi
+            ;;
+        macos)
+            cp build/siamize "${stagedir}/"
+            if [ -f third_party/mnn/lib/libMNN.dylib ]; then
+                cp third_party/mnn/lib/libMNN.dylib "${stagedir}/"
+            fi
+            ;;
+        windows)
+            cp build/Release/siamize.exe "${stagedir}/"
+            if [ -f build/Release/MNN.dll ]; then
+                cp build/Release/MNN.dll "${stagedir}/"
+            fi
+            ;;
+    esac
+}
+
+copy_mex_opencl() {
+    # Same MEX-discovery rules as copy_mex() but no libonnxruntime to
+    # bundle. libMNN.{so,dylib,dll} only ships if the MEX was linked
+    # against the shared variant; the static MEX is self-contained.
+    case "${os}" in
+        linux)
+            if   [ -f matlab/siamex.mexa64 ]; then cp matlab/siamex.mexa64 "${stagedir}/"
+            elif [ -f matlab/siamex.mex   ]; then cp matlab/siamex.mex   "${stagedir}/"
+            else echo "[package] no MEX file found in matlab/"; exit 1
+            fi
+            if [ -f third_party/mnn/lib/libMNN.so ]; then
+                cp third_party/mnn/lib/libMNN.so "${stagedir}/"
+            fi
+            ;;
+        macos)
+            if   [ -f matlab/siamex.mexmaca64 ]; then cp matlab/siamex.mexmaca64 "${stagedir}/"
+            elif [ -f matlab/siamex.mexmaci64 ]; then cp matlab/siamex.mexmaci64 "${stagedir}/"
+            elif [ -f matlab/siamex.mex       ]; then cp matlab/siamex.mex       "${stagedir}/"
+            else echo "[package] no MEX file found in matlab/"; exit 1
+            fi
+            if [ -f third_party/mnn/lib/libMNN.dylib ]; then
+                cp third_party/mnn/lib/libMNN.dylib "${stagedir}/"
+            fi
+            ;;
+        windows)
+            cp matlab/siamex.mexw64 "${stagedir}/"
+            if [ -f matlab/MNN.dll ]; then
+                cp matlab/MNN.dll "${stagedir}/"
+            fi
+            ;;
+    esac
+    cp matlab/siamize.m "${stagedir}/"
+    cp -r matlab/jsonlab "${stagedir}/jsonlab"
+    rm -f "${stagedir}/jsonlab/.git"
+    find "${stagedir}/jsonlab" -name '.git*' -prune -exec rm -rf {} + 2>/dev/null || true
+    cp matlab/README.md "${stagedir}/README.md"
+}
+
 copy_mex() {
     # MEX outputs land in matlab/ next to siamize.m since 869ddc5
     # (CMakeLists's RUNTIME/LIBRARY_OUTPUT_DIRECTORY override). Pick
@@ -111,15 +178,17 @@ copy_mex() {
 }
 
 case "${mode}" in
-    cpu)      copy_cli ;;
-    cuda)     copy_cli; copy_cuda_eps ;;
-    tensorrt) copy_cli; copy_cuda_eps; copy_trt_eps ;;
-    mex)      copy_mex ;;
+    cpu)       copy_cli ;;
+    cuda)      copy_cli; copy_cuda_eps ;;
+    tensorrt)  copy_cli; copy_cuda_eps; copy_trt_eps ;;
+    opencl)    copy_cli_opencl ;;
+    mex)       copy_mex ;;
+    openclmex) copy_mex_opencl ;;
     *) echo "[package] unknown mode: ${mode}"; exit 1 ;;
 esac
 
 cp LICENSE "${stagedir}/"
-if [ "${mode}" != "mex" ]; then
+if [ "${mode}" != "mex" ] && [ "${mode}" != "openclmex" ]; then
     cp README.md "${stagedir}/"
 fi
 

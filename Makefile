@@ -60,6 +60,7 @@ MNN_MARKER := $(MNN_DIR)/include/MNN/Interpreter.hpp
 
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
+        package-opencl package-openclmex \
         cudaoct cudamex coreml coremloct coremlmex \
         opencl openclmex opencloct mnn-deps \
         ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
@@ -236,6 +237,12 @@ package-tensorrt:
 package-mex:
 	scripts/package.sh mex      siamex
 
+package-opencl:
+	scripts/package.sh opencl   siamize-opencl
+
+package-openclmex:
+	scripts/package.sh openclmex siamex-opencl
+
 # ---- Documentation ----------------------------------------------------------
 
 # Build doxygen HTML docs from the in-source doxygen blocks. Output lands
@@ -261,7 +268,9 @@ test:
 	tests/run_regression.sh
 
 clean:
-	rm -rf $(BUILD_DIR) dist/ siamize-cpu.zip siamize-cuda.zip siamize-tensorrt.zip siamex.zip
+	rm -rf $(BUILD_DIR) dist/ \
+	    siamize-cpu.zip siamize-cuda.zip siamize-tensorrt.zip \
+	    siamize-opencl.zip siamex.zip siamex-opencl.zip
 
 distclean: clean
 	rm -rf $(ORT_DIR) $(MNN_DIR) third_party/mnn-build

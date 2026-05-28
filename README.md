@@ -393,10 +393,20 @@ single small `libMNN.so` (~7 MB) instead of the ~23 MB ORT shared
 library plus per-EP runtime stacks.
 
 ```bash
+make opencl                                            # builds the CLI
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl
+
+# MNN MEX variants (same flag plumbing as cudamex / coremlmex):
+make opencloct                                         # Octave MEX
+make openclmex                                         # MATLAB MEX
+```
+
+`make opencl` is shorthand for the explicit two-step:
+
+```bash
 scripts/fetch_mnn.sh                            # fetches + builds patched MNN
-cmake -S . -B build-mnn -DSIAMIZE_BACKEND=mnn   # build against MNN instead of ORT
-cmake --build build-mnn -j
-build-mnn/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl
+cmake -S . -B build -DSIAMIZE_BACKEND=mnn       # build against MNN instead of ORT
+cmake --build build -j
 ```
 
 What `scripts/fetch_mnn.sh` does:
@@ -418,11 +428,13 @@ cached at `third_party/mnn-build/`. Override the ref by passing
 `MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`).
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
-add `MNN_STATIC=1`:
+pass `MNN_STATIC=1` on the make line:
 
 ```bash
-MNN_STATIC=1 scripts/fetch_mnn.sh           # builds libMNN.a instead
-cmake -S . -B build-mnn -DSIAMIZE_BACKEND=mnn && cmake --build build-mnn -j
+MNN_STATIC=1 make opencl
+# equivalent two-step:
+# MNN_STATIC=1 scripts/fetch_mnn.sh           # builds libMNN.a instead
+# cmake -S . -B build -DSIAMIZE_BACKEND=mnn && cmake --build build -j
 ```
 
 The siamize CMakeLists.txt auto-detects `.a` vs `.so/.dylib` under

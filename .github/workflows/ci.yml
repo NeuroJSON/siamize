@@ -450,6 +450,153 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  cpp-build-opencl:
+    # Builds siamize with SIAMIZE_BACKEND=mnn (single static libMNN.a)
+    # and runs single-fold inference end-to-end on the GHA runner.
+    # The MNN-CPU forward type works without a GPU, so this job
+    # genuinely verifies the inference produces a non-empty output on
+    # every push -- not just a fallback to a different backend the
+    # way cpp-build-cuda has to. The .mnn weight (int8-quantized,
+    # ~35 MB gzipped) auto-downloads from doc=mnn_i8a via siamize's
+    # built-in resolver, exercising the canonical user path.
+    name: build+run opencl (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            binary: build/siamize
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MNN stage (libMNN.a + headers)
+        id: mnn-cache
+        uses: actions/cache@v4
+        with:
+          # We only need the staged artifacts; the heavy intermediate
+          # build tree under third_party/mnn-build/ is not cached
+          # (caching the 1 GB CMakeFiles tree saved less time than
+          # the cache restore/save itself in benchmarking).
+          path: third_party/mnn
+          # Key off the script that drives the build + the ref it
+          # downloads. Bump either to invalidate the cache.
+          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-int64fix
+
+      - name: Fetch + build patched MNN (static)
+        # First run: 15-20 min compile. Subsequent runs hit the cache
+        # above and skip this step entirely. fetch_mnn.sh itself is
+        # idempotent (FORCE=1 to bust), but we don't need it: the
+        # actions/cache step decides whether the work is needed.
+        if: steps.mnn-cache.outputs.cache-hit != 'true'
+        env:
+          MNN_STATIC: "1"
+        run: scripts/fetch_mnn.sh
+
+      - name: Configure (MNN backend)
+        run: |
+          cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSIAMIZE_STATIC_LINK=ON \
+              -DSIAMIZE_BACKEND=mnn
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Inspect runtime deps
+        run: |
+          echo "--- ldd ---"
+          ldd build/siamize
+          echo "--- siamize binary size ---"
+          ls -lh build/siamize
+          stat -c "%s" build/siamize
+
+      - name: Smoke-run --help
+        run: ${{ matrix.binary }} --help
+
+      - name: Run single-fold MNN-CPU inference
+        # int8-quantized .mnn weight auto-downloads from doc=mnn_i8a
+        # (~35 MB gzipped -> 143 MB on disk). MNN's CPU forward type
+        # is the safe choice on GHA -- no OpenCL ICD to depend on.
+        # numThread capped at 2 in MnnEngine to avoid the known
+        # CPURaster MT crash on SIAM-class workloads. 8 tiles,
+        # end-to-end ~5-7 min on a 4-vCPU GHA runner.
+        timeout-minutes: 30
+        run: |
+          ${{ matrix.binary }} \
+              -i tests/sub-01_T1w.nii.gz \
+              -o pred_ci.nii.gz \
+              -M 0 \
+              -c cpu \
+              -t 2 2>&1 | tee siamize.log
+
+      - name: Verify MNN backend was used
+        run: |
+          if grep -Eq "backend mnn" siamize.log; then
+            echo "OK: MNN backend engaged."
+          else
+            echo "FAIL: expected 'backend mnn' marker; got:"
+            cat siamize.log
+            exit 1
+          fi
+
+      - name: Verify output produced
+        run: |
+          test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
+          ls -lh pred_ci.nii.gz
+
+      - name: Compare to bundled reference (mean foreground Dice)
+        # Bundled reference (tests/pred_ref_allfolds.nii.gz) is the
+        # 5-fold ORT ensemble; we're running single-fold MNN-int8 here,
+        # so the comparison is "do we get the same general structure"
+        # rather than an equality check. Use a generous floor: any
+        # mean-fg Dice < 0.90 on this T1 means something is badly
+        # broken (silent garbage logits, wrong weight bundle, etc).
+        run: |
+          python3 -m pip install --quiet nibabel numpy
+          python3 - <<'PY'
+          import nibabel as nib, numpy as np
+          new = nib.load('pred_ci.nii.gz').get_fdata().astype(np.int32)
+          ref = nib.load('tests/pred_ref_allfolds.nii.gz').get_fdata().astype(np.int32)
+          # nnUNet outputs argmax labels; compute per-class Dice over the
+          # foreground classes, then take the unweighted mean. Single-fold
+          # MNN-int8 vs 5-fold ORT-fp16 reference is ~0.95 Dice on this T1.
+          dices = []
+          for k in range(1, int(max(new.max(), ref.max())) + 1):
+              a = (new == k); b = (ref == k)
+              if a.sum() + b.sum() == 0:
+                  continue
+              dices.append((2 * (a & b).sum()) / (a.sum() + b.sum()))
+          mean = float(np.mean(dices)) if dices else 0.0
+          print(f'mean foreground Dice = {mean:.4f} ({len(dices)} classes)')
+          assert mean >= 0.90, f'Dice {mean:.4f} below sanity floor 0.90'
+          PY
+
+      - name: Package
+        shell: bash
+        run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
+          PLAT=linux-x86_64
+          BUNDLE="siamize-${VER}-${PLAT}-opencl"
+          # `opencl` mode stages the (static or shared) MNN binary
+          # alone; libMNN.so is only copied if a shared build was
+          # staged. See scripts/package.sh.
+          scripts/package.sh opencl "$BUNDLE"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: ${{ env.BUNDLE }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
   mex-cuda-smoke:
     # Compile-only smoke test for `make cudaoct` / `make cudamex`. The
     # GHA runner has no NVIDIA GPU and no CUDA runtime libs, so we can
