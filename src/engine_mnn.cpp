@@ -48,7 +48,9 @@ decomposition. Document this limitation in your docs.
 #include <MNN/MNNSharedContext.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -104,6 +106,74 @@ MNNForwardType resolve_forward_type(const std::string& device, bool verbose) {
     return MNN_FORWARD_CPU;
 }
 
+/// Resolve a per-host path for MNN's auto-tuning cache file.
+///
+/// MNN's OpenCL / Vulkan / Metal backends benchmark multiple kernel
+/// variants (workgroup size, vectorization, memory-access pattern)
+/// per op the first time they encounter it, then persist the winners
+/// to a binary cache file. Subsequent runs skip the tuning step and
+/// jump straight to the optimal kernel. Typical 2-3x speedup on
+/// OpenCL backends, with no precision impact.
+///
+/// We bucket the cache by (forward-type, precision) so swapping
+/// `--device opencl` for `--device vulkan` or flipping precision
+/// doesn't reuse stale tuning data. The cache key MNN uses
+/// internally also encodes per-op input shapes, so different patch
+/// sizes get their own entries inside the same file.
+///
+/// Returns the empty string if the cache directory cannot be created
+/// (caller treats this as "tuning disabled, just run as before").
+std::string default_mnn_cache_path(MNNForwardType type,
+                                   MNN::BackendConfig::PrecisionMode prec) {
+    namespace fs = std::filesystem;
+
+    fs::path base;
+    const char* env = std::getenv("SIAMIZE_CACHE_DIR");
+
+    if (env && *env) {
+        base = env;
+    } else {
+        const char* home = std::getenv("HOME");
+
+        if (home && *home) {
+            base = fs::path(home) / ".cache" / "siamize";
+        } else {
+            return "";
+        }
+    }
+
+    fs::path dir = base / "mnn-tune";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    if (ec) {
+        return "";
+    }
+
+    const char* dev_tag = "cpu";
+
+    switch (type) {
+        case MNN_FORWARD_OPENCL:
+            dev_tag = "opencl";
+            break;
+
+        case MNN_FORWARD_VULKAN:
+            dev_tag = "vulkan";
+            break;
+
+        case MNN_FORWARD_METAL:
+            dev_tag = "metal";
+            break;
+
+        default:
+            break;
+    }
+
+    const char* prec_tag = (prec == MNN::BackendConfig::Precision_Low)
+                           ? "fp16" : "fp32";
+    return (dir / (std::string(dev_tag) + "-" + prec_tag + ".cache")).string();
+}
+
 /// MNN-backed Engine. One Interpreter + one Session per fold. The
 /// patch shape is fixed at construction; sliding.cpp always calls
 /// run_tile() with that same shape.
@@ -115,6 +185,7 @@ class MnnEngine final : public Engine {
               const std::string& device,
               int gpu_platform,
               int gpuid,
+              bool mnn_fp16,
               bool verbose);
     ~MnnEngine() override;
 
@@ -142,6 +213,13 @@ class MnnEngine final : public Engine {
     int64_t mNumClasses = 0;
     size_t mTileFloats = 0;
     size_t mLogitFloats = 0;
+
+    // Path to the MNN auto-tuning cache file (empty when caching is
+    // disabled / not set up successfully). Populated by the ctor;
+    // dtor calls updateCacheFile() before tearing down the session
+    // so that the cumulative tuning gathered during this run lands
+    // on disk for the next process to reuse.
+    std::string mCachePath;
 };
 
 MnnEngine::MnnEngine(const std::string& model_path,
@@ -150,6 +228,7 @@ MnnEngine::MnnEngine(const std::string& model_path,
                      const std::string& device,
                      int gpu_platform,
                      int gpuid,
+                     bool mnn_fp16,
                      bool verbose)
     : mPatch(patch_size) {
     mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
@@ -169,7 +248,15 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // because SIAM cascades fp16 noise across 76 layers and we already
     // see ~6 % logit drift even at high precision; low would compound.
     MNN::BackendConfig bcfg;
-    bcfg.precision = MNN::BackendConfig::Precision_High;
+    // Precision_High = fp32 accumulators (safe default). Precision_Low
+    // = fp16 compute -- engages Tensor Cores on Volta+ NVIDIA OpenCL,
+    // half-throughput SIMD on AMD / Intel iGPU, and falls back to fp32
+    // on devices that report `fp16:0`. Toggle is plumbed all the way
+    // out to the CLI's --mnn-fp16 flag so users can measure the
+    // speedup/accuracy trade-off on their own hardware.
+    bcfg.precision = mnn_fp16
+                     ? MNN::BackendConfig::Precision_Low
+                     : MNN::BackendConfig::Precision_High;
     cfg.backendConfig = &bcfg;
 
     // GPU device selection. MNN's OpenCL backend reads
@@ -198,6 +285,27 @@ MnnEngine::MnnEngine(const std::string& model_path,
         dev_ctx.platformId = static_cast<uint32_t>(gpu_platform);
         dev_ctx.deviceId = static_cast<uint32_t>(gpuid);
         bcfg.sharedContext = &dev_ctx;
+    }
+
+    // Wire the auto-tuning cache BEFORE createSession. MNN reads
+    // setCacheFile + setSessionMode at session-creation time:
+    //   - setCacheFile(path) tells MNN where to load/save tuned
+    //     kernel parameters. Missing file is fine -- MNN populates
+    //     it during the first session/run.
+    //   - Session_Backend_Fix pins the backend to the one we chose
+    //     in cfg.type instead of letting MNN auto-fall-back, which
+    //     would invalidate cache entries that were tuned for the
+    //     pinned backend.
+    // The matching updateCacheFile() call lives in the destructor.
+    mCachePath = default_mnn_cache_path(cfg.type, bcfg.precision);
+
+    if (!mCachePath.empty()) {
+        mInterpreter->setCacheFile(mCachePath.c_str());
+        mInterpreter->setSessionMode(MNN::Interpreter::Session_Backend_Fix);
+
+        if (verbose) {
+            siam::log_tag("mnn", "tuning cache: %s", mCachePath.c_str());
+        }
     }
 
     mSession = mInterpreter->createSession(cfg);
@@ -294,6 +402,17 @@ MnnEngine::MnnEngine(const std::string& model_path,
 }
 
 MnnEngine::~MnnEngine() {
+    // Persist any tuning data accumulated during this session BEFORE
+    // tearing down. MNN updates an in-memory cache during runSession
+    // calls; updateCacheFile() flushes it to the file we registered
+    // via setCacheFile(). flag=0 = write-back mode. Best-effort: if
+    // the write fails (full disk, permission), just silently drop --
+    // the inference results are unaffected, only the next run loses
+    // the tuning headstart.
+    if (mSession && !mCachePath.empty()) {
+        mInterpreter->updateCacheFile(mSession, 0);
+    }
+
     // Session lifetime is owned by the Interpreter; releasing the
     // Interpreter releases the Session. Host Tensors are unique_ptr's.
 }
@@ -339,7 +458,7 @@ make_engine(const std::string& model_path,
     return std::unique_ptr<Engine>(
                new MnnEngine(model_path, patch_size, intra_threads,
                              device, tuning.gpu_platform, tuning.gpuid,
-                             verbose));
+                             tuning.mnn_fp16, verbose));
 }
 
 const char* backend_name() {

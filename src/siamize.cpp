@@ -329,6 +329,15 @@ void usage(const char* exe) {
                  "                      opencl uses MNN's OpenCL backend (NVIDIA via ICD, AMD, Intel iGPU).\n"
                  "                      vulkan/metal require MNN_VULKAN / MNN_METAL at MNN build time.\n"
                  "                      No CUDA/TensorRT/CoreML in this build (SIAMIZE_BACKEND=mnn).\n"
+                 "                      Per-session kernel-tuning data auto-cached at\n"
+                 "                      $SIAMIZE_CACHE_DIR/mnn-tune/<dev>-<prec>.cache;\n"
+                 "                      first session is slow, subsequent runs reuse the cache.\n"
+                 "      --mnn-fp16        run MNN GPU compute in fp16 (Precision_Low) instead\n"
+                 "                        of fp32 (Precision_High). Engages Tensor Cores on Volta+\n"
+                 "                        NVIDIA via OpenCL, half-throughput SIMD on AMD / Intel\n"
+                 "                        GPUs; silently no-op on devices reporting fp16:0\n"
+                 "                        (PoCL CPU-OpenCL, older GPUs without native fp16).\n"
+                 "                        Typical: 1.5-2x speedup with small accuracy cost.\n"
 #else
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
@@ -733,6 +742,13 @@ int main(int argc, char** argv) {
                 engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
                 engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
             }
+        } else if (a == "--mnn-fp16") {
+            // MNN BackendConfig::Precision_Low. On Volta+ NVIDIA via
+            // OpenCL, this engages Tensor Cores for fp16 conv; on AMD
+            // / Intel GPUs, half-throughput SIMD; on devices reporting
+            // fp16:0 (PoCL CPU-OpenCL, older GPUs), MNN silently falls
+            // back to fp32. Inert for the ORT backend.
+            engine_tuning.mnn_fp16 = true;
         } else if (a == "-F" || a == "--format") {
             std::string s = need();
 

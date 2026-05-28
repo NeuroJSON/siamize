@@ -89,6 +89,16 @@ struct EngineTuning {
                                           may be the CPU runtime and the real GPU
                                           lives on platform 1. CLI `-G P:D`
                                           populates both fields. */
+    bool mnn_fp16 = false;           /**< MNN BackendConfig::Precision_Low when true,
+                                          else Precision_High. Inert for ORT EPs.
+                                          fp16 GPU compute (Tensor Cores on
+                                          Volta+, half-throughput SIMD on AMD/
+                                          Intel) typically gives 1.5-2x speedup
+                                          with a small accuracy cost; silently
+                                          falls back to fp32 on devices that
+                                          report fp16:0 (PoCL CPU-OpenCL, older
+                                          GPUs without native fp16). CLI
+                                          `--mnn-fp16`. */
     bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */

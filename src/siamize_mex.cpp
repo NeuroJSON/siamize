@@ -512,6 +512,13 @@ void read_opts(const mxArray* a, Opts& o) {
         o.engine_tuning.gpu_platform = static_cast<int>(mxGetScalar(f));
     }
 
+    if ((f = mxGetField(a, 0, "mnn_fp16")) && !mxIsEmpty(f)) {
+        // MNN BackendConfig::Precision_Low. Mirrors CLI --mnn-fp16.
+        // Inert for ORT EPs; silently no-op on devices reporting
+        // fp16:0 in MNN's CPU/OpenCL capability probe.
+        o.engine_tuning.mnn_fp16 = (mxGetScalar(f) != 0.0);
+    }
+
     if ((f = mxGetField(a, 0, "arena")) && !mxIsEmpty(f)) {
         // Toggle for ORT's CPU memory arena + memory-pattern optimizer.
         // Default true (fast path). Pass false to match the CLI's
