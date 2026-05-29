@@ -338,6 +338,11 @@ void usage(const char* exe) {
                  "                        GPUs; silently no-op on devices reporting fp16:0\n"
                  "                        (PoCL CPU-OpenCL, older GPUs without native fp16).\n"
                  "                        Typical: 1.5-2x speedup with small accuracy cost.\n"
+                 "      --mnn-buffer      force MNN's OpenCL BUFFER memory mode instead of\n"
+                 "                        IMAGE (NVIDIA / AMD / Adreno default). ~5x faster\n"
+                 "                        on PoCL CPU-OpenCL but may fail to JIT-compile on\n"
+                 "                        some NVIDIA drivers (CL build error -9999). Default\n"
+                 "                        off; opt in if your stack handles it.\n"
 #else
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
@@ -749,6 +754,13 @@ int main(int argc, char** argv) {
             // fp16:0 (PoCL CPU-OpenCL, older GPUs), MNN silently falls
             // back to fp32. Inert for the ORT backend.
             engine_tuning.mnn_fp16 = true;
+        } else if (a == "--mnn-buffer") {
+            // MNN_GPU_MEMORY_BUFFER. NVIDIA / AMD / Adreno default to
+            // IMAGE; this flips to BUFFER. ~5x faster on PoCL CPU-
+            // OpenCL but on real NVIDIA the `conv_2d_buf` kernel
+            // source can fail to JIT-compile (CL build error -9999).
+            // Default off; opt in if your driver compiles it cleanly.
+            engine_tuning.mnn_buffer = true;
         } else if (a == "-F" || a == "--format") {
             std::string s = need();
 

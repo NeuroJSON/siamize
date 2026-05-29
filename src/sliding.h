@@ -99,6 +99,19 @@ struct EngineTuning {
                                           report fp16:0 (PoCL CPU-OpenCL, older
                                           GPUs without native fp16). CLI
                                           `--mnn-fp16`. */
+    bool mnn_buffer = false;         /**< MNN OpenCL BUFFER memory mode when true,
+                                          else IMAGE (MNN's default on NVIDIA /
+                                          AMD / Adreno; Mali / Intel default to
+                                          BUFFER regardless). Opt-in because the
+                                          BUFFER-mode `conv_2d_buf` kernel
+                                          source fails to compile on some
+                                          NVIDIA OpenCL drivers (CL build
+                                          error -9999). On PoCL CPU-OpenCL the
+                                          BUFFER path is ~5x faster than IMAGE
+                                          on SIAM-class 3D U-Nets; on real
+                                          NVIDIA the gain is uncertain and the
+                                          compile-failure risk is real. CLI
+                                          `--mnn-buffer`. */
     bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */

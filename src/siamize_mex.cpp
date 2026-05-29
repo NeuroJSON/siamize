@@ -519,6 +519,14 @@ void read_opts(const mxArray* a, Opts& o) {
         o.engine_tuning.mnn_fp16 = (mxGetScalar(f) != 0.0);
     }
 
+    if ((f = mxGetField(a, 0, "mnn_buffer")) && !mxIsEmpty(f)) {
+        // MNN_GPU_MEMORY_BUFFER. Mirrors CLI --mnn-buffer. Default
+        // off because the BUFFER-variant `conv_2d_buf` kernel
+        // source can fail to JIT-compile on NVIDIA OpenCL drivers
+        // (CL build error -9999).
+        o.engine_tuning.mnn_buffer = (mxGetScalar(f) != 0.0);
+    }
+
     if ((f = mxGetField(a, 0, "arena")) && !mxIsEmpty(f)) {
         // Toggle for ORT's CPU memory arena + memory-pattern optimizer.
         // Default true (fast path). Pass false to match the CLI's

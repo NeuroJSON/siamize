@@ -186,6 +186,7 @@ class MnnEngine final : public Engine {
               int gpu_platform,
               int gpuid,
               bool mnn_fp16,
+              bool mnn_buffer,
               bool verbose);
     ~MnnEngine() override;
 
@@ -229,6 +230,7 @@ MnnEngine::MnnEngine(const std::string& model_path,
                      int gpu_platform,
                      int gpuid,
                      bool mnn_fp16,
+                     bool mnn_buffer,
                      bool verbose)
     : mPatch(patch_size) {
     mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
@@ -257,7 +259,31 @@ MnnEngine::MnnEngine(const std::string& model_path,
     //           that fail to tune cleanly. Picking WIDE here was the
     //           single biggest siamize-MNN bug.
     if (gpu_dev) {
-        cfg.numThread = MNN_GPU_TUNING_WIDE;
+        // OR-ed bitfield: tuning mode + (optional) memory layout.
+        //
+        // MNN_GPU_TUNING_WIDE: MNN's recommended default kernel
+        // tuning level (vs the legacy "HEAVY = 2" we were silently
+        // selecting before, which the MNN header calls "usually
+        // not suggested" -- HEAVY probes more workgroup variants
+        // and triggers `Error tunning info` cache-load spam).
+        //
+        // MNN_GPU_MEMORY_BUFFER (opt-in via --mnn-buffer): force
+        // BUFFER memory layout instead of MNN's NVIDIA / AMD /
+        // Adreno default of IMAGE. On PoCL CPU-OpenCL the BUFFER
+        // path measured ~5x faster than IMAGE for SIAM v0.3, but
+        // on real NVIDIA drivers the `conv_2d_buf` kernel source
+        // can fail to compile (CL error -9999) so we keep BUFFER
+        // off by default. The future native Conv3D OpenCL path
+        // (NeuroJSON/MNN siam-opencl-conv3d branch) will require
+        // this flag too -- the IMAGE creator for that op isn't
+        // implemented.
+        int mode = MNN_GPU_TUNING_WIDE;
+
+        if (mnn_buffer) {
+            mode |= MNN_GPU_MEMORY_BUFFER;
+        }
+
+        cfg.numThread = mode;
     } else {
         // CPU path: numThread >= 4 segfaults in CPURaster::lambda#4 on
         // SIAM-class workloads even with the int64 patches. See
@@ -486,7 +512,7 @@ make_engine(const std::string& model_path,
     return std::unique_ptr<Engine>(
                new MnnEngine(model_path, patch_size, intra_threads,
                              device, tuning.gpu_platform, tuning.gpuid,
-                             tuning.mnn_fp16, verbose));
+                             tuning.mnn_fp16, tuning.mnn_buffer, verbose));
 }
 
 const char* backend_name() {
