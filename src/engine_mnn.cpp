@@ -331,6 +331,24 @@ MnnEngine::MnnEngine(const std::string& model_path,
     bcfg.precision = mnn_fp16
                      ? MNN::BackendConfig::Precision_Low
                      : MNN::BackendConfig::Precision_High;
+
+    // SIAMIZE_PRECISION=high|normal|low override (debug/measurement).
+    // Precision_Normal is fp16 storage + fp32 accumulator (the cuDNN
+    // Tensor-Core-style mode); Precision_Low is full fp16. The --mnn-fp16
+    // flag picks Low; this env var exposes Normal so we can measure the
+    // bandwidth-only gain without the accuracy hit from fp16 accumulation.
+    const char* prec_env = std::getenv("SIAMIZE_PRECISION");
+
+    if (prec_env) {
+        if      (!strcmp(prec_env, "high")) {
+            bcfg.precision = MNN::BackendConfig::Precision_High;
+        } else if (!strcmp(prec_env, "normal")) {
+            bcfg.precision = MNN::BackendConfig::Precision_Normal;
+        } else if (!strcmp(prec_env, "low")) {
+            bcfg.precision = MNN::BackendConfig::Precision_Low;
+        }
+    }
+
     cfg.backendConfig = &bcfg;
 
     // GPU device selection. MNN's OpenCL backend reads
