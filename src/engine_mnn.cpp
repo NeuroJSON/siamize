@@ -261,23 +261,50 @@ MnnEngine::MnnEngine(const std::string& model_path,
     if (gpu_dev) {
         // OR-ed bitfield: tuning mode + (optional) memory layout.
         //
-        // MNN_GPU_TUNING_WIDE: MNN's recommended default kernel
-        // tuning level (vs the legacy "HEAVY = 2" we were silently
-        // selecting before, which the MNN header calls "usually
-        // not suggested" -- HEAVY probes more workgroup variants
-        // and triggers `Error tunning info` cache-load spam).
+        // MNN_GPU_TUNING_FAST is the default tuning level. Empirical
+        // sweep on SIAM v0.3 + RTX 5090 + RTX 2080 SUPER + Titan V
+        // (NeuroJSON/MNN siam-opencl-conv3d branch):
+        //
+        //   tune         5090 256^3   5090 192^3   2080S 256^3   2080S 192^3
+        //   FAST (this)  12.7 s warm  16.0 s cold  44.8 s warm   61.6 s warm
+        //   WIDE         12.7 s warm  49.2 s warm  44.7 s warm   185  s warm
+        //   NONE         18.2 s       23.1 s       75.8 s        114  s
+        //   NORMAL       --           --           --            138  s
+        //   HEAVY        --           --           --            186  s
+        //
+        // FAST is tied with WIDE on the patch sizes where WIDE wins,
+        // and 3 x faster on the patch sizes where WIDE silently
+        // regresses, and it cuts the cold-cache tuning cost from
+        // ~5 min (WIDE) to ~10 s. WIDE's wider LWS search picks
+        // winners that benchmark fast in isolation but lose under
+        // the streaming kernel-launch pattern of SIAM's 14 k
+        // launches/tile -- FAST's narrower search avoids that
+        // overfitting.
+        //
+        // Override via SIAMIZE_TUNE=none|fast|normal|wide|heavy.
         //
         // MNN_GPU_MEMORY_BUFFER (opt-in via --mnn-buffer): force
         // BUFFER memory layout instead of MNN's NVIDIA / AMD /
-        // Adreno default of IMAGE. On PoCL CPU-OpenCL the BUFFER
-        // path measured ~5x faster than IMAGE for SIAM v0.3, but
-        // on real NVIDIA drivers the `conv_2d_buf` kernel source
-        // can fail to compile (CL error -9999) so we keep BUFFER
-        // off by default. The future native Conv3D OpenCL path
-        // (NeuroJSON/MNN siam-opencl-conv3d branch) will require
-        // this flag too -- the IMAGE creator for that op isn't
-        // implemented.
-        int mode = MNN_GPU_TUNING_WIDE;
+        // Adreno default of IMAGE. The native Conv3D / Deconv3D
+        // OpenCL path (NeuroJSON/MNN siam-opencl-conv3d branch)
+        // requires this flag -- the IMAGE creator for those ops
+        // isn't implemented.
+        int mode = MNN_GPU_TUNING_FAST;
+        const char* tune_env = std::getenv("SIAMIZE_TUNE");
+
+        if (tune_env) {
+            if      (!strcmp(tune_env, "none")) {
+                mode = MNN_GPU_TUNING_NONE;
+            } else if (!strcmp(tune_env, "fast")) {
+                mode = MNN_GPU_TUNING_FAST;
+            } else if (!strcmp(tune_env, "normal")) {
+                mode = MNN_GPU_TUNING_NORMAL;
+            } else if (!strcmp(tune_env, "wide")) {
+                mode = MNN_GPU_TUNING_WIDE;
+            } else if (!strcmp(tune_env, "heavy")) {
+                mode = MNN_GPU_TUNING_HEAVY;
+            }
+        }
 
         if (mnn_buffer) {
             mode |= MNN_GPU_MEMORY_BUFFER;
