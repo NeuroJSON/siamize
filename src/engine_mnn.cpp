@@ -156,9 +156,18 @@ MNNForwardType resolve_forward_type(const std::string& device, bool verbose) {
 ///      gets its own file that grows monotonically from empty, and any
 ///      residual collision self-heals via MNN's `!valid` rewrite path
 ///      (loadCache rejects a mismatched blob and writes a fresh one).
+///
+/// For GPU backends the name also carries a device-selection tag derived from
+/// CUDA_VISIBLE_DEVICES + the -G platform/device. MNN's compiled binaries are
+/// per-GPU (its setCache rejects another device's blob by deviceName), so on a
+/// multi-GPU host two different GPUs sharing one cache file would reject and
+/// overwrite each other every run -- a full kernel recompile (~10 s on a 2080
+/// SUPER) on every GPU switch. The tag gives each selected device its own file.
 std::string default_mnn_cache_path(MNNForwardType type,
                                    MNN::BackendConfig::PrecisionMode prec,
-                                   const std::string& model_path = std::string()) {
+                                   const std::string& model_path = std::string(),
+                                   int gpu_platform = 0,
+                                   int gpuid = 0) {
     namespace fs = std::filesystem;
 
     fs::path base;
@@ -220,7 +229,38 @@ std::string default_mnn_cache_path(MNNForwardType type,
         }
     }
 
-    return (dir / (std::string(dev_tag) + "-" + prec_tag + arch_tag + ".cache")).string();
+    // GPU-selection tag (GPU backends only): the physical device is picked by
+    // CUDA_VISIBLE_DEVICES (masks the ICD device list) + -G platform/gpuid, so
+    // those uniquely identify it on a multi-GPU host. CPU runs don't need it.
+    std::string gpu_tag;
+
+    if (type == MNN_FORWARD_OPENCL || type == MNN_FORWARD_VULKAN ||
+            type == MNN_FORWARD_METAL) {
+        std::string sel = "p" + std::to_string(gpu_platform) +
+                          "g" + std::to_string(gpuid);
+        const char* cvd = std::getenv("CUDA_VISIBLE_DEVICES");
+
+        if (cvd && *cvd) {
+            sel += "v";
+            sel += cvd;
+        }
+
+        gpu_tag = "-";
+
+        // Sanitize for a filename; CUDA_VISIBLE_DEVICES may hold UUID strings.
+        for (char c : sel) {
+            bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                      (c >= 'A' && c <= 'Z');
+            gpu_tag += ok ? c : '_';
+
+            if (gpu_tag.size() >= 28) {
+                break;
+            }
+        }
+    }
+
+    return (dir / (std::string(dev_tag) + "-" + prec_tag + arch_tag + gpu_tag +
+                   ".cache")).string();
 }
 
 
@@ -498,7 +538,8 @@ MnnEngine::MnnEngine(const std::string& model_path,
     mPrecision   = bcfg.precision;
     mBufferMode  = mnn_buffer;
 
-    mCachePath = default_mnn_cache_path(cfg.type, bcfg.precision, model_path);
+    mCachePath = default_mnn_cache_path(cfg.type, bcfg.precision, model_path,
+                                        gpu_platform, gpuid);
 
     if (!mCachePath.empty()) {
         mInterpreter->setCacheFile(mCachePath.c_str());
