@@ -531,7 +531,25 @@ MnnEngine::~MnnEngine() {
     // Interpreter releases the Session. Host Tensors are unique_ptr's.
 }
 
+// Forward-declarations of the siamize-side CL-error-tracking helpers
+// added to NeuroJSON/MNN's siam-opencl-conv3d branch. Defined in
+// MNN's source/backend/opencl/core/runtime/OpenCLWrapper.cpp. We
+// forward-declare here so we don't need to vendor MNN's internal
+// OpenCLWrapper.hpp into siamize's include path. On an upstream MNN
+// build without our patch, the linker will fail loudly -- in that
+// case the user should pin MNN_REF=siam-opencl-conv3d in fetch_mnn.sh.
+extern "C" int  siam_mnn_get_last_cl_error();
+extern "C" void siam_mnn_clear_last_cl_error();
+
 void MnnEngine::run_tile(const float* tile, float* logits) {
+    // Reset MNN's per-thread CL-error tracker before the call so we
+    // can detect a failure that's specific to THIS tile. MNN's
+    // MNN_CHECK_CL_SUCCESS macro normally only prints CL errors; we
+    // patched it (in NeuroJSON/MNN's siam-opencl-conv3d branch) to
+    // also stash the code into ::MNN::gLastCLError so callers like
+    // this one can react.
+    siam_mnn_clear_last_cl_error();
+
     // Stage input via the host scratch Tensor. copyFromHostTensor
     // bridges to device memory for non-CPU backends; it's a memcpy
     // for CPU.
@@ -546,6 +564,23 @@ void MnnEngine::run_tile(const float* tile, float* logits) {
     if (err != MNN::NO_ERROR) {
         std::ostringstream msg;
         msg << "MNN: runSession failed with code " << static_cast<int>(err);
+        throw std::runtime_error(msg.str());
+    }
+
+    // Catch the case where MNN's OpenCL backend swallowed a buffer-
+    // allocation failure (CL_MEM_OBJECT_ALLOCATION_FAILURE = -4 is
+    // typical on low-VRAM GPUs) and continued with a corrupt buffer.
+    // Without this check, runSession returns NO_ERROR, the output
+    // contains a mix of valid and zero/garbage logits, and siamize
+    // writes a wrong labelmap to disk with exit=0.
+    if (const int cl_err = siam_mnn_get_last_cl_error(); cl_err != 0) {
+        std::ostringstream msg;
+        msg << "MNN: OpenCL allocation/runtime error during runSession "
+            << "(CL error " << cl_err << "). The output tensor is "
+            << "likely corrupt. On low-VRAM GPUs try a smaller patch "
+            << "(e.g. `-P 64x64x64`), or fall back to `-c cpu`. "
+            << "Earlier stderr lines beginning with 'CL ERROR CODE : "
+            << cl_err << ", info:...' identify the failing op.";
         throw std::runtime_error(msg.str());
     }
 
