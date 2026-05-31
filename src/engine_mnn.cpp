@@ -233,6 +233,18 @@ MnnEngine::MnnEngine(const std::string& model_path,
                      bool mnn_buffer,
                      bool verbose)
     : mPatch(patch_size) {
+    // Force MNN's geometry layer to skip Convolution3D / ConvTranspose3D
+    // decomposition (Conv3D -> ~27 Conv2D + im2col + Eltwise + Raster).
+    // The libMNN we link against carries our native Conv3D / Deconv3D
+    // executors for both OpenCL (Conv3DBufExecution) and CPU
+    // (CPUConvolution3D), and those bypass the ~400 GB workspace
+    // explosion the geometry path produces on SIAM-class workloads.
+    // Set the env vars at engine construction time so callers don't have
+    // to remember to export them. setenv with overwrite=0 lets a user
+    // still override by setting SIAM_DISABLE_GEOM_*=0 explicitly.
+    ::setenv("SIAM_DISABLE_GEOM_CONV3D",   "1", 0);
+    ::setenv("SIAM_DISABLE_GEOM_DECONV3D", "1", 0);
+
     mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
                        MNN::Interpreter::destroy);
 
@@ -312,10 +324,13 @@ MnnEngine::MnnEngine(const std::string& model_path,
 
         cfg.numThread = mode;
     } else {
-        // CPU path: numThread >= 4 segfaults in CPURaster::lambda#4 on
-        // SIAM-class workloads even with the int64 patches. See
-        // tools/mnn_probe/patches/README.md. Cap at 2 for safety.
-        cfg.numThread = std::max(1, std::min(intra_threads, 2));
+        // CPU path: previously capped at 2 because numThread >= 4 used to
+        // segfault in CPURaster::lambda#4 on the geometry-decomposed
+        // Conv3D path (see tools/mnn_probe/patches/README.md). With our
+        // native-Conv3D CPU executor (SIAM_DISABLE_GEOM_CONV3D=1, set
+        // below) the model bypasses CPURaster entirely for Conv3D, so
+        // the cap is no longer needed.
+        cfg.numThread = std::max(1, intra_threads);
     }
 
     // "high" -> fp32 accumulators; "low" -> fp16. We default to high
