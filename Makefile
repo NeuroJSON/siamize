@@ -203,7 +203,7 @@ coremlmex: ort-cpu
 # (MATLAB) gets a tiny libMNN-static link line if MNN_STATIC=1 was set
 # at scripts/fetch_mnn.sh time. The MATLAB-side wrapper queries
 # siamex('backend') at runtime to pick the right fold filename
-# (_int8.mnn) and the matching NeuroJSON doc=mnn_i8a URL, so callers
+# (_fp32.mnn) and the matching NeuroJSON doc=mnn_n3d URL, so callers
 # don't need backend-specific changes to their .m scripts.
 opencloct: mnn-deps
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \

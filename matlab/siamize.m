@@ -261,11 +261,11 @@ siamize_ensure_jsonlab_();
 % Compile-time backend the MEX was built against ('ort' or 'mnn').
 % This drives three downstream choices:
 %   1. fold-shortcut filename:  fold_<N>_fp16.onnx (ORT) vs
-%                               fold_<N>_int8.mnn (MNN, served at
-%                               doc=mnn_i8a on NeuroJSON).
+%                               fold_<N>_fp32.mnn (MNN, served at
+%                               doc=mnn_n3d on NeuroJSON).
 %   2. cache subdirectory:      $SIAMIZE_CACHE_DIR/ (ORT default
-%                               variant) vs $SIAMIZE_CACHE_DIR/mnn_i8a/.
-%   3. NeuroJSON URL doc=:      'dynshape' vs 'mnn_i8a'.
+%                               variant) vs $SIAMIZE_CACHE_DIR/mnn_n3d/.
+%   3. NeuroJSON URL doc=:      'dynshape' vs 'mnn_n3d'.
 % siamize_resolve_model_ honors all three via the bk struct passed in.
 bk = siamize_backend_config_();
 
@@ -611,7 +611,7 @@ end
 function s = siamize_expand_fold_(s, bk)
 % SIAMIZE_EXPAND_FOLD_  '0'..'9' -> 'fold_<N>_<ext>' per the active backend.
 %   For SIAMIZE_BACKEND=ort the extension is '_fp16.onnx' (default);
-%   for SIAMIZE_BACKEND=mnn it is '_int8.mnn'. Pass through otherwise.
+%   for SIAMIZE_BACKEND=mnn it is '_fp32.mnn'. Pass through otherwise.
 if nargin < 2
     bk = siamize_backend_config_();
 end
@@ -656,10 +656,10 @@ end
 bk = struct();
 bk.name = name;
 if strcmp(name, 'mnn')
-    bk.ext              = '_int8.mnn';
-    bk.default_basename = 'fold_0_int8.mnn';
-    bk.cache_subdir     = 'mnn_i8a';
-    bk.url_doc          = 'mnn_i8a';
+    bk.ext              = '_fp32.mnn';
+    bk.default_basename = 'fold_0_fp32.mnn';
+    bk.cache_subdir     = 'mnn_n3d';
+    bk.url_doc          = 'mnn_n3d';
 else
     bk.ext              = '_fp16.onnx';
     bk.default_basename = 'fold_0_fp16.onnx';
@@ -711,8 +711,8 @@ end
 % NeuroJSON URL prefix; the filename is appended directly (no `/`
 % separator) since the prefix ends with `&file=`. The doc= value
 % depends on the backend the MEX was built against -- 'dynshape' for
-% the fp16 .onnx folds (ORT), 'mnn_i8a' for the pre-converted int8
-% .mnn folds (MNN). Mirrors weights.cpp's default_weights_url().
+% the fp16 .onnx folds (ORT), 'mnn_n3d' for the native-Conv3D .mnn
+% folds (MNN). Mirrors weights.cpp's default_weights_url().
 urlbase = getenv('SIAMIZE_WEIGHTS_BASE_URL');
 if isempty(urlbase)
     urlbase = ['https://neurojson.org/io/stat.cgi?action=get&db=siam_v03', ...

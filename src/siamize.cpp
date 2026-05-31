@@ -247,11 +247,12 @@ long available_vram_mb(int gpuid = 0) {
 
 /*******************************************************************************/
 /*! \fn    std::string expand_fold_shortcut(const std::string& tok)
-    \brief Expand a single-digit fold shortcut to the canonical fp16 filename
+    \brief Expand a single-digit fold shortcut to the canonical filename
 
-    `"0".."9"` becomes `"fold_<d>_fp16.onnx"`; anything else passes
-    through unchanged. Lets users write `-M 0,1,2,3,4` instead of
-    spelling out the full filenames.
+    `"0".."9"` becomes `"fold_<d>_fp32.mnn"` (MNN build) or
+    `"fold_<d>_fp16.onnx"` (ONNX build); anything else passes through
+    unchanged. Lets users write `-M 0,1,2,3,4` instead of spelling
+    out the full filenames.
 
     \param  tok  one model spec token
     \return      expanded filename if \a tok was a digit, else \a tok verbatim
@@ -259,9 +260,11 @@ long available_vram_mb(int gpuid = 0) {
 std::string expand_fold_shortcut(const std::string& tok) {
     if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= '9') {
 #ifdef SIAMIZE_HAS_MNN
-        // MNN backend: pre-converted .mnn binaries with int8
-        // asymmetric block-64 weight quant (see WeightVariant::MNN).
-        return "fold_" + tok + "_int8.mnn";
+        // MNN backend: native-Conv3D .mnn binaries with fp32 weights
+        // (see WeightVariant::MNN, doc=mnn_n3d). Future fp16/int8
+        // variants will live under the same doc as fold_<N>_fp16.mnn
+        // / fold_<N>_int8.mnn.
+        return "fold_" + tok + "_fp32.mnn";
 #else
         return "fold_" + tok + "_fp16.onnx";
 #endif
@@ -306,14 +309,13 @@ void usage(const char* exe) {
                  "                      human-readable JSON.\n"
 #ifdef SIAMIZE_HAS_MNN
                  "  -M, --models        comma-separated .mnn files (one per fold), logits are averaged.\n"
-                 "                      Defaults to single-fold 'fold_0_int8.mnn'. Each entry can be\n"
+                 "                      Defaults to single-fold 'fold_0_fp32.mnn'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
-                 "                      -M 0,1,2,3,4 expands to fold_<N>_int8.mnn). Bare basenames\n"
-                 "                      are looked up under $SIAMIZE_CACHE_DIR/mnn/ (default\n"
-                 "                      $HOME/.cache/siamize/models/mnn/) and auto-downloaded from\n"
-                 "                      $SIAMIZE_WEIGHTS_BASE_URL on miss. The shipped .mnn files\n"
-                 "                      use int8 asymmetric block-64 weight quant (~143 MB / fold,\n"
-                 "                      <0.1 %% Dice loss vs fp16 reference).\n"
+                 "                      -M 0,1,2,3,4 expands to fold_<N>_fp32.mnn). Bare basenames\n"
+                 "                      are looked up under $SIAMIZE_CACHE_DIR/mnn_n3d/ (default\n"
+                 "                      $HOME/.cache/siamize/models/mnn_n3d/) and auto-downloaded from\n"
+                 "                      $SIAMIZE_WEIGHTS_BASE_URL on miss. The shipped .mnn files are\n"
+                 "                      dynamic-shape native-Conv3D fp32 weights (~540 MB / fold).\n"
 #else
                  "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
@@ -906,7 +908,7 @@ int main(int argc, char** argv) {
     // above are inert. Memory pressure shows up via MNN's own
     // workspace allocation at first run_tile; we mitigate by:
     //   - auto-applying -P 192x192x128 on a RAM-tight host (no
-    //     --lowmem opt-in required, since the shipped doc=mnn_i8a
+    //     --lowmem opt-in required, since the shipped doc=mnn_n3d
     //     bundle is always dyn-shape).
     //   - auto-applying -P 128x128x96 when BOTH RAM and VRAM are
     //     tight on a GPU device (MNN-OpenCL allocates the full
@@ -942,7 +944,7 @@ int main(int argc, char** argv) {
     // RAM-comfortable but VRAM-tight hosts (common case: 16 GB+
     // workstation with a 10-12 GB GPU). For ORT, still gated on
     // EXPLICIT --lowmem (old fixed-shape .onnx rejects smaller
-    // patches). For MNN, the shipped doc=mnn_i8a is dyn-shape so
+    // patches). For MNN, the shipped doc=mnn_n3d is dyn-shape so
     // auto-shrink is safe without the opt-in.
     //
     // Tier choice (workspace estimate is for MNN-OpenCL):
@@ -1105,10 +1107,10 @@ int main(int argc, char** argv) {
 
     if (models_csv.empty()) {
 #ifdef SIAMIZE_HAS_MNN
-        models_csv = "fold_0_int8.mnn";
+        models_csv = "fold_0_fp32.mnn";
         siam::log_tag("models",
                       "-M/--models not given; defaulting to single-fold "
-                      "fold_0_int8.mnn (auto-downloaded if missing).");
+                      "fold_0_fp32.mnn (auto-downloaded if missing).");
 #else
         models_csv = "fold_0_fp16.onnx";
         siam::log_tag("models",

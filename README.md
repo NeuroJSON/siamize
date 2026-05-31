@@ -44,7 +44,7 @@ without PyTorch, nnU-Net, or torchio at deployment time.
    `libonnxruntime.so` + per-fold 270 MB `.onnx` — drop-in for `siam-pred`
    with no Python at runtime. An alternative
    [MNN](https://github.com/alibaba/MNN) backend (~7 MB `libMNN.so` +
-   143 MB per-fold int8 `.mnn`) is available via
+   per-fold 540 MB native-Conv3D fp32 `.mnn`) is available via
    `-DSIAMIZE_BACKEND=mnn` for vendor-neutral GPU support
    (OpenCL / Vulkan / Metal); see [the MNN section](#optional-mnn-backend-vendor-neutral-gpu)
    below.
@@ -57,7 +57,7 @@ Accuracy vs original SIAM on the bundled `sub-01_T1w.nii.gz`
 | `py/siam_ref.py`                    | 99.989%  | 0.9990 |
 | `tools/onnx_export/siam_ort.py`     | 99.989%  | 0.9990 |
 | C++ binary, ORT backend (`build/siamize`)              | 99.715%  | 0.9697 (Anomalies, 17 voxels) |
-| C++ binary, MNN backend, int8 quant (`make opencl`)    | 99.632%  | 0.9412 (Anomalies) |
+| C++ binary, MNN backend, native-Conv3D fp32 (`make opencl`) | 99.704%  | 0.9697 (Anomalies) |
 
 ## Quickstart
 
@@ -394,12 +394,13 @@ single small `libMNN.so` (~7 MB) instead of the ~23 MB ORT shared
 library plus per-EP runtime stacks.
 
 ```bash
-make opencl                                            # builds the CLI
-build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl
+# Fast path -- native-Conv3D OpenCL (recommended for production):
+MNN_REF=siam-opencl-conv3d make opencl
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl --mnn-buffer
 
 # MNN MEX variants (same flag plumbing as cudamex / coremlmex):
-make opencloct                                         # Octave MEX
-make openclmex                                         # MATLAB MEX
+MNN_REF=siam-opencl-conv3d make opencloct                # Octave MEX
+MNN_REF=siam-opencl-conv3d make openclmex                # MATLAB MEX
 ```
 
 `make opencl` is shorthand for the explicit two-step:
@@ -412,30 +413,34 @@ cmake --build build -j
 
 What `scripts/fetch_mnn.sh` does:
 
-1. Downloads the `v3.5-int64fix` source archive from
-   [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN/releases/tag/v3.5-int64fix)
-   — a fork of upstream MNN with a 12-file `int64`-overflow audit
-   applied. The fixes are necessary because upstream MNN's CPU
-   runtime overflows `int32` byte offsets on tensors larger than
-   2 GB, which happens routinely after MNN decomposes SIAM's 3D
-   convolutions into 2D (`Convolution3DTurn2D`); without them the
-   network silently produces garbage logits.
+1. Downloads source archive from
+   [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Two relevant
+   branches:
+   - **`siam-opencl-conv3d` (recommended)** — `v3.5-int64fix` plus a
+     native-Conv3D / native-Deconv3D OpenCL BUFFER path, output
+     tiling, and a MatMul LWS fix. Roughly **17× faster** Conv3D
+     than the geometry-decomposed default on SIAM patches.
+   - **`v3.5-int64fix` (current default)** — a 12-file `int64`-overflow
+     audit on top of upstream `master`. Without it, upstream MNN
+     overflows `int32` byte offsets on tensors larger than 2 GB,
+     which happens routinely after Conv3D decomposes into 2D ops
+     (`Convolution3DTurn2D`); the network then silently produces
+     garbage logits. This branch is the safe baseline but uses the
+     slow decomposed Conv3D path.
 2. Configures with `-DMNN_OPENCL=ON -DMNN_SEP_BUILD=OFF` so the
-   OpenCL backend folds into a single `libMNN.so`.
+   OpenCL backend folds into a single `libMNN.{so,a}`.
 3. Stages headers + library at `third_party/mnn/{include,lib}/`.
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`).
+`MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`). For the fast
+path, set `MNN_REF=siam-opencl-conv3d` as shown above.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
 pass `MNN_STATIC=1` on the make line:
 
 ```bash
-MNN_STATIC=1 make opencl
-# equivalent two-step:
-# MNN_STATIC=1 scripts/fetch_mnn.sh           # builds libMNN.a instead
-# cmake -S . -B build -DSIAMIZE_BACKEND=mnn && cmake --build build -j
+MNN_STATIC=1 MNN_REF=siam-opencl-conv3d make opencl
 ```
 
 The siamize CMakeLists.txt auto-detects `.a` vs `.so/.dylib` under
@@ -449,46 +454,63 @@ dlopened at runtime (MNN is built with `MNN_USE_SYSTEM_LIB=OFF`),
 so the binary works on any host with a working `libOpenCL.so.1`
 without baking in an OpenCL link dep.
 
-MNN-relevant CLI:
+MNN-relevant CLI flags:
 
 | Flag | Default | Effect |
 |---|---|---|
 | `-c {auto\|cpu\|opencl\|vulkan\|metal}` | `auto` | MNN forward type. `auto` picks OpenCL when MNN was built with `MNN_OPENCL=ON`, else CPU. `vulkan` / `metal` require the corresponding MNN build flag. |
-| `-G N\|P:D` | `0` | OpenCL/Vulkan device. `-G N` = device `N` on platform 0. `-G P:D` = platform `P`, device `D` (needed on multi-ICD hosts where the GPU lives on a non-zero platform — e.g. PoCL on platform 0 + NVIDIA on platform 1). List with `clinfo -l`. |
+| `-G N\|P:D` | `0` | OpenCL/Vulkan device. `-G N` = device `N` on platform 0. `-G P:D` = platform `P`, device `D` (needed on multi-ICD hosts where the GPU lives on a non-zero platform — e.g. PoCL on platform 0 + NVIDIA on platform 1). List with `clinfo -l`. **Known issue:** the `:D` parsing routes through `BackendConfig::mode`, which MNN interprets as a bitfield rather than a device index — use `CUDA_VISIBLE_DEVICES=N` to pin a specific NVIDIA GPU instead. |
+| `--mnn-buffer` | off (IMAGE) | Switches MNN's OpenCL backend from `image2d_t` to `cl_mem` BUFFER mode. Required for the native-Conv3D fast path on the `siam-opencl-conv3d` branch. Skip this flag if you see `cl_*` build errors on your driver (e.g. some NVIDIA driver releases fail to compile `conv_2d_buf` int kernels). |
+| `--mnn-fp16` | off | Maps to MNN's `Precision_Normal` — fp16 storage for activations + fp32 compute. Cuts VRAM ~2× on the MNN-OpenCL path. No FLOPs speedup on NVIDIA OpenCL (no Tensor Core access from OpenCL); useful win on Mali / Adreno / Intel Arc. |
 
-Weights are served as pre-converted `.mnn` binaries (int8 asymmetric
-block-64 weight quant) from `doc=mnn_i8a` on NeuroJSON. The `-M 0`
-shortcut expands to `fold_0_int8.mnn` on this build and the resolver
-caches under `~/.cache/siamize/models/mnn_i8a/`. Each fold is ~143 MB
-uncompressed (~35 MB gzipped on the wire); the full 5-fold ensemble
-is ~684 MB on disk vs ~1.4 GB for the fp16 ONNX bundle.
+MNN-relevant environment variables:
+
+| Env var | Values | Effect |
+|---|---|---|
+| `SIAMIZE_TUNE` | `FAST` (default) / `WIDE` / `NORMAL` / `HEAVY` / `NONE` | OpenCL kernel auto-tuning level. `FAST` is the production default — ~5 s cold cache on 5090, ~13 s on Titan V, ~26 s on 2080 SUPER. `WIDE` can pick faster LWS on Mali / Adreno but has been observed to choose **180 s** kernels on small patches with NVIDIA drivers. Tuned LWS values cache under `~/.cache/siamize/mnn-tune/opencl-fp32.cache`. |
+| `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |
+
+Weights are served as pre-converted `.mnn` binaries from
+`doc=mnn_n3d` on NeuroJSON. Files are dynamic-shape and run on the
+native-Conv3D OpenCL path (built against NeuroJSON/MNN's
+`siam-opencl-conv3d` branch). The `-M 0` shortcut expands to
+`fold_0_fp32.mnn` on this build and the resolver caches under
+`~/.cache/siamize/models/mnn_n3d/`. Each fp32 fold is ~540 MB
+uncompressed (~122 MB gzipped on the wire); the full 5-fold
+ensemble is ~2.7 GB on disk. Future `fold_<N>_fp16.mnn` /
+`fold_<N>_int8.mnn` variants live under the same doc when shipped.
 
 Accuracy vs the fp16 ONNX reference on `tests/sub-01_T1w.nii.gz`:
 
 | Backend | Argmax match | Mean foreground Dice |
 |---|---|---|
 | MNN-CPU (fp32 weights `.mnn`) | 99.39% | 0.9862 |
-| MNN-CPU (`--fp16` weights) | 99.39% | 0.9862 |
-| MNN-CPU (`int8` asym block-64, *shipped*) | 99.35% | 0.9856 |
-| MNN-OpenCL (`int8` asym block-64) | 99.35% | 0.9856 *(bit-identical to MNN-CPU)* |
+| MNN-OpenCL (native Conv3D, fp32, `--mnn-buffer`) | 99.39% | 0.9862 *(bit-identical to MNN-CPU)* |
+| MNN-OpenCL (native Conv3D, IMAGE) | 99.39% | 0.9862 |
 
 Trade-offs vs the ORT path:
 
-- **+** Single-vendor-free build. The same `libMNN.so` runs on
+- **+** Single-vendor-free build. The same `libMNN.{so,a}` runs on
   NVIDIA, AMD, Intel, Apple Silicon, and ARM SBCs without per-EP
   prebuilt bundles.
-- **+** Smaller weights (~143 MB vs 283 MB per fold) thanks to
-  int8 quant — actual loss vs fp16 is < 0.1 % Dice on this task.
-- **-** MNN's OpenCL kernels are not 3D-aware, so the runtime
-  decomposes Conv3D into ~3300 2D ops. The resulting kernel-launch
-  overhead means MNN-OpenCL is **slower** than MNN-CPU and ORT-CPU
-  on a modern desktop CPU. The portability is the win, not the
-  speed.
-- **-** No MATLAB/Octave MEX targets yet for the MNN backend (the
-  `make mex-*` targets are ORT-only for now).
-- **-** Multi-thread CPU runs cap at 2 threads because numThread
-  >= 4 segfaults in `CPURaster` on SIAM-class workloads even with
-  the `int64` patches. See `tools/mnn_probe/patches/README.md`.
+- **+** Native-Conv3D fast path is competitive with ORT-CUDA on
+  modern NVIDIA hardware (~12-16 s/fold on RTX 5090, ~31 s/fold on
+  Titan V) and runs across vendors that ORT-CUDA doesn't cover.
+- **+** MATLAB / Octave MEX targets: `make openclmex`,
+  `make opencloct` (see `matlab/README.md`).
+- **-** Weights are ~2× larger than the fp16 ONNX bundle
+  (~540 MB / fold vs ~283 MB) — fp32 is required so the native
+  Conv3D path can address it directly without a runtime dequant.
+  fp16 weight storage in the .mnn schema is a known gap; see
+  `current_status_siamize_mnn.md` §2.3.
+- **-** Multi-thread CPU runs still cap at 2 threads because
+  `numThread >= 4` segfaults in MNN's `CPURaster` on SIAM-class
+  workloads. See `tools/mnn_probe/patches/README.md`.
+- **-** Pre-built int8 `mnn_i8a` weights (the older 2D-decomposed
+  bundle) are reachable via `-M /path/to/fold_X_int8.mnn` for
+  reference, but on NVIDIA OpenCL the BUFFER int kernels silently
+  produce zero output; only the IMAGE backend (no `--mnn-buffer`)
+  is correct, at ~9 minutes / fold on 5090.
 
 The MNN backend is an exclusive build-time alternative to ORT — you
 pick one with `-DSIAMIZE_BACKEND={ort,mnn}` and the binary ships

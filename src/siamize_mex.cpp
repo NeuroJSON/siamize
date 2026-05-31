@@ -252,8 +252,8 @@ std::array<float, 16> read_affine(const mxArray* a) {
  * MEX was compiled against -- the .m file is backend-agnostic. When
  * SIAMIZE_HAS_MNN is defined, the MNN runtime can't consume .onnx
  * files, so rewrite any incoming `fold_<N>_fp16.onnx` basename to
- * the MNN equivalent `fold_<N>_int8.mnn` and let resolve_model_path
- * fetch the right thing from doc=mnn_i8a. Anything else (absolute
+ * the MNN equivalent `fold_<N>_fp32.mnn` and let resolve_model_path
+ * fetch the right thing from doc=mnn_n3d. Anything else (absolute
  * paths, custom basenames) passes through unchanged.
  *
  * Inert when SIAMIZE_HAS_MNN is not defined.
@@ -261,7 +261,7 @@ std::array<float, 16> read_affine(const mxArray* a) {
 std::string rewrite_for_backend(const std::string& m) {
 #ifdef SIAMIZE_HAS_MNN
     static const std::string kOrtSuffix = "_fp16.onnx";
-    static const std::string kMnnSuffix = "_int8.mnn";
+    static const std::string kMnnSuffix = "_fp32.mnn";
 
     if (m.size() >= kOrtSuffix.size()
             && m.compare(m.size() - kOrtSuffix.size(),
@@ -610,7 +610,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     // Query mode: siamex('backend') returns the compiled-in backend
     // name ('ort' or 'mnn') as a MATLAB char array. The MATLAB
     // dispatcher (matlab/siamize.m) calls this once at startup so it
-    // can build the right fold filename (_fp16.onnx vs _int8.mnn) and
+    // can build the right fold filename (_fp16.onnx vs _fp32.mnn) and
     // pick the right WeightVariant for download.
     if (nrhs == 1 && mxIsChar(prhs[0])) {
         std::string q = mx_to_string(prhs[0]);
@@ -663,7 +663,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         // weight in from the default URL.
         if (models.empty()) {
 #ifdef SIAMIZE_HAS_MNN
-            models.push_back("fold_0_int8.mnn");
+            models.push_back("fold_0_fp32.mnn");
 #else
             models.push_back("fold_0_fp16.onnx");
 #endif
@@ -675,7 +675,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         siam::WeightVariant weight_variant_mex = siam::WeightVariant::DYNSHAPE;
 #ifdef SIAMIZE_HAS_MNN
         // SIAMIZE_BACKEND=mnn: the MNN runtime cannot consume .onnx, so
-        // the mnn_i8a bundle is the only valid pre-baked weight set.
+        // the mnn_n3d bundle is the only valid pre-baked weight set.
         weight_variant_mex = siam::WeightVariant::MNN;
 #elif defined(SIAMIZE_HAS_COREML)
 

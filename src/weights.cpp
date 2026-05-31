@@ -244,12 +244,13 @@ const char* variant_str(WeightVariant variant) {
             return "coreml";
 
         case WeightVariant::MNN:
-            // Server-side doc= name encodes the quantization preset
-            // shipped under that bundle. `i8a` = int8 asymmetric
-            // (per-block 64) weight quant. If a future bundle ever
-            // ships at a different precision, define a new variant
-            // rather than reusing this one.
-            return "mnn_i8a";
+            // Server-side doc= name carries the dynamic-shape native
+            // Conv3D MNN bundle. Individual files inside encode their
+            // precision via the basename suffix (fold_<N>_fp32.mnn,
+            // future: _fp16, _int8). Same convention as the ONNX
+            // `dynshape` doc, which holds fp16 vs fp32 ONNX side by
+            // side under one doc.
+            return "mnn_n3d";
 
         case WeightVariant::DYNSHAPE:
         default:
@@ -269,9 +270,10 @@ std::string default_weights_url(WeightVariant variant) {
     // doc=coreml:   fp16 fixed-shape ONNX with rank-5 InstanceNorm
     //   rewritten to rank-3 (see tools/onnx_export/rewrite_for_coreml.py)
     //   so Apple's mlcompilerd accepts it. Used by the CoreML EP.
-    // doc=mnn_i8a:  .mnn binaries (int8 asymmetric block-64 weight
-    //   quant). Used by SIAMIZE_BACKEND=mnn; ~143 MB / fold raw,
-    //   ~35 MB on the wire (gzipped).
+    // doc=mnn_n3d:  .mnn binaries for the native-Conv3D OpenCL path
+    //   (siam-opencl-conv3d branch of NeuroJSON/MNN). Dynamic-shape
+    //   D/H/W. Used by SIAMIZE_BACKEND=mnn; fold_<N>_fp32.mnn is
+    //   ~540 MB raw. Future fp16/int8 variants live in the same doc.
     return std::string(
                "https://neurojson.org/io/stat.cgi?action=get&db=siam_v03"
                "&doc=") + variant_str(variant) + "&file=";

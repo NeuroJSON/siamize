@@ -78,6 +78,11 @@ make cudamex                 # MATLAB MEX,  -DSIAMIZE_GPU=cuda
 # Apple Silicon Core ML (macOS only):
 make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
 make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
+
+# Vendor-neutral GPU via MNN OpenCL/Vulkan/Metal (recommended:
+# pair with MNN_REF=siam-opencl-conv3d for the native-Conv3D fast path):
+MNN_REF=siam-opencl-conv3d make opencloct                # Octave MEX, -DSIAMIZE_BACKEND=mnn
+MNN_REF=siam-opencl-conv3d make openclmex                # MATLAB MEX, -DSIAMIZE_BACKEND=mnn
 ```
 
 All `make` targets drop the `.mex*` next to `matlab/siamize.m` so the
@@ -90,14 +95,27 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_OCTAVE_MEX=ON  [-
 
 # MATLAB:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BUILD_MATLAB_MEX=ON  [-DSIAMIZE_GPU=cuda|coreml]
+
+# MNN-backed (vendor-neutral GPU); fetch_mnn.sh runs first via `make opencl*`:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BACKEND=mnn -DSIAMIZE_BUILD_OCTAVE_MEX=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_BACKEND=mnn -DSIAMIZE_BUILD_MATLAB_MEX=ON
 cmake --build build -j
 ```
 
-The MEX dlopens `libonnxruntime` from the ORT prebuilt under
-`third_party/onnxruntime/lib/` (Linux / macOS) or `bin/` (Windows).
-For deployment, drop `siamex.mex*`, `siamize.m`, the `jsonlab/`
-directory, and the matching `libonnxruntime.{so,dylib,dll}` into a
-single folder; users just `addpath()` it.
+The ORT-backed MEX dlopens `libonnxruntime` from the ORT prebuilt
+under `third_party/onnxruntime/lib/` (Linux / macOS) or `bin/`
+(Windows). For deployment, drop `siamex.mex*`, `siamize.m`, the
+`jsonlab/` directory, and the matching `libonnxruntime.{so,dylib,dll}`
+into a single folder; users just `addpath()` it.
+
+The MNN-backed MEX is identical from the .m caller's perspective —
+the wrapper queries `siamex('backend')` once at startup and
+auto-routes weight fetches to the right NeuroJSON doc
+(`doc=dynshape` → `fold_<N>_fp16.onnx` for ORT, `doc=mnn_n3d` →
+`fold_<N>_fp32.mnn` for MNN). Cache subdir differs accordingly
+(`models/` vs `models/mnn_n3d/`). For deployment, ship
+`siamex.mex*`, `siamize.m`, `jsonlab/`, and (unless built with
+`MNN_STATIC=1`) `libMNN.{so,dylib,dll}`.
 
 ### 3. Run
 
@@ -298,10 +316,14 @@ The `doc=` parameter selects the weight variant:
 |---|---|---|
 | `dynshape` (default) | CUDA / TensorRT / CPU EPs | fp16 ONNX with dynamic D / H / W axes |
 | `coreml` | Apple Core ML EP (auto-picked when `opts.compute='coreml'` and `opts.coreml_static_shapes=true`) | fp16 fixed-shape with rank-5 InstanceNorm rewritten to rank-3 (so Apple's mlcompilerd accepts it) |
+| `mnn_n3d` | MNN-backed MEX (`make openclmex` / `make opencloct`) | Dynamic-shape `.mnn` binaries for the native-Conv3D OpenCL path. Basenames `fold_<N>_fp32.mnn`; ~540 MB / fold raw, ~122 MB gzipped on the wire. |
 
-The variants are cached in separate subdirs (`models/` and
-`models/coreml/`) so a host that runs both CUDA and CoreML EPs holds
-both ONNX variants on disk without basename collisions.
+The variants are cached in separate subdirs (`models/`,
+`models/coreml/`, `models/mnn_n3d/`) so a host that runs more than
+one backend holds them on disk without basename collisions. The
+`siamex('backend')` query at MEX startup tells the wrapper which
+variant to expand digit shortcuts to and which `doc=` to fetch
+from — `siamize.m` is otherwise backend-agnostic.
 
 ## Layout
 

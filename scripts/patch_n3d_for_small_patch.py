@@ -30,28 +30,32 @@ script is a no-op.
 """
 import sys, os
 
-PATCH_BYTES = bytes([0xff] * 12)
+PATCH_BYTES = bytes([0xFF] * 12)
 EXPECTED_PRE = bytes.fromhex("0001000000010000c0000000")
 
 
 def patch_one(path: str) -> None:
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         data = bytearray(f.read())
     sz = len(data)
     start = sz - 56
-    end   = start + 12
-    cur   = bytes(data[start:end])
+    end = start + 12
+    cur = bytes(data[start:end])
     if cur == PATCH_BYTES:
         print(f"  {path}: already patched -- skipped")
         return
     if cur != EXPECTED_PRE:
-        print(f"  {path}: bytes at [{start},{end}) are {cur.hex()} -- not the expected "
-              f"pre-patch pattern {EXPECTED_PRE.hex()}; skipped")
+        print(
+            f"  {path}: bytes at [{start},{end}) are {cur.hex()} -- not the expected "
+            f"pre-patch pattern {EXPECTED_PRE.hex()}; skipped"
+        )
         return
     data[start:end] = PATCH_BYTES
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         f.write(data)
-    print(f"  {path}: patched [{start},{end}) {EXPECTED_PRE.hex()} -> {PATCH_BYTES.hex()}")
+    print(
+        f"  {path}: patched [{start},{end}) {EXPECTED_PRE.hex()} -> {PATCH_BYTES.hex()}"
+    )
 
 
 def main() -> None:
@@ -62,5 +66,5 @@ def main() -> None:
         patch_one(arg)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
