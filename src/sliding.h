@@ -99,19 +99,22 @@ struct EngineTuning {
                                           report fp16:0 (PoCL CPU-OpenCL, older
                                           GPUs without native fp16). CLI
                                           `--mnn-fp16`. */
-    bool mnn_buffer = false;         /**< MNN OpenCL BUFFER memory mode when true,
-                                          else IMAGE (MNN's default on NVIDIA /
-                                          AMD / Adreno; Mali / Intel default to
-                                          BUFFER regardless). Opt-in because the
-                                          BUFFER-mode `conv_2d_buf` kernel
-                                          source fails to compile on some
-                                          NVIDIA OpenCL drivers (CL build
-                                          error -9999). On PoCL CPU-OpenCL the
-                                          BUFFER path is ~5x faster than IMAGE
-                                          on SIAM-class 3D U-Nets; on real
-                                          NVIDIA the gain is uncertain and the
-                                          compile-failure risk is real. CLI
-                                          `--mnn-buffer`. */
+    bool mnn_buffer = true;          /**< MNN OpenCL BUFFER memory mode when true,
+                                          else IMAGE. Default ON because the
+                                          shipped doc=mnn_n3d / fold_X_fp32.mnn
+                                          weights require BUFFER for the native
+                                          Conv3DBufExecution path. Without
+                                          BUFFER, OpenCL has no creator for
+                                          OpType_Convolution3D and the runtime
+                                          decomposes Conv3D into the ~3300-op
+                                          geometry chain (Im2Col + Conv2D +
+                                          Raster x N) which is minutes-slow on
+                                          first JIT-compile. Opt out with
+                                          `--mnn-image` on driver/weight combos
+                                          where the BUFFER `conv_2d_buf` int
+                                          kernel fails (old `mnn_i8a` int8
+                                          weights on some NVIDIA drivers).
+                                          CLI `--mnn-buffer` / `--mnn-image`. */
     bool cpu_arena = true;           /**< true = ORT CPU memory arena + memory-pattern ON
                                           (default, fast path); false = both disabled
                                           (lower RSS, much slower) */

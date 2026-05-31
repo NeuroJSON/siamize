@@ -340,11 +340,18 @@ void usage(const char* exe) {
                  "                        GPUs; silently no-op on devices reporting fp16:0\n"
                  "                        (PoCL CPU-OpenCL, older GPUs without native fp16).\n"
                  "                        Typical: 1.5-2x speedup with small accuracy cost.\n"
-                 "      --mnn-buffer      force MNN's OpenCL BUFFER memory mode instead of\n"
-                 "                        IMAGE (NVIDIA / AMD / Adreno default). ~5x faster\n"
-                 "                        on PoCL CPU-OpenCL but may fail to JIT-compile on\n"
-                 "                        some NVIDIA drivers (CL build error -9999). Default\n"
-                 "                        off; opt in if your stack handles it.\n"
+                 "      --mnn-buffer      force MNN's OpenCL BUFFER memory mode. Default ON\n"
+                 "                        because the shipped doc=mnn_n3d / fold_X_fp32.mnn\n"
+                 "                        weights need BUFFER for the native Conv3DBufExecution\n"
+                 "                        path; without it OpenCL falls through to a ~3300-op\n"
+                 "                        geometry decomposition with multi-minute first-run\n"
+                 "                        compile time. Redundant when the flag is already on.\n"
+                 "      --mnn-image       opt OUT of BUFFER mode, force MNN's OpenCL IMAGE\n"
+                 "                        memory mode. Useful only on driver/weight combos\n"
+                 "                        where BUFFER's `conv_2d_buf` int kernel fails to\n"
+                 "                        JIT-compile (older NVIDIA + legacy mnn_i8a int8\n"
+                 "                        weights, CL build error -9999). Inference will be\n"
+                 "                        slow on the shipped mnn_n3d weights.\n"
 #else
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
@@ -757,12 +764,20 @@ int main(int argc, char** argv) {
             // back to fp32. Inert for the ORT backend.
             engine_tuning.mnn_fp16 = true;
         } else if (a == "--mnn-buffer") {
-            // MNN_GPU_MEMORY_BUFFER. NVIDIA / AMD / Adreno default to
-            // IMAGE; this flips to BUFFER. ~5x faster on PoCL CPU-
-            // OpenCL but on real NVIDIA the `conv_2d_buf` kernel
-            // source can fail to JIT-compile (CL build error -9999).
-            // Default off; opt in if your driver compiles it cleanly.
+            // MNN_GPU_MEMORY_BUFFER. Default ON because the shipped
+            // doc=mnn_n3d fp32 weights need BUFFER for the native
+            // Conv3DBufExecution path; without it the OpenCL backend
+            // has no Conv3D creator and decomposes into ~3300 small
+            // 2D ops. Accepting the flag explicitly is a no-op.
             engine_tuning.mnn_buffer = true;
+        } else if (a == "--mnn-image") {
+            // Opt OUT of BUFFER. Force MNN's OpenCL IMAGE memory mode.
+            // Useful for the legacy mnn_i8a int weights on NVIDIA
+            // drivers whose `conv_2d_buf` int kernel fails to JIT-
+            // compile (CL build error -9999). Inference is slow on
+            // the shipped mnn_n3d weights because Conv3D falls
+            // through to geometry decomposition.
+            engine_tuning.mnn_buffer = false;
         } else if (a == "-F" || a == "--format") {
             std::string s = need();
 
