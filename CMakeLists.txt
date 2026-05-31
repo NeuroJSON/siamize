@@ -266,6 +266,34 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
         endif()
     endif()
     target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_MNN)
+
+    # Optional GPU-side sliding accumulator (engine_mnn.cpp gpu_accum_*).
+    # It runs a custom OpenCL kernel on MNN's own command queue to fold each
+    # tile's logits into a device-resident full-volume buffer, eliminating the
+    # per-tile readback. That needs MNN's NON-public OpenCL backend headers,
+    # which fetch_mnn.sh does not stage under ${MNN_ROOT}/include. Point
+    # SIAMIZE_MNN_SRC at an MNN source tree (the SAME checkout the staged
+    # libMNN.a was built from, so the ABI matches) to compile it in; the
+    # symbols come from libMNN.a. Without it, gpu_accum_supported() returns
+    # false at runtime and the host accumulate path is used.
+    if(SIAMIZE_MNN_SRC)
+        if(NOT EXISTS ${SIAMIZE_MNN_SRC}/source/backend/opencl/core/OpenCLBackend.hpp)
+            message(FATAL_ERROR
+                "SIAMIZE_MNN_SRC=${SIAMIZE_MNN_SRC} is not an MNN source tree "
+                "(missing source/backend/opencl/core/OpenCLBackend.hpp).")
+        endif()
+        target_include_directories(siamize PRIVATE
+            ${SIAMIZE_MNN_SRC}/source/backend/opencl
+            ${SIAMIZE_MNN_SRC}/source
+            ${SIAMIZE_MNN_SRC}/3rd_party/OpenCLHeaders
+            ${SIAMIZE_MNN_SRC}/3rd_party/flatbuffers/include
+            ${SIAMIZE_MNN_SRC}/3rd_party/half
+            ${SIAMIZE_MNN_SRC}/schema/current
+        )
+        target_compile_definitions(siamize PRIVATE SIAMIZE_MNN_GPU_ACCUM)
+        message(STATUS
+            "siamize: GPU sliding accumulator ENABLED (MNN src: ${SIAMIZE_MNN_SRC})")
+    endif()
 endif()
 
 # zmat / miniz are C code inside a header; silence a few stylistic warnings

@@ -73,6 +73,49 @@ class Engine {
     /// Returns the model's declared num_classes (= logits channel count).
     /// Useful for sanity-checking the caller's `logits` buffer size.
     virtual int64_t num_classes() const = 0;
+
+    // ---- Optional GPU-side sliding accumulation -------------------------
+    //
+    // When gpu_accum_supported() is true, the driver uses this trio instead
+    // of run_tile() + host accumulation: each tile's logits are accumulated
+    // (Gaussian-weighted, at the tile's volume offset) directly into a
+    // device-resident full-volume buffer, so the big per-tile device->host
+    // readback (and the host accumulate loop) are replaced by a single
+    // per-fold readback in gpu_accum_finish(). Only the MNN OpenCL backend
+    // in fp32/BUFFER mode implements it; everything else keeps the host path.
+
+    /// True if this engine can accumulate on the GPU for the current config.
+    virtual bool gpu_accum_supported() const {
+        return false;
+    }
+
+    /// Allocate the device accumulator for one fold. `full` = (Z,Y,X) of the
+    /// padded volume; `gauss` = patch-sized (Z*Y*X, NCDHW row-major) weights.
+    /// Returns false if device allocation failed -- the driver then falls
+    /// back to the run_tile + host path for the whole run.
+    virtual bool gpu_accum_begin(const std::array<int64_t, 3>& full,
+                                 const float* gauss) {
+        (void)full;
+        (void)gauss;
+        return false;
+    }
+
+    /// Forward one tile and accumulate its Gaussian-weighted logits into the
+    /// device accumulator at offset (sz,sy,sx). No host readback.
+    virtual void gpu_accum_tile(const float* tile,
+                                int64_t sz, int64_t sy, int64_t sx) {
+        (void)tile;
+        (void)sz;
+        (void)sy;
+        (void)sx;
+    }
+
+    /// Add this fold's accumulated weighted logits into the host buffer
+    /// `logits_out` (num_classes * Z*Y*X floats, channel-major), then release
+    /// the device accumulator.
+    virtual void gpu_accum_finish(float* logits_out) {
+        (void)logits_out;
+    }
 };
 
 /**
