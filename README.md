@@ -415,26 +415,28 @@ What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
    [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Two relevant
-   branches:
-   - **`siam-opencl-conv3d` (recommended)** — `v3.5-int64fix` plus a
-     native-Conv3D / native-Deconv3D OpenCL BUFFER path, output
-     tiling, and a MatMul LWS fix. Roughly **17× faster** Conv3D
-     than the geometry-decomposed default on SIAM patches.
-   - **`v3.5-int64fix` (current default)** — a 12-file `int64`-overflow
-     audit on top of upstream `master`. Without it, upstream MNN
-     overflows `int32` byte offsets on tensors larger than 2 GB,
-     which happens routinely after Conv3D decomposes into 2D ops
-     (`Convolution3DTurn2D`); the network then silently produces
-     garbage logits. This branch is the safe baseline but uses the
-     slow decomposed Conv3D path.
+   refs:
+   - **`v3.5-opencl-conv3d` (default)** — the production ref:
+     `v3.5-int64fix` plus a native-Conv3D / native-Deconv3D OpenCL
+     BUFFER path, output tiling, a MatMul LWS fix, and the
+     `siam_mnn_*_cl_error` diagnostics. Roughly **17× faster** Conv3D
+     than the geometry-decomposed path on SIAM patches. (Tagged at the
+     head of the `siam-opencl-conv3d` branch.)
+   - **`v3.5-int64fix`** — a 12-file `int64`-overflow audit on top of
+     upstream `master`. Without it, upstream MNN overflows `int32` byte
+     offsets on tensors larger than 2 GB, which happens routinely after
+     Conv3D decomposes into 2D ops (`Convolution3DTurn2D`); the network
+     then silently produces garbage logits. This is the safe baseline
+     but uses the slow decomposed Conv3D path — pin it only if you
+     specifically need the minimal patch set.
 2. Configures with `-DMNN_OPENCL=ON -DMNN_SEP_BUILD=OFF` so the
    OpenCL backend folds into a single `libMNN.{so,a}`.
 3. Stages headers + library at `third_party/mnn/{include,lib}/`.
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-int64fix`). For the fast
-path, set `MNN_REF=siam-opencl-conv3d` as shown above.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-opencl-conv3d`); e.g.
+`MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
 pass `MNN_STATIC=1` on the make line:

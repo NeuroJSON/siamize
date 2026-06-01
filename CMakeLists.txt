@@ -269,12 +269,12 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
 
     # Probe whether the linked libMNN carries the siam-opencl-conv3d CL-error
     # accessors (siam_mnn_*_cl_error, defined in OpenCLWrapper.cpp). engine_mnn
-    # uses them to abort on a swallowed OpenCL OOM; a stock MNN (e.g. the
-    # v3.5-int64fix tag the opencl CI job builds against) lacks them, so we must
-    # NOT reference them unconditionally or the link fails. Define
-    # SIAMIZE_MNN_HAS_CLERR only when the symbol is actually present; otherwise
-    # engine_mnn substitutes no-op fallbacks. Uses nm on UNIX; on Windows we
-    # assume the patched MNN (users build it themselves) to keep prior behavior.
+    # uses them to abort on a swallowed OpenCL OOM. The default fetch ref
+    # (v3.5-opencl-conv3d) has them, but a minimal MNN (e.g. the v3.5-int64fix
+    # subset) does not, so we must NOT reference them unconditionally or the
+    # link fails. Define SIAMIZE_MNN_HAS_CLERR only when the symbol is actually
+    # present; otherwise engine_mnn substitutes no-op fallbacks. Uses nm on
+    # UNIX; on Windows we assume the patched MNN (users build it themselves).
     set(_mnn_probe_lib "")
     if(MNN_STATIC_LIB)
         set(_mnn_probe_lib "${MNN_STATIC_LIB}")

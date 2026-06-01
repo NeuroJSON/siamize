@@ -481,7 +481,7 @@ jobs:
           path: third_party/mnn
           # Key off the script that drives the build + the ref it
           # downloads. Bump either to invalidate the cache.
-          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-int64fix
+          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d
 
       - name: Fetch + build patched MNN (static)
         # First run: 15-20 min compile. Subsequent runs hit the cache
