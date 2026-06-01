@@ -267,6 +267,45 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     endif()
     target_compile_definitions(siamize PRIVATE SIAMIZE_HAS_MNN)
 
+    # Probe whether the linked libMNN carries the siam-opencl-conv3d CL-error
+    # accessors (siam_mnn_*_cl_error, defined in OpenCLWrapper.cpp). engine_mnn
+    # uses them to abort on a swallowed OpenCL OOM; a stock MNN (e.g. the
+    # v3.5-int64fix tag the opencl CI job builds against) lacks them, so we must
+    # NOT reference them unconditionally or the link fails. Define
+    # SIAMIZE_MNN_HAS_CLERR only when the symbol is actually present; otherwise
+    # engine_mnn substitutes no-op fallbacks. Uses nm on UNIX; on Windows we
+    # assume the patched MNN (users build it themselves) to keep prior behavior.
+    set(_mnn_probe_lib "")
+    if(MNN_STATIC_LIB)
+        set(_mnn_probe_lib "${MNN_STATIC_LIB}")
+    elseif(EXISTS ${MNN_LIB_DIR}/libMNN.so)
+        set(_mnn_probe_lib "${MNN_LIB_DIR}/libMNN.so")
+    elseif(EXISTS ${MNN_LIB_DIR}/libMNN.dylib)
+        set(_mnn_probe_lib "${MNN_LIB_DIR}/libMNN.dylib")
+    endif()
+    if(WIN32)
+        target_compile_definitions(siamize PRIVATE SIAMIZE_MNN_HAS_CLERR)
+    elseif(_mnn_probe_lib)
+        find_program(NM_EXECUTABLE nm)
+        if(NM_EXECUTABLE)
+            # .so may be dynamic-stripped: query dynamic symbols too (-D).
+            execute_process(COMMAND ${NM_EXECUTABLE} ${_mnn_probe_lib}
+                            OUTPUT_VARIABLE _mnn_syms ERROR_QUIET)
+            execute_process(COMMAND ${NM_EXECUTABLE} -D ${_mnn_probe_lib}
+                            OUTPUT_VARIABLE _mnn_dynsyms ERROR_QUIET)
+            string(FIND "${_mnn_syms}${_mnn_dynsyms}" "siam_mnn_get_last_cl_error" _clerr_pos)
+            if(NOT _clerr_pos EQUAL -1)
+                target_compile_definitions(siamize PRIVATE SIAMIZE_MNN_HAS_CLERR)
+                message(STATUS "siamize: MNN provides CL-error accessors (OOM abort enabled)")
+            else()
+                message(STATUS "siamize: MNN lacks CL-error accessors -- swallowed-OOM abort disabled (stock MNN)")
+            endif()
+        else()
+            # No nm available: assume present to preserve the safety check.
+            target_compile_definitions(siamize PRIVATE SIAMIZE_MNN_HAS_CLERR)
+        endif()
+    endif()
+
     # Optional GPU-side sliding accumulator (engine_mnn.cpp gpu_accum_*).
     # It runs a custom OpenCL kernel on MNN's own command queue to fold each
     # tile's logits into a device-resident full-volume buffer, eliminating the

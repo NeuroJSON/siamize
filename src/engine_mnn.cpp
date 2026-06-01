@@ -683,11 +683,25 @@ MnnEngine::~MnnEngine() {
 // added to NeuroJSON/MNN's siam-opencl-conv3d branch. Defined in
 // MNN's source/backend/opencl/core/runtime/OpenCLWrapper.cpp. We
 // forward-declare here so we don't need to vendor MNN's internal
-// OpenCLWrapper.hpp into siamize's include path. On an upstream MNN
-// build without our patch, the linker will fail loudly -- in that
-// case the user should pin MNN_REF=siam-opencl-conv3d in fetch_mnn.sh.
+// OpenCLWrapper.hpp into siamize's include path.
+//
+// These are an optional diagnostic: they let run_tile detect a swallowed
+// OpenCL OOM (CL_MEM_OBJECT_ALLOCATION_FAILURE) and abort instead of writing
+// a corrupt labelmap. A stock MNN (e.g. the v3.5-int64fix tag) doesn't carry
+// the patch, so the symbols would be undefined at link time. CMake probes the
+// linked libMNN for them and defines SIAMIZE_MNN_HAS_CLERR when present; when
+// absent we substitute no-op fallbacks so siamize still links (the OOM check
+// just degrades to off -- the native-Conv3D fast path needs the patched MNN
+// anyway, so this only affects stock-MNN smoke builds like the opencl CI job).
+#ifdef SIAMIZE_MNN_HAS_CLERR
 extern "C" int  siam_mnn_get_last_cl_error();
 extern "C" void siam_mnn_clear_last_cl_error();
+#else
+static inline int  siam_mnn_get_last_cl_error() {
+    return 0;
+}
+static inline void siam_mnn_clear_last_cl_error() {}
+#endif
 
 void MnnEngine::run_tile(const float* tile, float* logits) {
     // Reset MNN's per-thread CL-error tracker before the call so we
