@@ -11,9 +11,11 @@ intermediate tensors).
 
 Threading
 ---------
-numThread is capped at 2 on Linux x86_64 because numThread>=4 crashes
-in CPURaster::onResize::lambda#4 on this workload (see patches/README.md).
-The cap is a workaround until the upstream MT bug is fixed.
+numThread (CPU backend) is passed straight through from intra_threads --
+no cap. An earlier 2-thread cap worked around a CPURaster::onResize MT
+segfault on the geometry-decomposed Conv3D path; the native Conv3D /
+Deconv3D executors bypass CPURaster, so the cap was removed. For GPU
+backends numThread is reused as the MNN_GPU_* mode bitfield (see below).
 
 Device support
 --------------
