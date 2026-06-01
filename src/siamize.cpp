@@ -208,16 +208,68 @@ long available_ram_mb() {
     \return  free VRAM in MiB on the requested GPU, or 0 if unknown
 */
 long available_vram_mb(int gpuid = 0) {
+    // Resolve the nvidia-smi device id. `nvidia-smi --id=N` indexes GPUs in
+    // physical/NVML order and IGNORES CUDA_VISIBLE_DEVICES, whereas the
+    // compute runtime (NVIDIA OpenCL ICD / CUDA) HONORS it and renumbers the
+    // visible devices. So when the user masks devices with
+    // CUDA_VISIBLE_DEVICES, our logical `gpuid` (an index into the masked
+    // list) must be mapped back to the physical id/UUID nvidia-smi expects --
+    // otherwise we probe the wrong card (e.g. `CUDA_VISIBLE_DEVICES=1 -G 0`
+    // runs on physical GPU 1 but would query physical GPU 0, see its free
+    // VRAM, and skip the VRAM-tight auto-shrink -> OOM). Tokens may be integer
+    // indices or GPU-UUIDs; both are valid `--id` arguments.
+    std::string dev_id = std::to_string(gpuid);
+
+    if (const char* cvd = std::getenv("CUDA_VISIBLE_DEVICES"); cvd && *cvd) {
+        std::vector<std::string> toks;
+        std::string cur;
+
+        for (const char* p = cvd;; ++p) {
+            if (*p == ',' || *p == '\0') {
+                if (!cur.empty()) {
+                    toks.push_back(cur);
+                }
+
+                cur.clear();
+
+                if (*p == '\0') {
+                    break;
+                }
+            } else if (*p != ' ') {
+                cur += *p;
+            }
+        }
+
+        if (gpuid >= 0 && gpuid < static_cast<int>(toks.size())) {
+            // Only digits / letters / '-' (UUID) are valid; reject anything
+            // else so a hostile env var can't inject into the popen command.
+            const std::string& t = toks[gpuid];
+            bool safe = !t.empty();
+
+            for (char c : t) {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') || c == '-')) {
+                    safe = false;
+                    break;
+                }
+            }
+
+            if (safe) {
+                dev_id = t;
+            }
+        }
+    }
+
     char cmd[256];
 #ifdef _WIN32
     std::snprintf(cmd, sizeof(cmd),
-                  "nvidia-smi --id=%d --query-gpu=memory.free "
-                  "--format=csv,noheader,nounits 2>NUL", gpuid);
+                  "nvidia-smi --id=%s --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>NUL", dev_id.c_str());
     FILE* pipe = _popen(cmd, "r");
 #else
     std::snprintf(cmd, sizeof(cmd),
-                  "nvidia-smi --id=%d --query-gpu=memory.free "
-                  "--format=csv,noheader,nounits 2>/dev/null", gpuid);
+                  "nvidia-smi --id=%s --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>/dev/null", dev_id.c_str());
     FILE* pipe = popen(cmd, "r");
 #endif
 
@@ -969,11 +1021,15 @@ int main(int argc, char** argv) {
     //   128x128x96  ~1.5-2 GB                            100
     //
     // We avoid the 128x128x96 tier for vanilla ram_tight / vram_tight
-    // because going below 192x192x128 triples the tile count and
-    // shifts the Gaussian-blend pattern enough to cost ~0.05 Dice
+    // because going below 192x192x128 ~3.7x's the tile count (27 -> 100)
+    // and shifts the Gaussian-blend pattern enough to cost ~0.05 Dice
     // vs the canonical patch -- only worth it on really tight GPUs.
-    // Threshold for the very-tight branch: VRAM < 8 GB AND a GPU
-    // device is actually being used.
+    //
+    // Very-tight threshold: VRAM < 6 GB. Measured MNN-OpenCL peak VRAM at
+    // 192x192x128 is ~4.3 GB (RTX 2080 SUPER), so an 8 GB card fits the 192
+    // tier comfortably and must NOT be pushed down to 128 (which would 3.7x
+    // its tile count for nothing). Only cards that can't safely hold the ~5 GB
+    // upper estimate of the 192 tier drop to 128.
     {
         bool patch_shrink_allowed = lowmem_mode;
 #ifdef SIAMIZE_HAS_MNN
@@ -981,7 +1037,7 @@ int main(int argc, char** argv) {
 #endif
         const bool vram_very_tight = gpu_active
                                      && avail_vram_mb > 0
-                                     && avail_vram_mb < 8 * 1024;
+                                     && avail_vram_mb < 6 * 1024;
 
         if (patch_shrink_allowed && !patch_set && (ram_tight || vram_tight)) {
             if (vram_very_tight) {
