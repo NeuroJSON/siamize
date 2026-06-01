@@ -119,10 +119,11 @@ jobs:
         # Pulls the same dynamic-shape ONNX export that weights.cpp's
         # default_weights_url() serves to end users, so CI exercises
         # the canonical inference path (variable patch sizes via
-        # dynamic_axes={D,H,W}). The 14 GB GHA cgroup can't fit the
-        # default 256x256x192 patch with the dynamic-shape memory
-        # profile, so the run step below uses --lowmem to drop the
-        # patch to 192x192x128 (27 tiles).
+        # dynamic_axes={D,H,W}). ORT's CPU EP fits the default
+        # 256x256x192 patch at ~11-12 GB on the ~14 GB GHA cgroup with
+        # --no-arena, so the run step below keeps the default patch
+        # (8 tiles) -- no --lowmem / -P needed (unlike the MNN-CPU job,
+        # whose workspace allocation forces 192x192x128 / 27 tiles).
         run: |
           URL='https://neurojson.org/io/stat.cgi?action=get&db=siam_v03&doc=dynshape&size=95360591&file=fold_0_fp16.onnx.gz'
           mkdir -p models
