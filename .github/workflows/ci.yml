@@ -533,8 +533,10 @@ jobs:
         # int8-quantized .mnn weight auto-downloads from doc=mnn_i8a
         # (~35 MB gzipped -> 143 MB on disk). MNN's CPU forward type
         # is the safe choice on GHA -- no OpenCL ICD to depend on.
-        # numThread capped at 2 in MnnEngine to avoid the known
-        # CPURaster MT crash on SIAM-class workloads.
+        # Threads: auto (no -t) -> min(hardware_concurrency, 8); on the
+        # 4-vCPU runner that is 4. The old -t 2 worked around a CPURaster
+        # MT segfault that the native-Conv3D path (this -M 0 / n3d model)
+        # no longer hits. If a runner segfaults at >2 threads, restore -t 2.
         #
         # -P 192x192x128 (instead of the default 256x256x192) so
         # MNN's resizeSession workspace allocation stays under the
@@ -551,7 +553,6 @@ jobs:
               -o pred_ci.nii.gz \
               -M 0 \
               -c cpu \
-              -t 2 \
               -P 192x192x128 2>&1 | tee siamize.log
 
       - name: Verify MNN backend was used
