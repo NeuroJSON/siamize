@@ -221,7 +221,7 @@ the *first* missing file — e.g.:
 [cuda]     unavailable (...); using CPU
 ```
 
-Means cuBLAS isn't on `LD_LIBRARY_PATH`. The CUDA EP plugin loaded;
+This means cuBLAS isn't on `LD_LIBRARY_PATH`. The CUDA EP plugin loaded;
 the *transitive* cuBLAS dependency didn't. Add cuBLAS's directory to
 `LD_LIBRARY_PATH` (per the pip-wheels or `CUDA_HOME` one-liners
 above) and re-run. The probe will then surface the *next* missing
@@ -621,7 +621,7 @@ fp32 payload with a JData `_ArrayShuffle_=4` annotation
 (blosc2-style per-byte plane regrouping before zlib), giving
 1.5-2.5× smaller files at no decode cost on JData-spec-compliant
 readers (siamize itself; future jsonlab versions). Default OFF for
-interop with current jsonlab which doesn't yet implement the
+interop with current jsonlab, which doesn't yet implement the
 unshuffle.
 
 ### 4. Regression test (optional)
@@ -816,7 +816,7 @@ make mex-test
 ```
 
 30 unit tests that stub the underlying MEX so they run in under a
-second and require no ORT or weight files. Covers argument-form
+second and require no ORT or weight files. They cover argument-form
 dispatch, default-affine math, model-spec parsing, file-in/file-out
 across the four extensions, source-header preservation, and the error
 paths. CI runs the same suite on both Octave and MATLAB legs.
