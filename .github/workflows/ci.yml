@@ -211,16 +211,21 @@ jobs:
             kind: octave
             cmake_flag: -DSIAMIZE_BUILD_OCTAVE_MEX=ON
             mex_file: matlab/siamex.mex
+            mnn_mex: true
           - label: linux-matlab
             os: ubuntu-22.04
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
             mex_file: matlab/siamex.mexa64
+            mnn_mex: true
           - label: windows-matlab
             os: windows-latest
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
             mex_file: matlab/siamex.mexw64
+            # MNN/OpenCL MEX is built only on the Linux legs for now (the
+            # MNN-backend CI path is Linux-proven; see cpp-build-opencl).
+            mnn_mex: false
 
     steps:
       - uses: actions/checkout@v4
@@ -337,6 +342,98 @@ jobs:
         with:
           name: ${{ env.BUNDLE }}
           path: ${{ env.BUNDLE }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # --- MNN/OpenCL MEX (vendor-neutral GPU backend) --------------------
+      # Build the same MEX wrapper against the MNN backend and upload it as a
+      # separate artifact. It writes to the same matlab/siamex.mex* path as the
+      # ORT MEX above, so this runs AFTER the ORT bundle is packaged + uploaded.
+      # Linux legs only (matrix.mnn_mex); the OpenCL ICD is dlopen'd at runtime
+      # so the smoke-load needs no GPU. Static libMNN.a is embedded into the
+      # MEX (no libMNN.so to ship), matching `make openclmex` / `opencloct`.
+      - name: Cache MNN stage (libMNN.a + headers)
+        if: matrix.mnn_mex
+        id: mnn-mex-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/mnn
+          # Per-leg key: the MATLAB leg builds MNN with GCC 10 (to match
+          # MATLAB's libstdc++), the Octave leg with the runner default, so
+          # their staged libMNN.a are not interchangeable.
+          key: mnn-mex-${{ matrix.label }}-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d
+
+      - name: Fetch + build patched MNN (static)
+        # First run: ~15-20 min compile; later runs hit the cache above.
+        if: matrix.mnn_mex && steps.mnn-mex-cache.outputs.cache-hit != 'true'
+        env:
+          MNN_STATIC: "1"
+          CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
+          CXX: ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'g++-10' || '' }}
+        run: scripts/fetch_mnn.sh
+
+      - name: Build MNN/OpenCL MEX
+        if: matrix.mnn_mex
+        env:
+          CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
+          CXX: ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'g++-10' || '' }}
+        run: |
+          cmake -S . -B build-mnn -DCMAKE_BUILD_TYPE=Release \
+              -DSIAMIZE_BACKEND=mnn ${{ matrix.cmake_flag }}
+          cmake --build build-mnn --config Release --parallel
+
+      - name: Verify MNN MEX exists
+        if: matrix.mnn_mex
+        run: |
+          ls -la "${{ matrix.mex_file }}"
+          test -s "${{ matrix.mex_file }}"
+
+      - name: Smoke-load MNN MEX (Octave)
+        if: matrix.mnn_mex && matrix.kind == 'octave' && runner.os == 'Linux'
+        run: |
+          octave-cli --no-gui --eval "addpath('matlab'); \
+            try; siamex(); catch err; \
+              if isempty(strfind(err.message, 'Usage:')); error('unexpected: %s', err.message); end; \
+              fprintf('MNN MEX loaded and reached argument check\\n'); \
+            end" 2>&1 | tee mex-mnn.log
+          grep -q "MNN MEX loaded" mex-mnn.log
+
+      - name: Smoke-load MNN MEX (MATLAB)
+        if: matrix.mnn_mex && matrix.kind == 'matlab'
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(fullfile(pwd, 'matlab'));
+            try
+              siamex();
+              error('siamex() with no args should have thrown');
+            catch err
+              if isempty(strfind(err.message, 'Usage:'))
+                error('unexpected: %s', err.message);
+              end
+              fprintf('MNN MEX loaded and reached argument check\n');
+            end
+
+      - name: Package MNN/OpenCL MEX
+        if: matrix.mnn_mex
+        shell: bash
+        run: |
+          BASE=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              VER="${GITHUB_REF_NAME#v}"
+          else
+              VER="${BASE}-${GITHUB_SHA:0:7}"
+          fi
+          MNN_BUNDLE="siamex-opencl-${VER}-${{ matrix.label }}"
+          scripts/package.sh openclmex "$MNN_BUNDLE"
+          echo "MNN_BUNDLE=$MNN_BUNDLE" >> "$GITHUB_ENV"
+
+      - name: Upload MNN/OpenCL MEX bundle
+        if: matrix.mnn_mex
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MNN_BUNDLE }}
+          path: ${{ env.MNN_BUNDLE }}.zip
           if-no-files-found: error
           retention-days: 14
 
