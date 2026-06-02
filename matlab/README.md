@@ -4,7 +4,7 @@
 
 * **Copyright**: (C) Qianqian Fang (2026) \<q.fang at neu.edu>
 * **License**: Apache License, Version 2.0
-* **Version**: 0.1.0
+* **Version**: 0.2.0
 * **GitHub**: [https://github.com/NeuroJSON/siamize](https://github.com/NeuroJSON/siamize)
 * **Parent toolbox**: [siamize](../README.md) — native C++/ONNX port of SIAM v0.3
 

@@ -1,0 +1,23 @@
+# Keep the Docker build context small. ORT and any third-party deps are
+# re-fetched inside the builder stage; weights download at runtime.
+.git
+.github
+build/
+build-*/
+third_party/
+models/
+matlab/
+tests/
+*.mnn
+*.onnx
+*.nii
+*.nii.gz
+*.jnii
+*.bnii
+output.*
+*.json
+*.png
+*.zip
+*.gz
+# large session/transcript logs at the repo root
+2026-*.txt

@@ -534,7 +534,7 @@ std::string expand_fold_shortcut(const std::string& tok) {
 */
 void usage(const char* exe) {
     std::fprintf(stderr,
-                 "[siamize]  v0.1.0  native C++/ONNX port of SIAM v0.3 brain segmentation\n"
+                 "[siamize]  v0.2.0  native C++/ONNX port of SIAM v0.3 brain segmentation\n"
                  "           https://github.com/NeuroJSON/siamize\n"
                  "\n"
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
@@ -1414,7 +1414,7 @@ int main(int argc, char** argv) {
     // Verbose header line: prints once at the start of the run so the
     // following [tag] lines have an unmistakable anchor at the top.
     siam::log_tag("siamize",
-                  "v0.1.0  device=%s  threads=%d%s  format=%s%s%s%s%s%s%s",
+                  "v0.2.0  device=%s  threads=%d%s  format=%s%s%s%s%s%s%s",
                   device.c_str(), threads,
                   threads_auto ? " (auto)" : "",
                   out_format.c_str(),

@@ -832,7 +832,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
         if (opts.verbose) {
             siam::log_tag("siamize",
-                          "v0.1.0  device=%s  threads=%d%s%s%s%s",
+                          "v0.2.0  device=%s  threads=%d%s%s%s%s",
                           opts.device.c_str(), opts.threads,
                           threads_auto ? " (auto)" : "",
                           opts.tpm ? "  tpm" : "",

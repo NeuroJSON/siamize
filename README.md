@@ -4,9 +4,11 @@
 
 * **Copyright**: (C) Qianqian Fang (2026) \<q.fang at neu.edu>
 * **License**: Apache License, Version 2.0
-* **Version**: 0.1.0
+* **Version**: 0.2.0
 * **GitHub**: [https://github.com/NeuroJSON/siamize](https://github.com/NeuroJSON/siamize)
 * **Upstream**: [https://github.com/romainVala/SIAM](https://github.com/romainVala/SIAM) — SIAM v0.3 by Valabregue, Khemir, Bardinet, Rousseau, Auzias & Dorent (2026), [arXiv:2605.02737](https://arxiv.org/abs/2605.02737)
+
+**Acknowledgement:** This project uses resources and data formats developed as part of the [NeuroJSON project](https://neurojson.org) supported by US National Institute of Health (NIH) grant [U24-NS124027](https://reporter.nih.gov/project-details/10308329).
 
 ---
 
@@ -15,6 +17,7 @@
 - [Overview](#overview)
 - [Quickstart](#quickstart)
   - [Optional: MNN backend (vendor-neutral GPU)](#optional-mnn-backend-vendor-neutral-gpu)
+- [Docker](#docker)
 - [MATLAB / GNU Octave bindings](#matlab--gnu-octave-bindings)
 - [Layers, in dependency order](#layers-in-dependency-order)
 - [Footprint](#footprint)
@@ -461,21 +464,22 @@ MNN-relevant CLI flags:
 | Flag | Default | Effect |
 |---|---|---|
 | `-c {auto\|cpu\|opencl\|vulkan\|metal}` | `auto` | MNN forward type. `auto` picks OpenCL when MNN was built with `MNN_OPENCL=ON`, else CPU. `vulkan` / `metal` require the corresponding MNN build flag. |
-| `-G N\|P:D` | `0` | OpenCL/Vulkan device. `-G N` = device `N` on platform 0. `-G P:D` = platform `P`, device `D` (needed on multi-ICD hosts where the GPU lives on a non-zero platform — e.g. PoCL on platform 0 + NVIDIA on platform 1). List with `clinfo -l`. **Known issue:** the `:D` parsing routes through `BackendConfig::mode`, which MNN interprets as a bitfield rather than a device index — use `CUDA_VISIBLE_DEVICES=N` to pin a specific NVIDIA GPU instead. |
-| `--mnn-buffer` | off (IMAGE) | Switches MNN's OpenCL backend from `image2d_t` to `cl_mem` BUFFER mode. Required for the native-Conv3D fast path on the `siam-opencl-conv3d` branch. Skip this flag if you see `cl_*` build errors on your driver (e.g. some NVIDIA driver releases fail to compile `conv_2d_buf` int kernels). |
+| `-G N` / `-G P:D` | `0` | OpenCL/Vulkan device. `-G N` is a **1-based flat index** over every OpenCL device across all platforms in `clinfo -l` order (CPU-OpenCL / PoCL included), so `-G 1` reaches a GPU on a non-zero platform without the `P:D` form; `-G 0` = auto (first GPU). Run `--list-gpu` to see the index→device table. Selecting a non-GPU device routes to the (multithreaded) CPU backend with a warning. `-G P:D` is a raw MNN platform/device escape hatch (P is MNN's post-swap order — NVIDIA/AMD first — not `clinfo`). MNN's `MNNDeviceContext` device selection is wired up correctly (it honors the chosen platform+device, including platform 0). |
+| `--list-gpu` | — | List all OpenCL devices with their (1-based) `-G` index, then exit. |
+| `--mnn-buffer` | **on (BUFFER)** | MNN OpenCL memory layout: `cl_mem` BUFFER (default) vs `image2d_t`. BUFFER is required for the shipped native-Conv3D fp32 weights (`mnn_n3d`); without it OpenCL falls through to a slow ~3300-op geometry decomposition. Use `--mnn-image` to force IMAGE mode (only needed for the legacy int8 `mnn_i8a` weights on drivers whose `conv_2d_buf` int kernel fails to JIT-compile). |
 | `--mnn-fp16` | off | Maps to MNN's `Precision_Normal` — fp16 storage for activations + fp32 compute. Cuts VRAM ~2× on the MNN-OpenCL path. No FLOPs speedup on NVIDIA OpenCL (no Tensor Core access from OpenCL); useful win on Mali / Adreno / Intel Arc. |
 
 MNN-relevant environment variables:
 
 | Env var | Values | Effect |
 |---|---|---|
-| `SIAMIZE_TUNE` | `FAST` (default) / `WIDE` / `NORMAL` / `HEAVY` / `NONE` | OpenCL kernel auto-tuning level. `FAST` is the production default — ~5 s cold cache on 5090, ~13 s on Titan V, ~26 s on 2080 SUPER. `WIDE` can pick faster LWS on Mali / Adreno but has been observed to choose **180 s** kernels on small patches with NVIDIA drivers. Tuned LWS values cache under `~/.cache/siamize/mnn-tune/opencl-fp32.cache`. |
+| `SIAMIZE_TUNE` | `FAST` (default) / `WIDE` / `NORMAL` / `HEAVY` / `NONE` | OpenCL kernel auto-tuning level. `FAST` is the production default — ~5 s cold cache on 5090, ~13 s on Titan V, ~26 s on 2080 SUPER. `WIDE` can pick faster LWS on Mali / Adreno but has been observed to choose **180 s** kernels on small patches with NVIDIA drivers. Tuned LWS values cache per device + model under `~/.cache/siamize/mnn-tune/opencl-fp32-<MB>m-p<plat>g<dev>.cache`. |
 | `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |
 
 Weights are served as pre-converted `.mnn` binaries from
 `doc=mnn_n3d` on NeuroJSON. Files are dynamic-shape and run on the
 native-Conv3D OpenCL path (built against NeuroJSON/MNN's
-`siam-opencl-conv3d` branch). The `-M 0` shortcut expands to
+`v3.5-opencl-conv3d` tag). The `-M 0` shortcut expands to
 `fold_0_fp32.mnn` on this build and the resolver caches under
 `~/.cache/siamize/models/mnn_n3d/`. Each fp32 fold is ~540 MB
 uncompressed (~122 MB gzipped on the wire); the full 5-fold
@@ -487,7 +491,7 @@ Accuracy vs the fp16 ONNX reference on `tests/sub-01_T1w.nii.gz`:
 | Backend | Argmax match | Mean foreground Dice |
 |---|---|---|
 | MNN-CPU (fp32 weights `.mnn`) | 99.39% | 0.9862 |
-| MNN-OpenCL (native Conv3D, fp32, `--mnn-buffer`) | 99.39% | 0.9862 *(bit-identical to MNN-CPU)* |
+| MNN-OpenCL (native Conv3D, fp32, `--mnn-buffer`) | 99.39% | 0.9862 |
 | MNN-OpenCL (native Conv3D, IMAGE) | 99.39% | 0.9862 |
 
 Trade-offs vs the ORT path:
@@ -505,9 +509,11 @@ Trade-offs vs the ORT path:
   Conv3D path can address it directly without a runtime dequant.
   fp16 weight storage in the .mnn schema is a known gap; see
   `current_status_siamize_mnn.md` §2.3.
-- **-** Multi-thread CPU runs still cap at 2 threads because
-  `numThread >= 4` segfaults in MNN's `CPURaster` on SIAM-class
-  workloads. See `tools/mnn_probe/patches/README.md`.
+- **~** CPU runs are multithreaded — `-t 0` auto-selects up to 32
+  (MNN's thread-pool cap; the ORT path caps at 16). The native
+  Conv3D / Deconv3D executors bypass `CPURaster`, retiring the old
+  `numThread >= 4` segfault. MNN-CPU is ~2× slower and lighter than
+  ORT's MLAS CPU EP, and matches it to within a voxel.
 - **-** Pre-built int8 `mnn_i8a` weights (the older 2D-decomposed
   bundle) are reachable via `-M /path/to/fold_X_int8.mnn` for
   reference, but on NVIDIA OpenCL the BUFFER int kernels silently
@@ -534,10 +540,11 @@ build/siamize -i input.nii.gz -o output.nii.gz \
     -M models/fold_0_fp16.onnx,models/fold_1_fp16.onnx
 ```
 
-`-t/--thread` defaults to `0` = `min(hardware_concurrency, 16)`. The
-16-thread cap is empirical (see the "CPU thread tuning" section below
-for the Threadripper measurements that motivated it). Pass an explicit
-`-t N` to override.
+`-t/--thread` defaults to `0` = auto. The ORT build caps the auto value
+at `min(hardware_concurrency, 16)` (empirical — see the "CPU thread
+tuning" section below for the Threadripper measurements that motivated
+it); the MNN build caps at `min(hardware_concurrency, 32)` (MNN's
+thread-pool ceiling). Pass an explicit `-t N` to override.
 
 #### Useful flags (CLI quick reference)
 
@@ -546,8 +553,9 @@ The most-used options beyond `-i / -o / -M / -c`:
 | Flag | Effect |
 |---|---|
 | `-v / --verbose` | progress messages (default ON since 0.1.0). Pair with `-q / --quiet` to silence. |
-| `-G N` or `-G P:D` | GPU device id. `-G N` = CUDA / TensorRT device id (matches `nvidia-smi -L`; siamize sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`), or device `N` on platform 0 for MNN OpenCL/Vulkan. `-G P:D` = OpenCL platform `P` + device `D` (MNN only — needed on multi-ICD hosts). |
-| `-t N` | ORT intra-op thread count. Default `min(hc, 16)`. |
+| `-G N` or `-G P:D` | GPU device. `-G N` = CUDA / TensorRT device id (matches `nvidia-smi -L`; siamize sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`); for the MNN backend it is a 1-based flat OpenCL device index across all platforms (run `--list-gpu` for the mapping). `-G P:D` = raw MNN OpenCL/Vulkan platform `P` + device `D`. |
+| `--list-gpu` | (MNN build) list all OpenCL devices with their 1-based `-G` index, then exit. |
+| `-t N` | CPU worker threads. Default auto = `min(hc, 16)` (ORT) / `min(hc, 32)` (MNN). |
 | `-P ZxYxX` | Sliding-window patch size, default `256x256x192`. Smaller patches → lower peak memory, more tiles. Requires dynamic-axes ONNX. |
 | `-u S` | Target isotropic spacing in mm, default `0.75`. |
 | `-C N\|spm` | Output classes. `-C 18` (default, SIAM v0.3) or `-C spm` to remap to SPM12's 6 TPM channels (GM, WM, CSF, Bone, Soft, Air). |
@@ -624,6 +632,77 @@ tests/run_regression.sh
 
 Runs the bundled sample through `build/siamize` and reports voxel
 agreement vs `tests/pred_ref_allfolds.nii.gz`.
+
+## Docker
+
+A single CUDA 12 + cuDNN 9 image (`docker/Dockerfile`) bundles **both**
+backends, ready to run with no host build:
+
+| Binary (entrypoint) | Backend | Use |
+|---|---|---|
+| `siamize` (default) | ONNX Runtime / CUDA EP | NVIDIA GPUs |
+| `siamize-opencl` | MNN / OpenCL (+ CPU) | NVIDIA / AMD / Intel GPUs, or CPU |
+
+The MNN/OpenCL binary is statically linked (~9 MB, no `libMNN.so`) and dlopens
+the OpenCL ICD at runtime; the ORT binary ships alongside its CUDA EP libs.
+Both are compiled in a throwaway builder stage, so the first build takes
+~15-20 min (the MNN compile) but the final image stays slim.
+
+### Build
+
+```bash
+make dockerimg                       # builds siamize:v2026.6 (calendar-version tag)
+# override the tag / CUDA base on the make line:
+make dockerimg DOCKER_IMG=neurojson/siamize:v2026.6 DOCKER_CUDA=12.4.1
+# or call docker directly (build context is the repo root):
+docker build -f docker/Dockerfile -t siamize:v2026.6 .
+```
+
+The tag is a calendar version `vYYYY.M`; bump `DOCKER_IMG` per release.
+
+### Run
+
+`--gpus all` is **required** for any GPU path — it exposes the GPU *and*
+injects the NVIDIA OpenCL driver. Mount your data at `/data` and a named
+volume at `/cache` to persist auto-downloaded fold weights (and the OpenCL
+kernel-tuning cache) across runs.
+
+```bash
+# ONNX Runtime / CUDA (default entrypoint):
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/out.nii.gz -M 0,1,2,3,4 -c cuda
+
+# MNN / OpenCL (vendor-neutral GPU; override the entrypoint):
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    --entrypoint siamize-opencl siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c opencl
+
+# List the OpenCL devices the container sees (quick sanity check):
+docker run --rm --gpus all --entrypoint siamize-opencl siamize:v2026.6 --list-gpu
+
+# CPU (no --gpus needed) — either binary, pass -c cpu:
+docker run --rm -v "$PWD":/data -v siamize-cache:/cache \
+    siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c cpu                  # ORT CPU
+docker run --rm -v "$PWD":/data -v siamize-cache:/cache \
+    --entrypoint siamize-opencl siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c cpu                  # MNN CPU
+```
+
+To confirm an OpenCL run is on the GPU (not a silent CPU fallback), the log
+shows `device=opencl` with no `OpenCL init error` line, and `nvidia-smi` shows
+GPU activity during the run. CPU-only hosts work too: drop `--gpus all` and
+pass `-c cpu` (the CUDA EP reports unavailable and falls back; MNN likewise
+falls back to its CPU backend).
+
+### Push to Docker Hub
+
+```bash
+docker login
+docker tag siamize:v2026.6 <user>/siamize:v2026.6
+docker push <user>/siamize:v2026.6
+```
 
 ## MATLAB / GNU Octave bindings
 

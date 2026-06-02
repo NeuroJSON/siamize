@@ -25,6 +25,10 @@
 #   make package-tensorrt stage + zip the TRT  CLI bundle (needs `make tensorrt`)
 #   make package-mex      stage + zip the MEX bundle      (needs `make mex-*`)
 #
+#   make dockerimg        build the CUDA12+cuDNN9 Docker image (docker/Dockerfile)
+#                         bundling siamize (ORT/CUDA) + siamize-opencl (MNN/OpenCL).
+#                         Tag/CUDA via DOCKER_IMG=... DOCKER_CUDA=...
+#
 #   make test             run tests/run_regression.sh (needs models/ populated)
 #
 #   make doc              build doxygen HTML docs -> build/doc/html/index.html
@@ -58,13 +62,21 @@ ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 # stable signal that the stage is populated.
 MNN_MARKER := $(MNN_DIR)/include/MNN/Interpreter.hpp
 
+# Docker image (bundles both backends: siamize = ORT/CUDA, siamize-opencl =
+# MNN/OpenCL). The tag is a calendar version vYYYY.M (year.month); bump it
+# per release (e.g. v2026.6 -> v2026.9). Override the tag / CUDA base on the
+# make line, e.g.
+# `make dockerimg DOCKER_IMG=neurojson/siamize:v2026.6 DOCKER_CUDA=12.4.1`.
+DOCKER_IMG  ?= siamize:v2026.6
+DOCKER_CUDA ?= 12.6.3
+
 .PHONY: all build cuda tensorrt mex-octave mex-matlab mex-test \
         package package-cuda package-tensorrt package-mex \
         package-opencl package-openclmex \
         cudaoct cudamex coreml coremloct coremlmex \
         opencl openclmex opencloct mnn-deps \
         ort-cpu ort-gpu clean distclean pretty pretty-cpp pretty-py test \
-        doc doc-clean
+        doc doc-clean dockerimg
 
 # ---- CLI builds -------------------------------------------------------------
 
@@ -242,6 +254,20 @@ package-opencl:
 
 package-openclmex:
 	scripts/package.sh openclmex siamex-opencl
+
+# ---- Docker image -----------------------------------------------------------
+# Multi-stage build of docker/Dockerfile. Context is the repo root; the
+# Dockerfile + its .dockerignore live under docker/. The final CUDA 12 +
+# cuDNN 9 image carries both binaries: `siamize` (ORT/CUDA, default entrypoint)
+# and `siamize-opencl` (MNN/OpenCL, run via `--entrypoint siamize-opencl`).
+# Needs Docker with buildx. First build compiles MNN (~15-20 min, builder-only).
+dockerimg:
+	docker build -f docker/Dockerfile --build-arg CUDA_VERSION=$(DOCKER_CUDA) -t $(DOCKER_IMG) .
+	@echo
+	@echo "[make dockerimg] built $(DOCKER_IMG)  (siamize=ORT/CUDA, siamize-opencl=MNN/OpenCL)"
+	@echo "  run ORT/CUDA : docker run --rm --gpus all -v \"\$$PWD\":/data $(DOCKER_IMG) -i /data/in.nii.gz -o /data/out.nii.gz -M 0,1,2,3,4 -c cuda"
+	@echo "  run OpenCL   : docker run --rm --gpus all -v \"\$$PWD\":/data --entrypoint siamize-opencl $(DOCKER_IMG) -i /data/in.nii.gz -o /data/out.nii.gz -M 0,1,2,3,4 -c opencl"
+	@echo "  push         : docker tag $(DOCKER_IMG) <user>/$(DOCKER_IMG) && docker push <user>/$(DOCKER_IMG)"
 
 # ---- Documentation ----------------------------------------------------------
 
