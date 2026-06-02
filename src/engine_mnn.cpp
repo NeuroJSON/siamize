@@ -277,6 +277,7 @@ class MnnEngine final : public Engine {
               const std::string& device,
               int gpu_platform,
               int gpuid,
+              bool gpu_explicit,
               bool mnn_fp16,
               bool mnn_buffer,
               bool verbose);
@@ -350,6 +351,7 @@ MnnEngine::MnnEngine(const std::string& model_path,
                      const std::string& device,
                      int gpu_platform,
                      int gpuid,
+                     bool gpu_explicit,
                      bool mnn_fp16,
                      bool mnn_buffer,
                      bool verbose)
@@ -499,14 +501,19 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // GPU device selection. MNN's OpenCL backend reads
     // platformId / deviceId from BackendConfig::sharedContext
     // (an MNNDeviceContext*) when info.user->sharedContext != nullptr.
-    // We expose gpuid as deviceId only; the platform stays at 0, which
-    // matches the typical single-vendor ICD layout (NVIDIA-only,
-    // AMD-only, or Intel-only). Users with multiple platforms can set
-    // a platform via the OpenCL ICD env vars (OCL_ICD_VENDORS,
-    // CUDA_VISIBLE_DEVICES, etc.) -- adding a second flag for
-    // platformId would be the next step if anyone asks. The Vulkan
-    // backend uses the same struct with deviceId pointing at a
+    // The (platformId, deviceId) pair is resolved by the CLI's flat -G
+    // index (see siamize.cpp); deviceId is the device's position among its
+    // platform's GPU-type devices, which is what MNN's OpenCLRuntime indexes.
+    // The Vulkan backend uses the same struct with deviceId pointing at a
     // VkPhysicalDevice index; CUDA / Metal ignore the struct.
+    //
+    // We forward the struct only when the user actually selected a device
+    // (gpu_explicit, set by any -G) or a field is > 0. With no -G we leave
+    // sharedContext null so MNN auto-picks the first GPU platform -- which
+    // correctly skips a CPU-OpenCL platform 0 (e.g. PoCL). The gpu_explicit
+    // gate is what lets `-G 1` honor a platform-0 device (PoCL) -- otherwise
+    // its (0,0) pair is indistinguishable from "no -G" and MNN would silently
+    // land on the first GPU instead.
     //
     // The struct must outlive createSession(). createSession reads
     // sharedContext synchronously and the OpenCL backend copies
@@ -519,7 +526,7 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // OpenCL / Vulkan / Metal; reuse it here to keep the device-set
     // decision in one place.
 
-    if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
+    if (gpu_dev && (gpu_explicit || gpu_platform > 0 || gpuid > 0)) {
         dev_ctx.platformId = static_cast<uint32_t>(gpu_platform);
         dev_ctx.deviceId = static_cast<uint32_t>(gpuid);
         bcfg.sharedContext = &dev_ctx;
@@ -652,7 +659,7 @@ MnnEngine::MnnEngine(const std::string& model_path,
         // line doesn't claim "numThread=4" for a one-thread dispatch.
         const char* sched_label = gpu_dev ? "gpu_mode" : "numThread";
 
-        if (gpu_dev && (gpu_platform > 0 || gpuid > 0)) {
+        if (gpu_dev && (gpu_explicit || gpu_platform > 0 || gpuid > 0)) {
             siam::log_tag("mnn", "%s device=%s[platform=%d,device=%d] %s=%d num_classes=%lld",
                           model_path.c_str(), dev_name, gpu_platform, gpuid,
                           sched_label, cfg.numThread,
@@ -1188,7 +1195,8 @@ make_engine(const std::string& model_path,
     return std::unique_ptr<Engine>(
                new MnnEngine(model_path, patch_size, intra_threads,
                              device, tuning.gpu_platform, tuning.gpuid,
-                             tuning.mnn_fp16, tuning.mnn_buffer, verbose));
+                             tuning.gpu_explicit, tuning.mnn_fp16,
+                             tuning.mnn_buffer, verbose));
 }
 
 const char* backend_name() {

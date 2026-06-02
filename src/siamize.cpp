@@ -83,6 +83,11 @@ single-binary with no Python runtime.
 #include <thread>
 #include <vector>
 
+#if defined(SIAMIZE_HAS_MNN) && !defined(_WIN32)
+    #include <dlfcn.h>
+    #define SIAMIZE_CL_ENUM 1
+#endif
+
 using siam::LogitsVolume;
 using siam::NiftiImage;
 using siam::Volume;
@@ -187,6 +192,197 @@ long available_ram_mb() {
     return 0;
 #endif
 }
+
+#ifdef SIAMIZE_CL_ENUM
+/*! \brief One row of the flat OpenCL device list (see enumerate_opencl_devices). */
+struct ClDevice {
+    int platform      = 0;     // platform index in clGetPlatformIDs order (== clinfo -l)
+    int mnn_platform  = 0;     // platform index AFTER MNN's NVIDIA/AMD-first swap;
+    // this is what MNN's OpenCLRuntime indexes (see below)
+    int gpu_index     = -1;    // index among GPU-type devices on this platform,
+    // i.e. MNN's deviceId; -1 if this is not a GPU
+    bool is_gpu       = false; // CL_DEVICE_TYPE_GPU bit set
+    std::string name;          // CL_DEVICE_NAME
+    std::string type;          // "GPU" / "CPU" / "Accelerator" / "Custom"
+    unsigned long long mem = 0;  // CL_DEVICE_GLOBAL_MEM_SIZE, bytes
+};
+
+/*******************************************************************************/
+/*! \brief Flat OpenCL device enumeration in clinfo order.
+
+    The flat-index scheme (walk all platforms x all devices into one
+    sequential list) is ported from mcxcl's mcx_list_gpu()
+    (src/mcx_host.cpp, https://github.com/fangq/mcxcl, GPL-3.0,
+    (c) Qianqian Fang), which assigns each OpenCL device a single linear
+    `cuid` across platforms.
+
+    Walks every platform and every device of every type, in platform-then-
+    device order -- exactly the order `clinfo -l` prints -- and returns one
+    flat list. A bare `-G N` is a 1-based index into this list (like mcxcl's
+    cuid), so the index is stable and predictable (including CPU-OpenCL / PoCL,
+    which is NOT skipped: it occupies its slot like everything else). -G 0 is
+    reserved for "auto" (the handler leaves MNN to pick the first GPU).
+
+    MNN's OpenCL backend addresses a device by (platformId, deviceId) where
+    deviceId counts only the GPU-type devices on that platform
+    (OpenCLRuntime: platforms[p].getDevices(CL_DEVICE_TYPE_GPU)[deviceId]).
+    So for each row we record gpu_index = its position among that platform's
+    GPUs, which is MNN's deviceId. Non-GPU rows keep gpu_index = -1 (MNN's
+    OpenCL backend cannot run on them).
+
+    CRUCIAL: MNN does NOT use the raw platform order. Its bundled cl2.hpp
+    Platform::get() swaps the first NVIDIA (else first AMD) platform to index 0
+    when more than one platform is present (cl2.hpp ~L2490). So on a PoCL +
+    NVIDIA host, clinfo sees [PoCL=0, NVIDIA=1] but MNN sees [NVIDIA=0, PoCL=1].
+    Passing the clinfo platform id straight to MNN therefore selects the WRONG
+    platform (and on PoCL, createSession fails -> silent CPU fallback). We
+    replicate that single swap here and store the post-swap index as
+    mnn_platform; the -G handler feeds mnn_platform to MNN while --list-gpu
+    still shows the clinfo `platform` column so it matches `clinfo -l`.
+
+    dlopen-based, so it adds no link dependency; empty on any failure (the -G
+    handler then falls back to the legacy platform-0 index).
+*/
+std::vector<ClDevice> enumerate_opencl_devices() {
+    std::vector<ClDevice> devs;
+    void* h = dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
+
+    if (!h) {
+        h = dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
+    }
+
+    if (!h) {
+        return devs;
+    }
+
+    using getPlatforms_t   = int (*)(unsigned, void**, unsigned*);
+    using getPlatformInfo_t = int (*)(void*, unsigned, size_t, void*, size_t*);
+    using getDevices_t     = int (*)(void*, unsigned long long, unsigned, void**, unsigned*);
+    using getDeviceInfo_t  = int (*)(void*, unsigned, size_t, void*, size_t*);
+    auto clGetPlatformIDs  = reinterpret_cast<getPlatforms_t>(dlsym(h, "clGetPlatformIDs"));
+    auto clGetPlatformInfo = reinterpret_cast<getPlatformInfo_t>(dlsym(h, "clGetPlatformInfo"));
+    auto clGetDeviceIDs    = reinterpret_cast<getDevices_t>(dlsym(h, "clGetDeviceIDs"));
+    auto clGetDeviceInfo   = reinterpret_cast<getDeviceInfo_t>(dlsym(h, "clGetDeviceInfo"));
+
+    if (!clGetPlatformIDs || !clGetPlatformInfo || !clGetDeviceIDs || !clGetDeviceInfo) {
+        dlclose(h);
+        return devs;
+    }
+
+    const unsigned long long CL_DEVICE_TYPE_ALL = 0xFFFFFFFFULL;
+    const unsigned long long TYPE_CPU = 1ULL << 1, TYPE_GPU = 1ULL << 2, TYPE_ACC = 1ULL << 3;
+    const unsigned CL_DEVICE_TYPE = 0x1000, CL_DEVICE_NAME = 0x102B,
+                   CL_DEVICE_GLOBAL_MEM_SIZE = 0x101F, CL_PLATFORM_NAME = 0x0902;
+
+    unsigned nplat = 0;
+
+    if (clGetPlatformIDs(0, nullptr, &nplat) != 0 || nplat == 0) {
+        dlclose(h);
+        return devs;
+    }
+
+    std::vector<void*> plats(nplat, nullptr);
+    clGetPlatformIDs(nplat, plats.data(), nullptr);
+
+    // Replicate MNN cl2.hpp Platform::get()'s reorder: when more than one
+    // platform is present, the first NVIDIA platform (else first AMD) is
+    // swapped to index 0. mnn_platform[p] is platform p's index in MNN's view.
+    std::vector<int> mnn_platform(nplat);
+
+    for (int p = 0; p < static_cast<int>(nplat); ++p) {
+        mnn_platform[p] = p;
+    }
+
+    if (nplat > 1) {
+        int discrete = -1;
+
+        for (const char* vendor : {
+                    "NVIDIA", "AMD"
+                }) {
+            for (int p = 0; p < static_cast<int>(nplat); ++p) {
+                char pname[256] = {0};
+                clGetPlatformInfo(plats[p], CL_PLATFORM_NAME, sizeof(pname) - 1, pname, nullptr);
+
+                if (std::string(pname).find(vendor) != std::string::npos) {
+                    discrete = p;
+                    break;
+                }
+            }
+
+            if (discrete >= 0) {
+                break;
+            }
+        }
+
+        if (discrete > 0) {  // swap discrete <-> 0 (discrete==0 needs no swap)
+            mnn_platform[discrete] = 0;
+            mnn_platform[0]        = discrete;
+        }
+    }
+
+    for (int p = 0; p < static_cast<int>(nplat); ++p) {
+        unsigned ndev = 0;
+
+        if (clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_ALL, 0, nullptr, &ndev) != 0 || ndev == 0) {
+            continue;
+        }
+
+        std::vector<void*> ids(ndev, nullptr);
+        clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_ALL, ndev, ids.data(), nullptr);
+
+        int gpu_count = 0;
+
+        for (int d = 0; d < static_cast<int>(ndev); ++d) {
+            ClDevice row;
+            row.platform     = p;
+            row.mnn_platform = mnn_platform[p];
+
+            unsigned long long dtype = 0;
+            clGetDeviceInfo(ids[d], CL_DEVICE_TYPE, sizeof(dtype), &dtype, nullptr);
+            row.is_gpu = (dtype & TYPE_GPU) != 0;
+            row.type   = (dtype & TYPE_GPU) ? "GPU"
+                         : (dtype & TYPE_CPU) ? "CPU"
+                         : (dtype & TYPE_ACC) ? "Accelerator"
+                         : "Custom";
+
+            if (row.is_gpu) {
+                row.gpu_index = gpu_count++;
+            }
+
+            char name[256] = {0};
+            clGetDeviceInfo(ids[d], CL_DEVICE_NAME, sizeof(name) - 1, name, nullptr);
+            row.name = name;
+
+            clGetDeviceInfo(ids[d], CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(row.mem), &row.mem, nullptr);
+            devs.push_back(std::move(row));
+        }
+    }
+
+    dlclose(h);
+    return devs;
+}
+
+/*******************************************************************************/
+/*! \brief Print the flat OpenCL device list for `--list-gpu`. */
+void print_opencl_devices() {
+    auto devs = enumerate_opencl_devices();
+
+    if (devs.empty()) {
+        std::printf("No OpenCL devices found (no ICD loadable via libOpenCL).\n");
+        return;
+    }
+
+    std::printf("Flat OpenCL device index (1-based; pass to -G):\n");
+
+    for (int i = 0; i < static_cast<int>(devs.size()); ++i) {
+        const auto& d = devs[i];
+        std::printf("  -G %-2d  platform %d  %-11s  %-40s  %4llu GB%s\n",
+                    i + 1, d.platform, d.type.c_str(), d.name.c_str(),
+                    (d.mem + (1ULL << 29)) >> 30,
+                    d.is_gpu ? "" : "   (not a GPU; MNN-OpenCL needs a GPU)");
+    }
+}
+#endif  // SIAMIZE_CL_ENUM
 
 /*******************************************************************************/
 /*! \fn    long available_vram_mb(int gpuid)
@@ -431,21 +627,28 @@ void usage(const char* exe) {
                  "                         `heuristic` is the smallest-workspace option.\n"
                  "      --gpu-mem-limit N  CUDA EP gpu_mem_limit in bytes (suffix K/M/G accepted,\n"
                  "                         e.g. 6G). Default 0 = no explicit cap.\n"
-                 "  -G, --gpu N|P:D     GPU device index (default 0 = first visible GPU). Accepts:\n"
-                 "                         N    : device N within platform 0 (legacy / CUDA / single-ICD).\n"
-                 "                                Honors CUDA_VISIBLE_DEVICES; `nvidia-smi --query-gpu=\n"
-                 "                                index,name --format=csv,noheader` shows the mapping.\n"
-                 "                         P:D  : OpenCL/Vulkan platform P, device D (MNN backend only).\n"
-                 "                                Needed on multi-ICD hosts (e.g. PoCL + NVIDIA, AMD +\n"
-                 "                                Intel) where the real GPU is not on platform 0. List\n"
-                 "                                available platforms with `clinfo -l`. ORT EPs ignore P.\n"
-                 "  -t, --thread N      ORT intra-op threads. Default 0 = auto, which selects\n"
-                 "                      min(hardware_concurrency, 16). The 16-thread cap is\n"
-                 "                      a heuristic: on huge-core hosts (e.g. AMD Zen2 64-core)\n"
-                 "                      ORT's CPU EP plateaus past ~16 threads on this workload\n"
-                 "                      and starts regressing at 32+ due to memory-bandwidth\n"
-                 "                      and L3 contention. Pass -t 0 -t <hc> explicitly to\n"
-                 "                      override; ignored for GPU EPs.\n"
+                 "  -G, --gpu N|P:D     GPU device index (default 0 = auto, first GPU). Accepts:\n"
+                 "                         N    : MNN backend -- 1-based index of an OpenCL device\n"
+                 "                                across ALL platforms in clinfo order (every\n"
+                 "                                platform, every device type; run --list-gpu for\n"
+                 "                                the mapping). 0 = auto-pick the first GPU. ORT\n"
+                 "                                backend -- CUDA device N (0-based).\n"
+                 "                         P:D  : raw MNN platform P, device D (advanced). P is\n"
+                 "                                MNN's post-swap platform order (NVIDIA/AMD first,\n"
+                 "                                NOT clinfo order); D counts GPUs only. Prefer N.\n"
+                 "      --list-gpu      List all OpenCL devices with their (1-based) -G index, then\n"
+                 "                      exit (MNN/OpenCL build).\n"
+                 "  -t, --thread N      CPU worker threads. Default 0 = auto = min(hardware_\n"
+#ifdef SIAMIZE_HAS_MNN
+                 "                      concurrency, 32). MNN's CPU backend hard-caps its thread\n"
+                 "                      pool at 32, so the auto value matches that ceiling.\n"
+#else
+                 "                      concurrency, 16). The 16-thread cap is a heuristic: on\n"
+                 "                      huge-core hosts (e.g. AMD Zen2 64-core) ORT's CPU EP\n"
+                 "                      plateaus past ~16 threads on this workload and regresses\n"
+                 "                      at 32+ due to memory-bandwidth and L3 contention.\n"
+#endif
+                 "                      Pass -t <N> to override; ignored for GPU backends.\n"
                  "      --no-arena      disable ORT's CPU memory arena + memory-pattern\n"
                  "                      optimizer. Default off (arena enabled). Saves ~16 GB\n"
                  "                      peak RSS on the 18-class network but adds ~1.5x to\n"
@@ -792,21 +995,82 @@ int main(int argc, char** argv) {
             upsample_mode = true;
         } else if (a == "--lowmem") {
             lowmem_mode = true;
+        } else if (a == "--list-gpu") {
+#ifdef SIAMIZE_CL_ENUM
+            print_opencl_devices();
+#else
+            std::printf("--list-gpu requires the MNN/OpenCL build.\n");
+#endif
+            return 0;
         } else if (a == "-G" || a == "--gpu") {
             // Two accepted forms:
-            //   -G N        device N (legacy / CUDA path, platform 0)
-            //   -G P:D      OpenCL/Vulkan platform P, device D (MNN)
-            // The ":D" form lets users on multi-ICD hosts (e.g. PoCL +
-            // NVIDIA, AMD + Intel) reach a GPU that lives on a non-zero
-            // platform. ORT EPs ignore the platform half.
+            //   -G N        flat device index, 1-based (à la mcxcl). MNN backend:
+            //               the Nth OpenCL device across ALL platforms in clinfo
+            //               order (every platform, every device type, PoCL
+            //               included); `--list-gpu` shows the exact mapping.
+            //               -G 0 = auto (let MNN pick the first GPU, skipping a
+            //               CPU-OpenCL platform 0). ORT backend: CUDA device N.
+            //   -G P:D      explicit MNN OpenCL/Vulkan platform P, device D.
+            //               Raw MNN indices: P is post-swap (NVIDIA/AMD first,
+            //               not clinfo order) and D counts GPUs only. Advanced
+            //               escape hatch; prefer the flat -G N + --list-gpu.
             std::string s = need();
             size_t colon = s.find(':');
 
             if (colon == std::string::npos) {
-                engine_tuning.gpuid = std::stoi(s);
+                int idx = std::stoi(s);
+#ifdef SIAMIZE_CL_ENUM
+
+                // -G 0 keeps the default (auto-pick first GPU); -G N (1-based)
+                // maps the flat clinfo-order index to MNN's (platformId, deviceId).
+                if (idx > 0) {
+                    auto devs = enumerate_opencl_devices();
+
+                    if (!devs.empty()) {
+                        if (idx > static_cast<int>(devs.size())) {
+                            siam::log_warn("[gpu] -G %d out of range: only %zu "
+                                           "OpenCL device(s) found; using the last "
+                                           "one (see --list-gpu)",
+                                           idx, devs.size());
+                            idx = static_cast<int>(devs.size());
+                        }
+
+                        const auto& d = devs[idx - 1];
+
+                        if (!d.is_gpu) {
+                            // MNN's OpenCL backend can only run on GPU devices;
+                            // pointing it at a CPU-OpenCL device (e.g. PoCL)
+                            // makes OpenCLRuntime creation fail and aborts the
+                            // session. Selecting such a device unambiguously
+                            // means "use the CPU", so route to the (multi-
+                            // threaded) MNN CPU backend instead of OpenCL.
+                            siam::log_warn("[gpu] -G %d is a %s OpenCL device "
+                                           "(%s); MNN-OpenCL needs a GPU, running "
+                                           "on the CPU backend instead "
+                                           "(see --list-gpu)",
+                                           idx, d.type.c_str(), d.name.c_str());
+                            device = "cpu";
+                        } else {
+                            // Feed MNN's post-swap platform index, not the clinfo
+                            // one -- see enumerate_opencl_devices() for why.
+                            engine_tuning.gpu_platform = d.mnn_platform;
+                            engine_tuning.gpuid        = d.gpu_index;
+                            engine_tuning.gpu_explicit = true;
+                        }
+                    } else {
+                        // Enumeration unavailable (no ICD): legacy 0-based index.
+                        engine_tuning.gpuid        = idx - 1;
+                        engine_tuning.gpu_explicit = true;
+                    }
+                }
+
+#else
+                engine_tuning.gpuid = idx;  // ORT: CUDA device index (0-based)
+#endif
             } else {
                 engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
                 engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
+                engine_tuning.gpu_explicit = true;
             }
         } else if (a == "--mnn-fp16") {
             // MNN BackendConfig::Precision_Low. On Volta+ NVIDIA via
@@ -1105,18 +1369,23 @@ int main(int argc, char** argv) {
 
     // Resolve threads before the header so it can show the actual count.
     // Auto path: min(hardware_concurrency, AUTO_CAP). AUTO_CAP is 8 when
-    // RAM is tight (per the safe-defaults block above) and 16 otherwise.
-    // The 16 cap was measured on a Threadripper 3990X (Zen2, 64C/128T)
-    // where ORT's CPU EP hits its wall-time minimum at -t 16 and
-    // regresses at higher counts due to memory bandwidth and cross-CCD
-    // L3 contention. Users with unusual workloads or hardware can pass
-    // -t <N> explicitly.
+    // RAM is tight (per the safe-defaults block above), else backend-specific:
+    //   ORT  -> 16. Measured on a Threadripper 3990X (Zen2, 64C/128T) where
+    //           ORT's CPU EP hits its wall-time minimum at -t 16 and regresses
+    //           higher due to memory bandwidth and cross-CCD L3 contention.
+    //   MNN  -> 32. MNN's CPU backend hard-caps its thread pool at 32
+    //           internally, so 16 needlessly leaves cores idle on big hosts.
+    // Users with unusual workloads or hardware can pass -t <N> explicitly.
     bool threads_auto = (threads <= 0);
 
     if (threads_auto) {
         unsigned hc = std::thread::hardware_concurrency();
         int detected = (hc > 0) ? static_cast<int>(hc) : 4;
+#ifdef SIAMIZE_HAS_MNN
+        const int auto_cap = ram_tight ? 8 : 32;
+#else
         const int auto_cap = ram_tight ? 8 : 16;
+#endif
         threads = std::min(detected, auto_cap);
 
         if (ram_tight && !threads_set) {

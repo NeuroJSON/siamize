@@ -89,6 +89,18 @@ struct EngineTuning {
                                           may be the CPU runtime and the real GPU
                                           lives on platform 1. CLI `-G P:D`
                                           populates both fields. */
+    bool gpu_explicit = false;       /**< true once the user passed -G/--gpu (in
+                                          any form). MNN only forwards the
+                                          MNNDeviceContext (platformId/deviceId)
+                                          when this is set OR a field is >0; with
+                                          no -G it lets MNN auto-pick the first
+                                          GPU platform, which skips a CPU-OpenCL
+                                          platform 0 (e.g. PoCL). Without this
+                                          flag `-G 0` (= platform 0, device 0)
+                                          would be indistinguishable from "no -G"
+                                          and silently land on the first GPU
+                                          instead of the device --list-gpu shows
+                                          at index 0. Inert for ORT EPs. */
     bool mnn_fp16 = false;           /**< MNN BackendConfig::Precision_Low when true,
                                           else Precision_High. Inert for ORT EPs.
                                           fp16 GPU compute (Tensor Cores on
