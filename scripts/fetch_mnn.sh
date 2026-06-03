@@ -111,7 +111,13 @@ if [[ ! -d "$SRC_DIR" ]]; then
     # GitHub zip archives extract to a directory named MNN-<tagslug>/
     # where tagslug is the tag name with v stripped from some auto
     # archives but kept for explicit tags. Detect and rename if needed.
-    unzip -q "$ZIP_PATH" -d "$MNN_BUILD"
+    #
+    # Exclude apps/ (MNN's demo applications): we never build them
+    # (MNN_BUILD_DEMO=OFF) and some iOS asset files have non-ASCII names
+    # that Info-ZIP cannot create on macOS/APFS or Windows -- the write
+    # fails and unzip aborts with exit code 50. Dropping apps/ sidesteps
+    # that and trims the extracted tree. (-x patterns before -d exdir.)
+    unzip -q "$ZIP_PATH" -x '*/apps/*' -d "$MNN_BUILD"
     if [[ ! -d "$SRC_DIR" ]]; then
         # Try variants GitHub may use: MNN-<tag>, MNN-<tag-with-v-stripped>
         for d in "$MNN_BUILD"/MNN-*/; do
