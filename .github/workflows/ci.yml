@@ -768,6 +768,27 @@ jobs:
           assert mean >= 0.90, f'Dice {mean:.4f} below sanity floor 0.90'
           PY
 
+      # Compress the self-contained MNN/OpenCL binary with UPX (Linux +
+      # Windows only -- UPX's macOS Mach-O support, especially arm64, is
+      # unreliable). The binary self-decompresses at startup; we re-run
+      # --help afterwards to prove the packed binary still launches.
+      - name: Install UPX (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends upx-ucl
+
+      - name: Install UPX (Windows)
+        if: runner.os == 'Windows'
+        run: choco install upx -y --no-progress
+
+      - name: Compress binary with UPX
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: |
+          echo "--- before ---"; ls -l "${{ matrix.binary }}"
+          upx --best "${{ matrix.binary }}"
+          echo "--- after ---";  ls -l "${{ matrix.binary }}"
+          # The compressed binary must still launch (self-extracts at startup).
+          "${{ matrix.binary }}" --help > /dev/null && echo "OK: UPX-packed binary runs"
+
       - name: Package
         shell: bash
         run: |
