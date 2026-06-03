@@ -3,6 +3,12 @@ name: ci
 on:
   push:
     branches: [main, opencl]
+    # Tag pushes (v*) also run the workflow so release bundles get a clean,
+    # hash-less version: the Package steps key off GITHUB_REF_TYPE=tag and name
+    # artifacts siamize-<version>-<label> (vs <version>-<sha> on branch pushes).
+    # NOTE: GitHub reads this workflow from the *tagged commit*, so a tag only
+    # triggers if the tag points at a commit that already contains this filter.
+    tags: ['v*']
   pull_request:
 
 defaults:
