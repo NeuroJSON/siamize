@@ -223,13 +223,25 @@ inline void cl_dl_close(cl_dl_handle h) {
 #else
 using cl_dl_handle = void*;
 inline cl_dl_handle cl_dl_open() {
-    void* h = ::dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    // macOS ships OpenCL as a framework, not libOpenCL.so; try the framework
+    // binary (and dylib) first there, then the Linux ICD soname / linker name.
+    const char* names[] = {
+#if defined(__APPLE__)
+        "/System/Library/Frameworks/OpenCL.framework/OpenCL",
+        "libOpenCL.dylib",
+#else
+        "libOpenCL.so.1",
+        "libOpenCL.so",
+#endif
+    };
 
-    if (!h) {
-        h = ::dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
+    for (const char* n : names) {
+        if (void* h = ::dlopen(n, RTLD_LAZY | RTLD_LOCAL)) {
+            return h;
+        }
     }
 
-    return h;
+    return nullptr;
 }
 inline void* cl_dl_sym(cl_dl_handle h, const char* sym) {
     return ::dlsym(h, sym);
@@ -412,6 +424,8 @@ void print_opencl_devices() {
         std::printf("No OpenCL devices found (no ICD loadable via "
 #if defined(_WIN32)
                     "OpenCL.dll"
+#elif defined(__APPLE__)
+                    "OpenCL.framework"
 #else
                     "libOpenCL.so"
 #endif
@@ -581,8 +595,8 @@ std::string expand_fold_shortcut(const std::string& tok) {
 */
 void usage(const char* exe) {
     std::fprintf(stderr,
-                 "[siamize]  v0.2.0  native C++/ONNX port of SIAM v0.3 brain segmentation\n"
-                 "           https://github.com/NeuroJSON/siamize\n"
+                 "[siamize]  v0.2.0  Native C++ port of SIAM v0.3 full-head segmentation\n"
+                 "           URL: https://github.com/NeuroJSON/siamize, Author: Qianqian Fang\n"
                  "\n"
                  "Usage: %s -i input.nii(.gz) -o output.nii.gz [-M 0,1,2,3,4] [-c auto] [-G 0] [-t N] [-v]\n"
                  "\n"
@@ -683,7 +697,7 @@ void usage(const char* exe) {
                  "                         P:D  : raw MNN platform P, device D (advanced). P is\n"
                  "                                MNN's post-swap platform order (NVIDIA/AMD first,\n"
                  "                                NOT clinfo order); D counts GPUs only. Prefer N.\n"
-                 "      --list-gpu      List all OpenCL devices with their (1-based) -G index, then\n"
+                 "  -L, --list-gpu      List all OpenCL devices with their (1-based) -G index, then\n"
                  "                      exit (MNN/OpenCL build).\n"
                  "  -t, --thread N      CPU worker threads. Default 0 = auto = min(hardware_\n"
 #ifdef SIAMIZE_HAS_MNN
@@ -1042,7 +1056,7 @@ int main(int argc, char** argv) {
             upsample_mode = true;
         } else if (a == "--lowmem") {
             lowmem_mode = true;
-        } else if (a == "--list-gpu") {
+        } else if (a == "--list-gpu" || a == "-L") {
 #ifdef SIAMIZE_CL_ENUM
             print_opencl_devices();
 #else
