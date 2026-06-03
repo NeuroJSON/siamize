@@ -6,6 +6,7 @@
 * **License**: Apache License, Version 2.0
 * **Version**: 0.2.0
 * **GitHub**: [https://github.com/NeuroJSON/siamize](https://github.com/NeuroJSON/siamize)
+* **Docker**: [https://hub.docker.com/r/openjdata/siamize](https://hub.docker.com/r/openjdata/siamize)
 * **Upstream**: [https://github.com/romainVala/SIAM](https://github.com/romainVala/SIAM) — SIAM v0.3 by Valabregue, Khemir, Bardinet, Rousseau, Auzias & Dorent (2026), [arXiv:2605.02737](https://arxiv.org/abs/2605.02737)
 
 **Acknowledgement:** This project uses resources and data formats developed as part of the [NeuroJSON project](https://neurojson.org) supported by US National Institute of Health (NIH) grant [U24-NS124027](https://reporter.nih.gov/project-details/10308329).
@@ -635,8 +636,10 @@ agreement vs `tests/pred_ref_allfolds.nii.gz`.
 
 ## Docker
 
-A single CUDA 12 + cuDNN 9 image (`docker/Dockerfile`) bundles **both**
-backends, ready to run with no host build:
+Published on Docker Hub as
+**[`openjdata/siamize`](https://hub.docker.com/r/openjdata/siamize)** — a single
+CUDA 12 + cuDNN 9 image bundling **both** backends, ready to run with no host
+build:
 
 | Binary (entrypoint) | Backend | Use |
 |---|---|---|
@@ -645,15 +648,25 @@ backends, ready to run with no host build:
 
 The MNN/OpenCL binary is statically linked (~9 MB, no `libMNN.so`) and dlopens
 the OpenCL ICD at runtime; the ORT binary ships alongside its CUDA EP libs.
-Both are compiled in a throwaway builder stage, so the first build takes
-~15-20 min (the MNN compile) but the final image stays slim.
 
-### Build
+### Pull (prebuilt)
+
+```bash
+docker pull openjdata/siamize:v2026.6     # https://hub.docker.com/r/openjdata/siamize
+```
+
+The Run examples below use `openjdata/siamize:v2026.6`; if you build locally
+(next section) the image is just `siamize:v2026.6` — substitute accordingly.
+
+### Build (from source)
+
+The two binaries are compiled in a throwaway builder stage, so the first build
+takes ~15-20 min (the MNN compile) but the final image stays slim.
 
 ```bash
 make dockerimg                       # builds siamize:v2026.6 (calendar-version tag)
 # override the tag / CUDA base on the make line:
-make dockerimg DOCKER_IMG=neurojson/siamize:v2026.6 DOCKER_CUDA=12.4.1
+make dockerimg DOCKER_IMG=openjdata/siamize:v2026.6 DOCKER_CUDA=12.4.1
 # or call docker directly (build context is the repo root):
 docker build -f docker/Dockerfile -t siamize:v2026.6 .
 ```
@@ -668,26 +681,46 @@ volume at `/cache` to persist auto-downloaded fold weights (and the OpenCL
 kernel-tuning cache) across runs.
 
 ```bash
-# ONNX Runtime / CUDA (default entrypoint):
+# ONNX Runtime / CUDA (default entrypoint) -- 5-fold ensemble:
 docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
-    siamize:v2026.6 \
-    -i /data/in.nii.gz -o /data/out.nii.gz -M 0,1,2,3,4 -c cuda
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.nii.gz -M 0,1,2,3,4 -c cuda
+
+# Single fold (faster, lighter):
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.nii.gz -M 0 -c cuda
 
 # MNN / OpenCL (vendor-neutral GPU; override the entrypoint):
 docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
-    --entrypoint siamize-opencl siamize:v2026.6 \
-    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c opencl
+    --entrypoint siamize-opencl openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.nii.gz -M 0 -c opencl
 
-# List the OpenCL devices the container sees (quick sanity check):
-docker run --rm --gpus all --entrypoint siamize-opencl siamize:v2026.6 --list-gpu
+# List the OpenCL devices the container sees (then pick one with -G N):
+docker run --rm --gpus all --entrypoint siamize-opencl openjdata/siamize:v2026.6 --list-gpu
 
 # CPU (no --gpus needed) — either binary, pass -c cpu:
 docker run --rm -v "$PWD":/data -v siamize-cache:/cache \
-    siamize:v2026.6 \
-    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c cpu                  # ORT CPU
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.nii.gz -M 0 -c cpu              # ORT CPU
 docker run --rm -v "$PWD":/data -v siamize-cache:/cache \
-    --entrypoint siamize-opencl siamize:v2026.6 \
-    -i /data/in.nii.gz -o /data/out.nii.gz -M 0 -c cpu                  # MNN CPU
+    --entrypoint siamize-opencl openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.nii.gz -M 0 -c cpu              # MNN CPU
+
+# 4D tissue-probability map (float32 softmax) instead of a labelmap:
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/tpm.nii.gz -M 0,1,2,3,4 -c cuda --tpm
+
+# SPM12-style 6-class output (GM, WM, CSF, Bone, Soft, Air):
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/spm.nii.gz -M 0 -c cuda -C spm
+
+# JNIfTI output (.jnii / .bnii for the NeuroJSON ecosystem):
+docker run --rm --gpus all -v "$PWD":/data -v siamize-cache:/cache \
+    openjdata/siamize:v2026.6 \
+    -i /data/in.nii.gz -o /data/labels.jnii -M 0 -c cuda -F jnii
 ```
 
 To confirm an OpenCL run is on the GPU (not a silent CPU fallback), the log
@@ -700,8 +733,8 @@ falls back to its CPU backend).
 
 ```bash
 docker login
-docker tag siamize:v2026.6 <user>/siamize:v2026.6
-docker push <user>/siamize:v2026.6
+docker tag siamize:v2026.6 openjdata/siamize:v2026.6
+docker push openjdata/siamize:v2026.6   # -> https://hub.docker.com/r/openjdata/siamize
 ```
 
 ## MATLAB / GNU Octave bindings
