@@ -207,8 +207,26 @@ fi
 echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL, static=$MNN_STATIC)"
 (cd "$CMAKE_BUILD" && cmake "${CMAKE_FLAGS[@]}" "$SRC_DIR")
 
-echo "[fetch_mnn] cmake build -j$MNN_JOBS (this is the slow step, ~15-20 min)"
-(cd "$CMAKE_BUILD" && make -j"$MNN_JOBS" MNN)
+echo "[fetch_mnn] cmake build --target MNN -j$MNN_JOBS (the slow step, ~15-20 min)"
+# Use `cmake --build` rather than `make` so this works across generators:
+# Unix Makefiles (Linux/macOS), Ninja, and Visual Studio multi-config
+# (Windows, where `make` isn't available). --config Release is honored by
+# multi-config generators and ignored by single-config ones.
+cmake --build "$CMAKE_BUILD" --config Release --target MNN --parallel "$MNN_JOBS"
+
+# Locate a built artifact that may sit directly under the build dir
+# (single-config generators) or under a per-config subdir (multi-config
+# Visual Studio puts it in Release/).
+find_built() {
+    local name="$1" cand
+    for cand in "$CMAKE_BUILD/$name" "$CMAKE_BUILD/Release/$name"; do
+        if [[ -e "$cand" ]]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Stage headers + library at third_party/mnn/.
 echo "[fetch_mnn] staging headers"
@@ -217,31 +235,31 @@ cp -r "$SRC_DIR/include/MNN" "$MNN_STAGE/include/"
 echo "[fetch_mnn] staging $LIB_NAME"
 case "$LIB_NAME" in
     libMNN.a)
-        cp "$CMAKE_BUILD/libMNN.a" "$MNN_STAGE/lib/"
+        cp "$(find_built libMNN.a)" "$MNN_STAGE/lib/"
         ;;
     libMNN.so)
         # The build may produce libMNN.so or libMNN.so.<version>; copy
-        # whatever exists and symlink the canonical name.
-        if [[ -e "$CMAKE_BUILD/libMNN.so" ]]; then
-            cp "$CMAKE_BUILD/libMNN.so" "$MNN_STAGE/lib/"
+        # whatever exists and use the canonical name.
+        if src=$(find_built libMNN.so); then
+            cp "$src" "$MNN_STAGE/lib/"
         else
-            so=$(ls "$CMAKE_BUILD"/libMNN.so* 2>/dev/null | head -1)
+            so=$(ls "$CMAKE_BUILD"/libMNN.so* "$CMAKE_BUILD"/Release/libMNN.so* 2>/dev/null | head -1)
             cp "$so" "$MNN_STAGE/lib/libMNN.so"
         fi
         ;;
     libMNN.dylib)
-        cp "$CMAKE_BUILD/libMNN.dylib" "$MNN_STAGE/lib/"
+        cp "$(find_built libMNN.dylib)" "$MNN_STAGE/lib/"
         ;;
     MNN.dll)
-        cp "$CMAKE_BUILD/MNN.dll" "$MNN_STAGE/lib/"
+        cp "$(find_built MNN.dll)" "$MNN_STAGE/lib/"
         # Windows also needs the import lib.
-        if [[ -f "$CMAKE_BUILD/MNN.lib" ]]; then
-            cp "$CMAKE_BUILD/MNN.lib" "$MNN_STAGE/lib/"
+        if src=$(find_built MNN.lib); then
+            cp "$src" "$MNN_STAGE/lib/"
         fi
         ;;
     MNN.lib)
         # Static Windows build: a single MNN.lib archive, no DLL.
-        cp "$CMAKE_BUILD/MNN.lib" "$MNN_STAGE/lib/"
+        cp "$(find_built MNN.lib)" "$MNN_STAGE/lib/"
         ;;
 esac
 

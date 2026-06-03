@@ -604,8 +604,19 @@ jobs:
         include:
           - os: ubuntu-22.04
             binary: build/siamize
+          - os: macos-latest
+            binary: build/siamize
+          - os: windows-latest
+            # MSVC multi-config generator drops the binary under Release/.
+            binary: build/Release/siamize.exe
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install OpenMP (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
+          echo "OpenMP_ROOT=$(brew --prefix libomp)" >> "$GITHUB_ENV"
 
       - name: Cache MNN stage (libMNN.a + headers)
         id: mnn-cache
@@ -640,7 +651,8 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Inspect runtime deps
+      - name: Inspect runtime deps (Linux)
+        if: runner.os == 'Linux'
         run: |
           echo "--- ldd ---"
           ldd build/siamize
@@ -648,10 +660,28 @@ jobs:
           ls -lh build/siamize
           stat -c "%s" build/siamize
 
+      - name: Inspect runtime deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "--- otool -L (linked dylibs) ---"
+          otool -L build/siamize
+          ls -lh build/siamize
+
+      - name: Inspect runtime deps (Windows)
+        if: runner.os == 'Windows'
+        run: ls -la build/Release/
+
       - name: Smoke-run --help
         run: ${{ matrix.binary }} --help
 
+      # The end-to-end MNN-CPU inference + Dice check below run on Linux
+      # only: they exercise the inference path once per push and rely on
+      # Linux tooling (ldd/lscpu/free, the -P workspace tuning calibrated to
+      # the Linux runner's cgroup). The macOS / Windows legs are build +
+      # --help + package, mirroring cpp-build, so we still ship and smoke the
+      # MNN/OpenCL binaries on those platforms.
       - name: Runner CPU / memory profile (diagnostic)
+        if: runner.os == 'Linux'
         # Helps triage MNN crashes that depend on the runner's
         # /proc/cpuinfo, /sys/devices/system/cpu/cpufreq, or memory
         # layout -- MNN's CPU runtime probes all three at session
@@ -683,6 +713,7 @@ jobs:
         # its first log line. The smaller patch is the same one
         # siamize's auto-lowmem heuristic picks on RAM-tight hosts;
         # Dice stays in spec across patch sizes.
+        if: runner.os == 'Linux'
         timeout-minutes: 30
         run: |
           ${{ matrix.binary }} \
@@ -693,6 +724,7 @@ jobs:
               -P 192x192x128 2>&1 | tee siamize.log
 
       - name: Verify MNN backend was used
+        if: runner.os == 'Linux'
         run: |
           if grep -Eq "backend mnn" siamize.log; then
             echo "OK: MNN backend engaged."
@@ -703,11 +735,13 @@ jobs:
           fi
 
       - name: Verify output produced
+        if: runner.os == 'Linux'
         run: |
           test -s pred_ci.nii.gz || { echo "FAIL: empty/missing output"; exit 1; }
           ls -lh pred_ci.nii.gz
 
       - name: Compare to bundled reference (mean foreground Dice)
+        if: runner.os == 'Linux'
         # Bundled reference (tests/pred_ref_allfolds.nii.gz) is the
         # 5-fold ORT ensemble; we're running single-fold MNN-int8 here,
         # so the comparison is "do we get the same general structure"
@@ -743,7 +777,11 @@ jobs:
           else
               VER="${BASE}-${GITHUB_SHA:0:7}"
           fi
-          PLAT=linux-x86_64
+          case "${{ runner.os }}" in
+            Linux)   PLAT=linux-x86_64 ;;
+            macOS)   PLAT=macos ;;
+            Windows) PLAT=windows-x64 ;;
+          esac
           BUNDLE="siamize-${VER}-${PLAT}-opencl"
           # `opencl` mode stages the (static or shared) MNN binary
           # alone; libMNN.so is only copied if a shared build was
