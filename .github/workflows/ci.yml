@@ -30,12 +30,12 @@ jobs:
               ldd build/siamize
               echo "--- direct (NEEDED) deps ---"
               readelf -d build/siamize | grep NEEDED
-          - os: macos-latest
+          - os: macos-14
             binary: build/siamize
             deps_check: |
               echo "--- otool -L (linked dylibs) ---"
               otool -L build/siamize
-          - os: windows-latest
+          - os: windows-2022
             # MSVC multi-config generator drops the binary under Release/.
             binary: build/Release/siamize.exe
             deps_check: |
@@ -111,7 +111,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             binary: build/siamize
-          - os: windows-latest
+          - os: windows-2022
             binary: build/Release/siamize.exe
     steps:
       - uses: actions/checkout@v4
@@ -227,7 +227,7 @@ jobs:
             mnn_mex: true
             mnn_mex_target: siamize_mex
           - label: windows-matlab
-            os: windows-latest
+            os: windows-2022
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
             mex_file: matlab/siamex.mexw64
@@ -369,7 +369,7 @@ jobs:
           # Per-leg key: the MATLAB leg builds MNN with GCC 10 (to match
           # MATLAB's libstdc++), the Octave leg with the runner default, so
           # their staged libMNN.a are not interchangeable.
-          key: mnn-mex-${{ matrix.label }}-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d
+          key: mnn-mex-${{ matrix.label }}-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r2
 
       - name: Fetch + build patched MNN (static)
         # First run: ~15-20 min compile; later runs hit the cache above.
@@ -604,9 +604,9 @@ jobs:
         include:
           - os: ubuntu-22.04
             binary: build/siamize
-          - os: macos-latest
+          - os: macos-14
             binary: build/siamize
-          - os: windows-latest
+          - os: windows-2022
             # MSVC multi-config generator drops the binary under Release/.
             binary: build/Release/siamize.exe
     steps:
@@ -629,7 +629,7 @@ jobs:
           path: third_party/mnn
           # Key off the script that drives the build + the ref it
           # downloads. Bump either to invalidate the cache.
-          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d
+          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r2
 
       - name: Fetch + build patched MNN (static)
         # First run: 15-20 min compile. Subsequent runs hit the cache
