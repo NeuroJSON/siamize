@@ -93,7 +93,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
-          path: ${{ env.BUNDLE }}.zip
+          path: dist/${{ env.BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -198,7 +198,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
-          path: ${{ env.BUNDLE }}.zip
+          path: dist/${{ env.BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -349,7 +349,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
-          path: ${{ env.BUNDLE }}.zip
+          path: dist/${{ env.BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -465,7 +465,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.MNN_BUNDLE }}
-          path: ${{ env.MNN_BUNDLE }}.zip
+          path: dist/${{ env.MNN_BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -583,7 +583,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
-          path: ${{ env.BUNDLE }}.zip
+          path: dist/${{ env.BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
@@ -814,7 +814,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE }}
-          path: ${{ env.BUNDLE }}.zip
+          path: dist/${{ env.BUNDLE }}
           if-no-files-found: error
           retention-days: 14
 
