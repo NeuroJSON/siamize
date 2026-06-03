@@ -83,9 +83,19 @@ single-binary with no Python runtime.
 #include <thread>
 #include <vector>
 
-#if defined(SIAMIZE_HAS_MNN) && !defined(_WIN32)
-    #include <dlfcn.h>
+#if defined(SIAMIZE_HAS_MNN)
     #define SIAMIZE_CL_ENUM 1
+    #if defined(_WIN32)
+        #ifndef WIN32_LEAN_AND_MEAN
+            #define WIN32_LEAN_AND_MEAN
+        #endif
+        #ifndef NOMINMAX
+            #define NOMINMAX
+        #endif
+        #include <windows.h>
+    #else
+        #include <dlfcn.h>
+    #endif
 #endif
 
 using siam::LogitsVolume;
@@ -194,6 +204,41 @@ long available_ram_mb() {
 }
 
 #ifdef SIAMIZE_CL_ENUM
+
+// Cross-platform dynamic loader for the OpenCL ICD. We dlopen/LoadLibrary the
+// vendor ICD at runtime and resolve the four clGet* entry points by name, so
+// enumeration adds no link-time OpenCL dependency. POSIX uses libdl; Windows
+// uses the Win32 module API + OpenCL.dll (installed by every GPU driver).
+#if defined(_WIN32)
+using cl_dl_handle = HMODULE;
+inline cl_dl_handle cl_dl_open() {
+    return ::LoadLibraryA("OpenCL.dll");
+}
+inline void* cl_dl_sym(cl_dl_handle h, const char* sym) {
+    return reinterpret_cast<void*>(::GetProcAddress(h, sym));
+}
+inline void cl_dl_close(cl_dl_handle h) {
+    ::FreeLibrary(h);
+}
+#else
+using cl_dl_handle = void*;
+inline cl_dl_handle cl_dl_open() {
+    void* h = ::dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
+
+    if (!h) {
+        h = ::dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
+    }
+
+    return h;
+}
+inline void* cl_dl_sym(cl_dl_handle h, const char* sym) {
+    return ::dlsym(h, sym);
+}
+inline void cl_dl_close(cl_dl_handle h) {
+    ::dlclose(h);
+}
+#endif
+
 /*! \brief One row of the flat OpenCL device list (see enumerate_opencl_devices). */
 struct ClDevice {
     int platform      = 0;     // platform index in clGetPlatformIDs order (== clinfo -l)
@@ -245,11 +290,7 @@ struct ClDevice {
 */
 std::vector<ClDevice> enumerate_opencl_devices() {
     std::vector<ClDevice> devs;
-    void* h = dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
-
-    if (!h) {
-        h = dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
-    }
+    cl_dl_handle h = cl_dl_open();
 
     if (!h) {
         return devs;
@@ -259,13 +300,13 @@ std::vector<ClDevice> enumerate_opencl_devices() {
     using getPlatformInfo_t = int (*)(void*, unsigned, size_t, void*, size_t*);
     using getDevices_t     = int (*)(void*, unsigned long long, unsigned, void**, unsigned*);
     using getDeviceInfo_t  = int (*)(void*, unsigned, size_t, void*, size_t*);
-    auto clGetPlatformIDs  = reinterpret_cast<getPlatforms_t>(dlsym(h, "clGetPlatformIDs"));
-    auto clGetPlatformInfo = reinterpret_cast<getPlatformInfo_t>(dlsym(h, "clGetPlatformInfo"));
-    auto clGetDeviceIDs    = reinterpret_cast<getDevices_t>(dlsym(h, "clGetDeviceIDs"));
-    auto clGetDeviceInfo   = reinterpret_cast<getDeviceInfo_t>(dlsym(h, "clGetDeviceInfo"));
+    auto clGetPlatformIDs  = reinterpret_cast<getPlatforms_t>(cl_dl_sym(h, "clGetPlatformIDs"));
+    auto clGetPlatformInfo = reinterpret_cast<getPlatformInfo_t>(cl_dl_sym(h, "clGetPlatformInfo"));
+    auto clGetDeviceIDs    = reinterpret_cast<getDevices_t>(cl_dl_sym(h, "clGetDeviceIDs"));
+    auto clGetDeviceInfo   = reinterpret_cast<getDeviceInfo_t>(cl_dl_sym(h, "clGetDeviceInfo"));
 
     if (!clGetPlatformIDs || !clGetPlatformInfo || !clGetDeviceIDs || !clGetDeviceInfo) {
-        dlclose(h);
+        cl_dl_close(h);
         return devs;
     }
 
@@ -277,7 +318,7 @@ std::vector<ClDevice> enumerate_opencl_devices() {
     unsigned nplat = 0;
 
     if (clGetPlatformIDs(0, nullptr, &nplat) != 0 || nplat == 0) {
-        dlclose(h);
+        cl_dl_close(h);
         return devs;
     }
 
@@ -358,7 +399,7 @@ std::vector<ClDevice> enumerate_opencl_devices() {
         }
     }
 
-    dlclose(h);
+    cl_dl_close(h);
     return devs;
 }
 
@@ -368,7 +409,13 @@ void print_opencl_devices() {
     auto devs = enumerate_opencl_devices();
 
     if (devs.empty()) {
-        std::printf("No OpenCL devices found (no ICD loadable via libOpenCL).\n");
+        std::printf("No OpenCL devices found (no ICD loadable via "
+#if defined(_WIN32)
+                    "OpenCL.dll"
+#else
+                    "libOpenCL.so"
+#endif
+                    ").\n");
         return;
     }
 
