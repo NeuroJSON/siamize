@@ -212,12 +212,14 @@ jobs:
             cmake_flag: -DSIAMIZE_BUILD_OCTAVE_MEX=ON
             mex_file: matlab/siamex.mex
             mnn_mex: true
+            mnn_mex_target: siamize_oct
           - label: linux-matlab
             os: ubuntu-22.04
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
             mex_file: matlab/siamex.mexa64
             mnn_mex: true
+            mnn_mex_target: siamize_mex
           - label: windows-matlab
             os: windows-latest
             kind: matlab
@@ -365,14 +367,23 @@ jobs:
 
       - name: Fetch + build patched MNN (static)
         # First run: ~15-20 min compile; later runs hit the cache above.
+        # SIAMIZE_GLIBCXX_COMPAT=1 pins condition_variable::wait@3.4.11 in
+        # libMNN so the (dynamic-libstdc++) MEX loads in MATLAB's older
+        # libstdc++. Safe here because the MEX never uses -static-libstdc++;
+        # the CLI/docker MNN builds leave it unset (see fetch_mnn.sh).
         if: matrix.mnn_mex && steps.mnn-mex-cache.outputs.cache-hit != 'true'
         env:
           MNN_STATIC: "1"
+          SIAMIZE_GLIBCXX_COMPAT: "1"
           CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
           CXX: ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'g++-10' || '' }}
         run: scripts/fetch_mnn.sh
 
       - name: Build MNN/OpenCL MEX
+        # Build ONLY the MEX target -- NOT the `siamize` CLI. The CLI links
+        # -static-libstdc++, which cannot resolve the @3.4.11 versioned
+        # reference in the compat-built libMNN; the MEX uses dynamic libstdc++
+        # and links it fine.
         if: matrix.mnn_mex
         env:
           CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
@@ -380,13 +391,22 @@ jobs:
         run: |
           cmake -S . -B build-mnn -DCMAKE_BUILD_TYPE=Release \
               -DSIAMIZE_BACKEND=mnn ${{ matrix.cmake_flag }}
-          cmake --build build-mnn --config Release --parallel
+          cmake --build build-mnn --config Release --parallel \
+              --target ${{ matrix.mnn_mex_target }}
 
       - name: Verify MNN MEX exists
         if: matrix.mnn_mex
         run: |
           ls -la "${{ matrix.mex_file }}"
           test -s "${{ matrix.mex_file }}"
+          # Diagnostic: the highest GLIBCXX symbol version the MEX requires.
+          # With the GCC 10 toolchain pin (fetch_mnn + the Build step) this
+          # must stay <= 3.4.28 so the MEX loads in stock MATLAB. A higher
+          # value here means the GCC 10 pin regressed and the MATLAB smoke-load
+          # below will fail -- fix the toolchain, not with a runtime preload.
+          echo "--- MNN MEX max GLIBCXX requirement (want <= 3.4.28 for MATLAB) ---"
+          objdump -T "${{ matrix.mex_file }}" 2>/dev/null \
+            | grep -oE "GLIBCXX_[0-9.]+" | sort -V | tail -3 || true
 
       - name: Smoke-load MNN MEX (Octave)
         if: matrix.mnn_mex && matrix.kind == 'octave' && runner.os == 'Linux'
@@ -399,6 +419,12 @@ jobs:
           grep -q "MNN MEX loaded" mex-mnn.log
 
       - name: Smoke-load MNN MEX (MATLAB)
+        # No LD_PRELOAD: libMNN is built with GCC 10 (see fetch_mnn's compiler
+        # pin + the gcc-10 CC/CXX on the Build step), so the MEX stays within
+        # MATLAB's bundled libstdc++ and must load as-is -- exactly like the
+        # ORT MATLAB MEX. If this step regresses on a GLIBCXX symbol, the
+        # diagnostic above shows the floor and the fix is the toolchain, not a
+        # preload that would only mask a non-portable artifact.
         if: matrix.mnn_mex && matrix.kind == 'matlab'
         uses: matlab-actions/run-command@v2
         with:

@@ -128,6 +128,14 @@ fi
 
 # CMake configure + build the C++ library.
 CMAKE_BUILD="$SRC_DIR/build-siamize"
+# A forced rebuild reconfigures from scratch. CMake caches CMAKE_CXX_FLAGS and
+# the compiler in the build dir, so without wiping it a FORCE rebuild would
+# silently keep the previous run's flags -- e.g. toggling SIAMIZE_GLIBCXX_COMPAT
+# or CC/CXX would have no effect. (Non-forced reruns exit early above, so this
+# only fires when the user explicitly asked to rebuild.)
+if [[ "$FORCE" == "1" ]]; then
+    rm -rf "$CMAKE_BUILD"
+fi
 mkdir -p "$CMAKE_BUILD"
 
 if [[ "$MNN_STATIC" == "1" ]]; then
@@ -161,6 +169,39 @@ CMAKE_FLAGS=(
 )
 if [[ "$MNN_OPENCL" == "1" ]]; then
     CMAKE_FLAGS+=(-DMNN_OPENCL=ON)
+fi
+
+# Pin the compiler explicitly when CC / CXX are exported. cmake only reads
+# CC/CXX from the environment on a *fresh* build dir, which is fragile in CI
+# (a reused tree or a runner default can win); passing them as cmake flags is
+# unambiguous. Empty / unset CC/CXX -> cmake's default compiler (the existing
+# behavior for every other caller). This keeps the compiler from emitting
+# references to symbols introduced only in a newer libstdc++; the one symbol
+# that needs special handling regardless of compiler is pinned just below.
+if [[ -n "${CC:-}" ]]; then
+    CMAKE_FLAGS+=(-DCMAKE_C_COMPILER="$CC")
+fi
+if [[ -n "${CXX:-}" ]]; then
+    CMAKE_FLAGS+=(-DCMAKE_CXX_COMPILER="$CXX")
+fi
+
+# Opt-in (SIAMIZE_GLIBCXX_COMPAT=1): force std::condition_variable::wait (MNN's
+# thread pool, ThreadPool.cpp / WorkerThread.cpp) to its long-standing
+# GLIBCXX_3.4.11 symbol instead of the gcc-12 default @3.4.30. libMNN's
+# reference is unversioned, so the version is stamped at the final link against
+# the build host's libstdc++ -- on Ubuntu 22.04+ that's 3.4.30, which MATLAB's
+# bundled libstdc++ lacks, so an MNN-backed MEX built there won't load.
+# Force-including the directive (see scripts/glibcxx_compat.h) stamps 3.4.11.
+#
+# IMPORTANT: this is for libMNN that will be linked with DYNAMIC libstdc++
+# (the MATLAB/Octave MEX). A symbol-versioned reference CANNOT be satisfied by
+# `-static-libstdc++` (the CLI and docker binaries) -- the static archive has
+# no version nodes, so the link fails with "undefined reference to ...@3.4.11".
+# Hence opt-in and OFF by default: the CLI / docker / cpp-build-opencl builds
+# leave it unset and stay statically linkable; only the MEX libMNN build sets
+# it. Linux/ELF only (the -include flag is gcc/clang syntax; symbol is glibc++).
+if [[ "$OS_NAME" == "Linux" && "${SIAMIZE_GLIBCXX_COMPAT:-0}" == "1" ]]; then
+    CMAKE_FLAGS+=(-DCMAKE_CXX_FLAGS="-include $SCRIPT_DIR/glibcxx_compat.h")
 fi
 
 echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL, static=$MNN_STATIC)"
