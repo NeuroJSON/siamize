@@ -384,21 +384,29 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
 /*! \fn    json build_label_table(ClassSet class_set, int num_classes)
     \brief Build a JGIFTI-style LabelTable for the labelmap output
 
-    Constructs the per-class anatomical name + RGBA color dictionary
-    that goes into `NIFTIHeader._DataInfo_.LabelTable`. Follows the
-    JGIFTI specification's object form (keyed by stringified integer
-    label IDs) -- see
+    Constructs the per-class anatomical dictionary that goes into
+    `NIFTIHeader._DataInfo_.LabelTable`. Follows the JGIFTI
+    specification's object form (keyed by stringified integer label
+    IDs) -- see
     https://github.com/NeuroJSON/jgifti/blob/main/JGIFTI_specification.md
+
+    Each entry carries:
+      - "Label": a one-word display token (e.g. "Hippocampus");
+      - "Name":  the full anatomical name (e.g. "Cerebellar gray matter");
+      - "SIAMLabel": the original (capitalization-normalized) SIAM v0.3
+        token from label_siamV03_.json (e.g. "Hippo"), for provenance
+        (SIAM presets only);
+      - "RGBA":  normalized [0,1] color.
 
     Two presets are emitted today:
 
       - SIAM v0.3 (18 classes, when class_set == CUSTOM_N AND
         num_classes == 18): the SIAM tissue dictionary from
-        label_siamV03_.json (background, GM, WM, CSF, CSFv, cerGM,
-        Thal, Pal, Put, Caud, Accu, Amyg, Hippo, Dura, vascular,
+        label_siamV03_.json (Background, GM, WM, CSF, CSFv, CerGM,
+        Thal, Pal, Put, Caud, Accu, Amyg, Hippo, Dura, Vascular,
         Skull, Head, Anomalies).
       - SPM (6 classes, when class_set == SPM): GM, WM, CSF, Bone,
-        Soft, Air in spm12/tpm/TPM.nii channel order.
+        Soft, Air in spm12/tpm/TPM.nii channel order (no SIAMLabel).
 
     For other class sets we return an empty json::object() and the
     caller omits LabelTable entirely; viewers will then fall back to
@@ -416,10 +424,21 @@ json build_label_table(ClassSet class_set, int num_classes) {
     // {label-id -> {"Label": name, "RGBA": [r,g,b,a]}}
     json tbl = json::object();
 
-    auto add = [&](int id, const char* name,
+    // Label = one-word display token; Name = full anatomical name;
+    // SIAMLabel = the original (capitalization-normalized) SIAM v0.3
+    // token from label_siamV03_.json, for provenance. siam_label is
+    // nullptr for non-SIAM sets (e.g. SPM), which then omit SIAMLabel.
+    auto add = [&](int id, const char* label, const char* name,
+                   const char* siam_label,
     float r, float g, float b, float a) {
         json entry = json::object();
-        entry["Label"] = name;
+        entry["Label"] = label;
+        entry["Name"]  = name;
+
+        if (siam_label) {
+            entry["SIAMLabel"] = siam_label;
+        }
+
         entry["RGBA"]  = std::vector<float> {r, g, b, a};
         tbl[std::to_string(id)] = entry;
     };
@@ -427,12 +446,12 @@ json build_label_table(ClassSet class_set, int num_classes) {
     if (class_set == ClassSet::SPM) {
         // SPM12 6-class TPM order: GM, WM, CSF, Bone, Soft, Air.
         // Air keeps alpha=0 per JGIFTI "unassigned -> transparent".
-        add(0, "GM",   0.700f, 0.700f, 0.700f, 1.0f);
-        add(1, "WM",   0.950f, 0.950f, 0.950f, 1.0f);
-        add(2, "CSF",  0.000f, 0.600f, 0.900f, 1.0f);
-        add(3, "Bone", 0.900f, 0.850f, 0.550f, 1.0f);
-        add(4, "Soft", 0.950f, 0.750f, 0.650f, 1.0f);
-        add(5, "Air",  0.000f, 0.000f, 0.000f, 0.0f);
+        add(0, "GM",   "Gray matter",         nullptr, 0.700f, 0.700f, 0.700f, 1.0f);
+        add(1, "WM",   "White matter",        nullptr, 0.950f, 0.950f, 0.950f, 1.0f);
+        add(2, "CSF",  "Cerebrospinal fluid", nullptr, 0.000f, 0.600f, 0.900f, 1.0f);
+        add(3, "Bone", "Bone",                nullptr, 0.900f, 0.850f, 0.550f, 1.0f);
+        add(4, "Soft", "Soft tissue",         nullptr, 0.950f, 0.750f, 0.650f, 1.0f);
+        add(5, "Air",  "Air",                 nullptr, 0.000f, 0.000f, 0.000f, 0.0f);
         return tbl;
     }
 
@@ -442,24 +461,25 @@ json build_label_table(ClassSet class_set, int num_classes) {
         // visually separate from cortical GM; CSF / CSFv get blue
         // variants; skull/head get bone/flesh tones; anomalies get
         // magenta for high-visibility QC.
-        add( 0, "background", 0.000f, 0.000f, 0.000f, 0.0f);
-        add( 1, "GM",         0.700f, 0.700f, 0.700f, 1.0f);
-        add( 2, "WM",         0.950f, 0.950f, 0.950f, 1.0f);
-        add( 3, "CSF",        0.000f, 0.600f, 0.900f, 1.0f);
-        add( 4, "CSFv",       0.000f, 0.300f, 0.700f, 1.0f);
-        add( 5, "cerGM",      0.550f, 0.550f, 0.550f, 1.0f);
-        add( 6, "Thal",       0.800f, 0.400f, 0.300f, 1.0f);
-        add( 7, "Pal",        0.950f, 0.600f, 0.100f, 1.0f);
-        add( 8, "Put",        0.700f, 0.200f, 0.200f, 1.0f);
-        add( 9, "Caud",       0.950f, 0.850f, 0.200f, 1.0f);
-        add(10, "Accu",       0.550f, 0.350f, 0.200f, 1.0f);
-        add(11, "Amyg",       0.450f, 0.850f, 0.450f, 1.0f);
-        add(12, "Hippo",      0.150f, 0.550f, 0.200f, 1.0f);
-        add(13, "Dura",       0.700f, 0.600f, 0.400f, 1.0f);
-        add(14, "vascular",   0.800f, 0.050f, 0.050f, 1.0f);
-        add(15, "Skull",      0.900f, 0.850f, 0.550f, 1.0f);
-        add(16, "Head",       0.950f, 0.750f, 0.650f, 1.0f);
-        add(17, "Anomalies",  1.000f, 0.000f, 1.000f, 1.0f);
+        //   id  Label         Name                               SIAMLabel
+        add( 0, "Background",  "Background",                       "Background", 0.000f, 0.000f, 0.000f, 0.0f);
+        add( 1, "GM",          "Cerebral gray matter",             "GM",         0.700f, 0.700f, 0.700f, 1.0f);
+        add( 2, "WM",          "Cerebral white matter",            "WM",         0.950f, 0.950f, 0.950f, 1.0f);
+        add( 3, "CSF",         "Cerebrospinal fluid",              "CSF",        0.000f, 0.600f, 0.900f, 1.0f);
+        add( 4, "CSFv",        "Ventricular cerebrospinal fluid",  "CSFv",       0.000f, 0.300f, 0.700f, 1.0f);
+        add( 5, "CerebellumGM", "Cerebellar gray matter",          "CerGM",      0.550f, 0.550f, 0.550f, 1.0f);
+        add( 6, "Thalamus",    "Thalamus",                         "Thal",       0.800f, 0.400f, 0.300f, 1.0f);
+        add( 7, "Pallidum",    "Globus pallidus",                  "Pal",        0.950f, 0.600f, 0.100f, 1.0f);
+        add( 8, "Putamen",     "Putamen",                          "Put",        0.700f, 0.200f, 0.200f, 1.0f);
+        add( 9, "Caudate",     "Caudate nucleus",                  "Caud",       0.950f, 0.850f, 0.200f, 1.0f);
+        add(10, "Accumbens",   "Nucleus accumbens",                "Accu",       0.550f, 0.350f, 0.200f, 1.0f);
+        add(11, "Amygdala",    "Amygdala",                         "Amyg",       0.450f, 0.850f, 0.450f, 1.0f);
+        add(12, "Hippocampus", "Hippocampus",                      "Hippo",      0.150f, 0.550f, 0.200f, 1.0f);
+        add(13, "Dura",        "Dura mater",                       "Dura",       0.700f, 0.600f, 0.400f, 1.0f);
+        add(14, "Vascular",    "Blood vessels",                    "Vascular",   0.800f, 0.050f, 0.050f, 1.0f);
+        add(15, "Skull",       "Skull",                            "Skull",      0.900f, 0.850f, 0.550f, 1.0f);
+        add(16, "Head",        "Extracranial soft tissue",         "Head",       0.950f, 0.750f, 0.650f, 1.0f);
+        add(17, "Anomalies",   "Anomalies",                        "Anomalies",  1.000f, 0.000f, 1.000f, 1.0f);
         return tbl;
     }
 
