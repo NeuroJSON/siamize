@@ -369,7 +369,7 @@ jobs:
           # Per-leg key: the MATLAB leg builds MNN with GCC 10 (to match
           # MATLAB's libstdc++), the Octave leg with the runner default, so
           # their staged libMNN.a are not interchangeable.
-          key: mnn-mex-${{ matrix.label }}-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r3
+          key: mnn-mex-${{ matrix.label }}-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r4
 
       - name: Fetch + build patched MNN (static)
         # First run: ~15-20 min compile; later runs hit the cache above.
@@ -629,7 +629,7 @@ jobs:
           path: third_party/mnn
           # Key off the script that drives the build + the ref it
           # downloads. Bump either to invalidate the cache.
-          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r3
+          key: mnn-${{ runner.os }}-static-${{ hashFiles('scripts/fetch_mnn.sh') }}-v3.5-opencl-conv3d-r4
 
       - name: Fetch + build patched MNN (static)
         # First run: 15-20 min compile. Subsequent runs hit the cache
