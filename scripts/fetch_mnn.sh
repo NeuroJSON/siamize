@@ -173,6 +173,15 @@ CMAKE_FLAGS=(
     -DMNN_BUILD_TRAIN=OFF
     -DMNN_BUILD_QUANTOOLS=OFF
 )
+# On Windows, match the C runtime to siamize's. siamize builds with
+# SIAMIZE_STATIC_LINK=ON, which selects the static CRT (/MT); MNN defaults to
+# the dynamic CRT (/MD). Statically linking a /MD MNN.lib into a /MT siamize.exe
+# fails with LNK2038 "RuntimeLibrary mismatch" plus a cascade of unresolved
+# __imp_* CRT imports. MNN_WIN_RUNTIME_MT=ON rebuilds MNN with /MT to match.
+case "$OS_NAME" in
+    MINGW*|MSYS*|CYGWIN*) CMAKE_FLAGS+=(-DMNN_WIN_RUNTIME_MT=ON) ;;
+esac
+
 if [[ "$MNN_OPENCL" == "1" ]]; then
     CMAKE_FLAGS+=(-DMNN_OPENCL=ON)
 fi
