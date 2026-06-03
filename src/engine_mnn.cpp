@@ -77,6 +77,24 @@ namespace siam {
 
 namespace {
 
+/// Portable setenv(name, value, /*overwrite=*/0): set the variable only if
+/// it isn't already present, so a user can still override by exporting it.
+/// POSIX has setenv; MSVC has only _putenv_s (which always overwrites), so
+/// on Windows we check for an existing value first to keep the don't-
+/// overwrite semantics.
+void set_env_if_absent(const char* name, const char* value) {
+#if defined(_WIN32)
+    size_t sz = 0;
+
+    if (::getenv_s(&sz, nullptr, 0, name) == 0 && sz == 0) {
+        ::_putenv_s(name, value);
+    }
+
+#else
+    ::setenv(name, value, 0);
+#endif
+}
+
 /// Map a device string to an MNN forward type, honoring build-time
 /// backend availability. Anything we can't resolve falls back to CPU.
 MNNForwardType resolve_forward_type(const std::string& device, bool verbose) {
@@ -365,8 +383,8 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // Set the env vars at engine construction time so callers don't have
     // to remember to export them. setenv with overwrite=0 lets a user
     // still override by setting SIAM_DISABLE_GEOM_*=0 explicitly.
-    ::setenv("SIAM_DISABLE_GEOM_CONV3D",   "1", 0);
-    ::setenv("SIAM_DISABLE_GEOM_DECONV3D", "1", 0);
+    set_env_if_absent("SIAM_DISABLE_GEOM_CONV3D",   "1");
+    set_env_if_absent("SIAM_DISABLE_GEOM_DECONV3D", "1");
 
     const bool _prof = std::getenv("SIAMIZE_PHASE") || std::getenv("SIAMIZE_OP_PROFILE");
     auto _c0 = std::chrono::steady_clock::now();
