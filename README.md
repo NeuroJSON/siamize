@@ -4,7 +4,7 @@
 
 * **Copyright**: (C) Qianqian Fang (2026) \<q.fang at neu.edu>
 * **License**: Apache License, Version 2.0
-* **Version**: 0.2.0
+* **Version**: 0.2.0 (Agate)
 * **GitHub**: [https://github.com/NeuroJSON/siamize](https://github.com/NeuroJSON/siamize)
 * **Docker**: [https://hub.docker.com/r/openjdata/siamize](https://hub.docker.com/r/openjdata/siamize)
 * **Upstream**: [https://github.com/romainVala/SIAM](https://github.com/romainVala/SIAM) — SIAM v0.3 by Valabregue, Khemir, Bardinet, Rousseau, Auzias & Dorent (2026), [arXiv:2605.02737](https://arxiv.org/abs/2605.02737)
