@@ -347,7 +347,9 @@ jobs:
           else
               VER="${BASE}-${GITHUB_SHA:0:7}"
           fi
-          BUNDLE="siamex-${VER}-${{ matrix.label }}"
+          # Backend last, matching the CLI siamize-<ver>-<plat>-<backend>:
+          # the ORT MEX is now the CUDA EP (-> -cuda); the MNN MEX is -opencl.
+          BUNDLE="siamex-${VER}-${{ matrix.label }}-cuda"
           scripts/package.sh mex "$BUNDLE"
           echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
@@ -462,7 +464,7 @@ jobs:
           else
               VER="${BASE}-${GITHUB_SHA:0:7}"
           fi
-          MNN_BUNDLE="siamex-opencl-${VER}-${{ matrix.label }}"
+          MNN_BUNDLE="siamex-${VER}-${{ matrix.label }}-opencl"
           scripts/package.sh openclmex "$MNN_BUNDLE"
           echo "MNN_BUNDLE=$MNN_BUNDLE" >> "$GITHUB_ENV"
 
