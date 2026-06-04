@@ -175,6 +175,27 @@ copy_mex() {
     rm -f "${stagedir}/jsonlab/.git"
     find "${stagedir}/jsonlab" -name '.git*' -prune -exec rm -rf {} + 2>/dev/null || true
     cp matlab/README.md "${stagedir}/README.md"
+
+    # If a GPU ORT was fetched (ORT_BUILD=gpu), the CUDA provider plugins are
+    # present -- ship them next to the MEX so a GPU host uses the CUDA EP. ORT
+    # loads them lazily at session creation (and falls back to CPU otherwise),
+    # so the bundle still works on CPU-only hosts. The CUDA 12 + cuDNN 9 runtime
+    # come from the host, same as the siamize-*-cuda CLI bundle. A CPU ORT build
+    # has no such libs, so this is skipped (the MEX stays CPU-only).
+    case "${os}" in
+        windows)
+            if [ -f "${ort_lib_dir}/onnxruntime_providers_cuda.dll" ]; then
+                cp "${ort_lib_dir}/onnxruntime_providers_cuda.dll"   "${stagedir}/"
+                cp "${ort_lib_dir}/onnxruntime_providers_shared.dll" "${stagedir}/"
+            fi
+            ;;
+        linux)
+            if [ -f "${ort_lib_dir}/libonnxruntime_providers_cuda.so" ]; then
+                cp "${ort_lib_dir}/libonnxruntime_providers_cuda.so"   "${stagedir}/"
+                cp "${ort_lib_dir}/libonnxruntime_providers_shared.so" "${stagedir}/"
+            fi
+            ;;
+    esac
 }
 
 case "${mode}" in

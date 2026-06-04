@@ -263,7 +263,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends g++-10 gcc-10
 
-      - name: Fetch C++ deps (CPU ORT)
+      - name: Fetch C++ deps (GPU ORT)
+        # GPU ORT so the ORT MEX is built with the CUDA EP. Building/linking
+        # the CUDA EP needs no GPU (only running a CUDA session does); ORT
+        # loads libonnxruntime_providers_cuda lazily at session creation and
+        # falls back to CPU when no GPU/CUDA is present -- so the MEX still
+        # loads + runs on CPU-only hosts. Default (cuda12) build; no cuda13.
+        env:
+          ORT_BUILD: gpu
         run: scripts/fetch_deps.sh
 
       - name: Configure
@@ -272,7 +279,7 @@ jobs:
           # references GLIBCXX symbols MATLAB's bundled libstdc++ has.
           CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
           CXX: ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'g++-10' || '' }}
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flag }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIAMIZE_GPU=cuda ${{ matrix.cmake_flag }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
