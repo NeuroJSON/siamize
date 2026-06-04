@@ -1,0 +1,36 @@
+# The image builds from src/ and fetches its own ORT + MNN (fetch_deps.sh /
+# fetch_mnn.sh run inside the builder stage), so host build trees, staged
+# third-party libs, and scratch data must NOT be sent as build context --
+# they only bloat the upload and the builder layer (COPY . /src).
+#
+# NOTE: do not use a blanket *.txt rule here -- it would exclude CMakeLists.txt.
+
+.git
+.github
+.gitignore
+
+# host build / dep trees (rebuilt inside the image)
+build/
+build-*/
+third_party/
+dist/
+models/
+
+# weights, volumes, and other scratch data
+*.mnn
+*.onnx
+*.nii
+*.nii.gz
+*.jnii
+*.bnii
+*.png
+*.zip
+*.gz
+
+# session transcripts / notes left in the tree
+2026-*.txt
+
+# editor / OS cruft
+__pycache__/
+*.pyc
+.DS_Store
