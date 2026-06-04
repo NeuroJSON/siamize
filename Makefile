@@ -62,6 +62,14 @@ ORT_GPU_MARKER_DLL := $(ORT_DIR)/lib/onnxruntime_providers_cuda.dll
 # stable signal that the stage is populated.
 MNN_MARKER := $(MNN_DIR)/include/MNN/Interpreter.hpp
 
+# Default the MNN backend to a static libMNN.a so `make opencl` (and the MEX
+# variants) produce a self-contained binary -- matching the released artifacts
+# and sidestepping the -fvisibility=hidden symbol-export pitfall of a shared
+# libMNN.so. Override with `make opencl MNN_STATIC=0` for a shared build.
+# Exported so scripts/fetch_mnn.sh (invoked by mnn-deps) picks it up.
+MNN_STATIC ?= 1
+export MNN_STATIC
+
 # Docker image (bundles both backends: siamize = ORT/CUDA, siamize-opencl =
 # MNN/OpenCL). The tag is a calendar version vYYYY.M (year.month); bump it
 # per release (e.g. v2026.6 -> v2026.9). Override the tag / CUDA base on the
@@ -136,12 +144,11 @@ opencl: mnn-deps
 # unless FORCE=1), but having a Make-level marker dep is faster than
 # spawning bash every invocation.
 mnn-deps:
-	@if [ -f $(MNN_MARKER) ]; then \
-	    echo "[mnn] already staged under $(MNN_DIR)"; \
-	else \
-	    echo "[mnn] building libMNN (this takes ~15-20 min first time)"; \
-	    scripts/fetch_mnn.sh; \
-	fi
+	@# Always defer to fetch_mnn.sh: it is idempotent (skips instantly when the
+	@# correct libMNN.a / .so for the current MNN_STATIC is already staged) and
+	@# lib-aware, so it rebuilds when switching between static and shared --
+	@# unlike a header-only Make marker, which can't tell the two apart.
+	@scripts/fetch_mnn.sh
 
 # ---- ORT prebuilt management ------------------------------------------------
 
