@@ -173,22 +173,14 @@ CMAKE_FLAGS=(
     -DMNN_BUILD_TRAIN=OFF
     -DMNN_BUILD_QUANTOOLS=OFF
 )
-# On Windows, match MNN's C runtime to the consumer's, or static linking fails
+# On Windows, build MNN with the static CRT (/MT), or static-linking it fails
 # with LNK2038 "RuntimeLibrary mismatch" + unresolved __imp_* CRT imports.
-#   - The CLI (siamize.exe) links the static CRT (/MT, via SIAMIZE_STATIC_LINK),
-#     so MNN must be /MT  -> MNN_WIN_MT=1 (default).
-#   - A MATLAB MEX uses MSVC's dynamic CRT (/MD), so its MNN must be /MD
-#     -> the MEX build passes MNN_WIN_MT=0.
-# Ignored off Windows.
-MNN_WIN_MT="${MNN_WIN_MT:-1}"
+# BOTH consumers use the static CRT: the CLI (siamize.exe) via
+# SIAMIZE_STATIC_LINK, and the MATLAB MEX (siamize_mex) -- CMakeLists also
+# forces /MT on the MEX under SIAMIZE_STATIC_LINK so the .mexw64 is
+# self-contained (Windows MATLAB ships its own MSVCRT). Ignored off Windows.
 case "$OS_NAME" in
-    MINGW*|MSYS*|CYGWIN*)
-        if [[ "$MNN_WIN_MT" == "1" ]]; then
-            CMAKE_FLAGS+=(-DMNN_WIN_RUNTIME_MT=ON)
-        else
-            CMAKE_FLAGS+=(-DMNN_WIN_RUNTIME_MT=OFF)
-        fi
-        ;;
+    MINGW*|MSYS*|CYGWIN*) CMAKE_FLAGS+=(-DMNN_WIN_RUNTIME_MT=ON) ;;
 esac
 
 if [[ "$MNN_OPENCL" == "1" ]]; then
