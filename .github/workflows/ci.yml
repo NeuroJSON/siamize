@@ -231,9 +231,8 @@ jobs:
             kind: matlab
             cmake_flag: -DSIAMIZE_BUILD_MATLAB_MEX=ON
             mex_file: matlab/siamex.mexw64
-            # MNN/OpenCL MEX is built only on the Linux legs for now (the
-            # MNN-backend CI path is Linux-proven; see cpp-build-opencl).
-            mnn_mex: false
+            mnn_mex: true
+            mnn_mex_target: siamize_mex
 
     steps:
       - uses: actions/checkout@v4
@@ -381,6 +380,10 @@ jobs:
         env:
           MNN_STATIC: "1"
           SIAMIZE_GLIBCXX_COMPAT: "1"
+          # The MEX uses MSVC's dynamic CRT (/MD); build MNN /MD to match
+          # (MNN_WIN_MT=0). Ignored off Windows. The CLI opencl build leaves
+          # this default (=1 -> /MT) to match siamize.exe's static CRT.
+          MNN_WIN_MT: "0"
           CC:  ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'gcc-10' || '' }}
           CXX: ${{ (matrix.kind == 'matlab' && runner.os == 'Linux') && 'g++-10' || '' }}
         run: scripts/fetch_mnn.sh
