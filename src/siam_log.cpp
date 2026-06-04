@@ -40,11 +40,50 @@ so call sites stay uncluttered.
 #endif
 
 #ifdef _WIN32
-    #include <io.h>
-    #define SIAM_ISATTY_STDERR() (_isatty(_fileno(stderr)) != 0)
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+    #define NOMINMAX
+#endif
+#include <windows.h>
+
+// A Windows console *is* a tty, but it prints raw escape bytes unless
+// ENABLE_VIRTUAL_TERMINAL_PROCESSING is enabled (Win10+: Windows Terminal,
+// PowerShell, modern conhost). Enable it once on stderr and report whether
+// stderr is now an ANSI-capable console. Redirected stderr (pipe/file) is not
+// a console -> GetConsoleMode fails -> returns false -> no color (correct).
+inline bool siam_stderr_ansi() {
+    static const bool ok = [] {
+        if (_isatty(_fileno(stderr)) == 0) {
+            return false;
+        }
+
+        HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stderr)));
+
+        if (h == nullptr || h == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+
+        DWORD mode = 0;
+
+        if (GetConsoleMode(h, &mode) == 0) {
+            return false;
+        }
+
+        if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+            return true;
+        }
+
+        return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+    }();
+    return ok;
+}
+#define SIAM_ISATTY_STDERR() (siam_stderr_ansi())
 #else
-    #include <unistd.h>
-    #define SIAM_ISATTY_STDERR() (isatty(fileno(stderr)) != 0)
+#include <unistd.h>
+#define SIAM_ISATTY_STDERR() (isatty(fileno(stderr)) != 0)
 #endif
 
 namespace siam {

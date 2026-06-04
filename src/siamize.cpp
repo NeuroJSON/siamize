@@ -75,6 +75,7 @@ single-binary with no Python runtime.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -835,6 +836,26 @@ void usage(const char* exe) {
                   2 on a bad-CLI error
 */
 int main(int argc, char** argv) {
+    // Surface an uncaught C++ exception as a clean one-line error + exit(1),
+    // instead of the default std::terminate -> abort(). On Windows abort()
+    // pops a "Fatal program exit requested" dialog / Windows Error Reporting
+    // (notably under PowerShell), which hides the actual message; this prints
+    // what() so failures are diagnosable everywhere.
+    std::set_terminate([] {
+        if (std::exception_ptr p = std::current_exception()) {
+            try {
+                std::rethrow_exception(p);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "siamize: fatal: %s\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "siamize: fatal: unknown exception\n");
+            }
+        }
+
+        std::fflush(stderr);
+        std::_Exit(EXIT_FAILURE);
+    });
+
     // Default CUDA_DEVICE_ORDER=PCI_BUS_ID so siamize's -G N matches the
     // index a user sees in `nvidia-smi -L`. The CUDA runtime's default
     // is FASTEST_FIRST, which sorts GPUs by perf class (compute capability,
