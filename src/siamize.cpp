@@ -466,6 +466,18 @@ void print_opencl_devices() {
     \return  free VRAM in MiB on the requested GPU, or 0 if unknown
 */
 long available_vram_mb(int gpuid = 0) {
+#if defined(__APPLE__)
+    // Apple (Silicon or Intel) uses unified memory shared by CPU and GPU, and
+    // ships no nvidia-smi. Derive the GPU budget from system memory instead of
+    // probing a tool that doesn't exist. Report HALF of unified memory: the
+    // GPU can't address all of it in one allocation (OpenCL/Metal cap a single
+    // buffer well below total -- that cap, not total RAM, is what the 256^3
+    // patch's workspace overran), and the OS + CPU-side buffers take a share.
+    // Half feeds the VRAM-tight thresholds so e.g. 16 GB -> 8 GB -> 192x192x128.
+    (void)gpuid;
+    const long uni = available_ram_mb();
+    return uni > 0 ? uni / 2 : 0;
+#else
     // Resolve the nvidia-smi device id. `nvidia-smi --id=N` indexes GPUs in
     // physical/NVML order and IGNORES CUDA_VISIBLE_DEVICES, whereas the
     // compute runtime (NVIDIA OpenCL ICD / CUDA) HONORS it and renumbers the
@@ -553,6 +565,7 @@ long available_vram_mb(int gpuid = 0) {
     pclose(pipe);
 #endif
     return mb;
+#endif  // __APPLE__
 }
 
 /*******************************************************************************/
@@ -1376,17 +1389,6 @@ int main(int argc, char** argv) {
     // tier comfortably and must NOT be pushed down to 128 (which would 3.7x
     // its tile count for nothing). Only cards that can't safely hold the ~5 GB
     // upper estimate of the 192 tier drop to 128.
-    // Apple GPU cap: macOS's OpenCL/Metal has a low CL_DEVICE_MAX_MEM_ALLOC_SIZE
-    // (often ~1/4 of unified memory). The 256x256x192 forward-pass workspace
-    // exceeds it and the GPU kernels silently no-op -- a few seconds of runtime,
-    // an all-zero labelmap, and NO CL error surfaced (so our OOM-abort doesn't
-    // fire). available_vram_mb() returns 0 on Apple (it probes nvidia-smi), so
-    // the vram_tight path can't catch this. Treat any macOS GPU run as needing
-    // the proven 192x192x128 tier unless the user set -P explicitly.
-    bool apple_gpu_cap = false;
-#if defined(SIAMIZE_HAS_MNN) && defined(__APPLE__)
-    apple_gpu_cap = gpu_active;
-#endif
     {
         bool patch_shrink_allowed = lowmem_mode;
 #ifdef SIAMIZE_HAS_MNN
@@ -1396,7 +1398,7 @@ int main(int argc, char** argv) {
                                      && avail_vram_mb > 0
                                      && avail_vram_mb < 6 * 1024;
 
-        if (patch_shrink_allowed && !patch_set && (ram_tight || vram_tight || apple_gpu_cap)) {
+        if (patch_shrink_allowed && !patch_set && (ram_tight || vram_tight)) {
             if (vram_very_tight) {
                 patch = {128, 128, 96};
                 auto_applied.push_back("-P 128x128x96");
@@ -1488,8 +1490,7 @@ int main(int argc, char** argv) {
 
     if (!auto_applied.empty()) {
         const char* source = lowmem_mode ? "--lowmem requested"
-                             : (ram_tight || vram_tight) ? "memory-tight host detected"
-                             : "macOS GPU memory-allocation cap";
+                             : "memory-tight host detected";
         siam::log_hint("lowmem preset applied (%s; RAM %ld MB%s%s%s):",
                        source,
                        avail_ram_mb,
