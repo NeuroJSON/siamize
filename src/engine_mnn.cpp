@@ -472,6 +472,23 @@ MnnEngine::MnnEngine(const std::string& model_path,
             mode |= MNN_GPU_MEMORY_BUFFER;
         }
 
+        if (cfg.type == MNN_FORWARD_VULKAN) {
+            // The Vulkan runtime accepts only TUNING_NONE / HEAVY / WIDE
+            // (optionally | MNN_GPU_RECORD_BATCH) and silently replaces any
+            // other value -- including the OpenCL-only FAST and MEMORY_BUFFER
+            // bits above -- with its default. Its buffer backend is always
+            // buffer-based, and the native Conv3D/Deconv3D executors are not
+            // tuned, so NONE costs nothing and skips the pipeline timing
+            // sweeps of the other ops. SIAMIZE_TUNE=wide|heavy re-enables them.
+            mode = MNN_GPU_TUNING_NONE;
+
+            if (tune_env && !strcmp(tune_env, "wide")) {
+                mode = MNN_GPU_TUNING_WIDE;
+            } else if (tune_env && !strcmp(tune_env, "heavy")) {
+                mode = MNN_GPU_TUNING_HEAVY;
+            }
+        }
+
         cfg.numThread = mode;
     } else {
         // CPU path: previously capped at 2 because numThread >= 4 used to
@@ -522,8 +539,10 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // The (platformId, deviceId) pair is resolved by the CLI's flat -G
     // index (see siamize.cpp); deviceId is the device's position among its
     // platform's GPU-type devices, which is what MNN's OpenCLRuntime indexes.
-    // The Vulkan backend uses the same struct with deviceId pointing at a
-    // VkPhysicalDevice index; CUDA / Metal ignore the struct.
+    // CUDA / Metal ignore the struct. Vulkan must NOT receive it: its runtime
+    // reinterprets sharedContext as a full MNNVulkanContext (VkInstance /
+    // VkDevice handles), so the Vulkan device is passed through the
+    // MNN_VULKAN_DEVICE environment variable instead (NeuroJSON/MNN fork).
     //
     // We forward the struct only when the user actually selected a device
     // (gpu_explicit, set by any -G) or a field is > 0. With no -G we leave
@@ -544,7 +563,17 @@ MnnEngine::MnnEngine(const std::string& model_path,
     // OpenCL / Vulkan / Metal; reuse it here to keep the device-set
     // decision in one place.
 
-    if (gpu_dev && (gpu_explicit || gpu_platform > 0 || gpuid > 0)) {
+    if (cfg.type == MNN_FORWARD_VULKAN) {
+        if (gpu_explicit || gpuid > 0) {
+            // Overwrite: an explicit -G beats an inherited environment.
+            const std::string vk_dev = std::to_string(gpuid);
+#ifdef _WIN32
+            ::_putenv_s("MNN_VULKAN_DEVICE", vk_dev.c_str());
+#else
+            ::setenv("MNN_VULKAN_DEVICE", vk_dev.c_str(), 1);
+#endif
+        }
+    } else if (gpu_dev && (gpu_explicit || gpu_platform > 0 || gpuid > 0)) {
         dev_ctx.platformId = static_cast<uint32_t>(gpu_platform);
         dev_ctx.deviceId = static_cast<uint32_t>(gpuid);
         bcfg.sharedContext = &dev_ctx;

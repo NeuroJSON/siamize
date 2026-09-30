@@ -462,7 +462,12 @@ void print_opencl_devices() {
     otherwise (e.g.) the user picks a 24 GB 3090 but the probe sees
     an 8 GB 2080 at index 0 and caps gpu_mem_limit at 6 GB.
 
-    \param  gpuid  0-based GPU index to query (default 0)
+    \param  gpuid  0-based GPU index to query (default 0); -1 = the smallest
+                   free VRAM over all NVIDIA GPUs. The MNN Vulkan backend uses
+                   -1: Vulkan device indices follow vkEnumeratePhysicalDevices,
+                   which interleaves other vendors' GPUs and does not match
+                   nvidia-smi's numbering, so the conservative minimum keeps the
+                   auto patch-shrink from being skipped on a small card.
     \return  free VRAM in MiB on the requested GPU, or 0 if unknown
 */
 long available_vram_mb(int gpuid = 0) {
@@ -530,16 +535,18 @@ long available_vram_mb(int gpuid = 0) {
         }
     }
 
+    // No --id lists every GPU (the gpuid < 0 minimum below).
+    const std::string id_arg = (gpuid < 0) ? std::string() : "--id=" + dev_id;
     char cmd[256];
 #ifdef _WIN32
     std::snprintf(cmd, sizeof(cmd),
-                  "nvidia-smi --id=%s --query-gpu=memory.free "
-                  "--format=csv,noheader,nounits 2>NUL", dev_id.c_str());
+                  "nvidia-smi %s --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>NUL", id_arg.c_str());
     FILE* pipe = _popen(cmd, "r");
 #else
     std::snprintf(cmd, sizeof(cmd),
-                  "nvidia-smi --id=%s --query-gpu=memory.free "
-                  "--format=csv,noheader,nounits 2>/dev/null", dev_id.c_str());
+                  "nvidia-smi %s --query-gpu=memory.free "
+                  "--format=csv,noheader,nounits 2>/dev/null", id_arg.c_str());
     FILE* pipe = popen(cmd, "r");
 #endif
 
@@ -550,12 +557,17 @@ long available_vram_mb(int gpuid = 0) {
     long mb = 0;
     char buf[64] = {0};
 
-    if (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
-        // First line carries the free MB for the requested GPU as a plain int.
+    // One line per GPU with its free MB as a plain int; with --id only the
+    // requested GPU is listed. gpuid < 0 (--id=all) takes the minimum.
+    while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
         long parsed = 0;
 
         if (std::sscanf(buf, "%ld", &parsed) == 1 && parsed > 0) {
-            mb = parsed;
+            mb = (mb == 0) ? parsed : std::min(mb, parsed);
+        }
+
+        if (gpuid >= 0) {
+            break;
         }
     }
 
@@ -652,7 +664,8 @@ void usage(const char* exe) {
                  "  -c, --compute D     MNN forward type: auto|cpu|opencl|vulkan|metal (default auto).\n"
                  "                      auto -> OpenCL when MNN was built with MNN_OPENCL=ON, else CPU.\n"
                  "                      opencl uses MNN's OpenCL backend (NVIDIA via ICD, AMD, Intel iGPU).\n"
-                 "                      vulkan/metal require MNN_VULKAN / MNN_METAL at MNN build time.\n"
+                 "                      vulkan uses MNN's Vulkan buffer backend (any Vulkan 1.1 GPU; build\n"
+                 "                      MNN with MNN_VULKAN=1 scripts/fetch_mnn.sh). metal needs MNN_METAL.\n"
                  "                      No CUDA/TensorRT/CoreML in this build (SIAMIZE_BACKEND=mnn).\n"
                  "                      Per-session kernel-tuning data auto-cached at\n"
                  "                      $SIAMIZE_CACHE_DIR/mnn-tune/<dev>-<prec>.cache;\n"
@@ -711,6 +724,9 @@ void usage(const char* exe) {
                  "                         P:D  : raw MNN platform P, device D (advanced). P is\n"
                  "                                MNN's post-swap platform order (NVIDIA/AMD first,\n"
                  "                                NOT clinfo order); D counts GPUs only. Prefer N.\n"
+                 "                      With -c vulkan: N is 1-based over Vulkan devices (-G 1 =\n"
+                 "                      GPU0 in `vulkaninfo --summary`), P:D uses D. --list-gpu\n"
+                 "                      shows OpenCL devices only.\n"
                  "  -L, --list-gpu      List all OpenCL devices with their (1-based) -G index, then\n"
                  "                      exit (MNN/OpenCL build).\n"
                  "  -t, --thread N      CPU worker threads. Default 0 = auto = min(hardware_\n"
@@ -943,6 +959,8 @@ int main(int argc, char** argv) {
     bool format_set               = false;
     bool coreml_units_set         = false;
 
+    std::string gpu_spec;   // raw -G / --gpu argument, resolved after parsing
+
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto need = [&]() {
@@ -1109,64 +1127,9 @@ int main(int argc, char** argv) {
             //               Raw MNN indices: P is post-swap (NVIDIA/AMD first,
             //               not clinfo order) and D counts GPUs only. Advanced
             //               escape hatch; prefer the flat -G N + --list-gpu.
-            std::string s = need();
-            size_t colon = s.find(':');
-
-            if (colon == std::string::npos) {
-                int idx = std::stoi(s);
-#ifdef SIAMIZE_CL_ENUM
-
-                // -G 0 keeps the default (auto-pick first GPU); -G N (1-based)
-                // maps the flat clinfo-order index to MNN's (platformId, deviceId).
-                if (idx > 0) {
-                    auto devs = enumerate_opencl_devices();
-
-                    if (!devs.empty()) {
-                        if (idx > static_cast<int>(devs.size())) {
-                            siam::log_warn("[gpu] -G %d out of range: only %zu "
-                                           "OpenCL device(s) found; using the last "
-                                           "one (see --list-gpu)",
-                                           idx, devs.size());
-                            idx = static_cast<int>(devs.size());
-                        }
-
-                        const auto& d = devs[idx - 1];
-
-                        if (!d.is_gpu) {
-                            // MNN's OpenCL backend can only run on GPU devices;
-                            // pointing it at a CPU-OpenCL device (e.g. PoCL)
-                            // makes OpenCLRuntime creation fail and aborts the
-                            // session. Selecting such a device unambiguously
-                            // means "use the CPU", so route to the (multi-
-                            // threaded) MNN CPU backend instead of OpenCL.
-                            siam::log_warn("[gpu] -G %d is a %s OpenCL device "
-                                           "(%s); MNN-OpenCL needs a GPU, running "
-                                           "on the CPU backend instead "
-                                           "(see --list-gpu)",
-                                           idx, d.type.c_str(), d.name.c_str());
-                            device = "cpu";
-                        } else {
-                            // Feed MNN's post-swap platform index, not the clinfo
-                            // one -- see enumerate_opencl_devices() for why.
-                            engine_tuning.gpu_platform = d.mnn_platform;
-                            engine_tuning.gpuid        = d.gpu_index;
-                            engine_tuning.gpu_explicit = true;
-                        }
-                    } else {
-                        // Enumeration unavailable (no ICD): legacy 0-based index.
-                        engine_tuning.gpuid        = idx - 1;
-                        engine_tuning.gpu_explicit = true;
-                    }
-                }
-
-#else
-                engine_tuning.gpuid = idx;  // ORT: CUDA device index (0-based)
-#endif
-            } else {
-                engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
-                engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
-                engine_tuning.gpu_explicit = true;
-            }
+            // Resolved after parsing (see "Resolve -G" below), once -c is known:
+            // the flat index means a different device list for OpenCL and Vulkan.
+            gpu_spec = need();
         } else if (a == "--mnn-fp16") {
             // MNN BackendConfig::Precision_Low. On Volta+ NVIDIA via
             // OpenCL, this engages Tensor Cores for fp16 conv; on AMD
@@ -1269,6 +1232,87 @@ int main(int argc, char** argv) {
     // defaults to true (set above); -q / --quiet flips it off.
     siam::set_verbose(verbose);
 
+    // ----- Resolve -G / --gpu now that the compute device is known --------
+    if (!gpu_spec.empty()) {
+        const std::string& s = gpu_spec;
+#ifdef SIAMIZE_HAS_MNN
+
+        if (device == "vulkan") {
+            // Vulkan has no platforms: -G N (1-based) is device N-1 in
+            // vkEnumeratePhysicalDevices order (`vulkaninfo --summary` GPU<N-1>);
+            // -G P:D uses D. engine_mnn forwards it via MNN_VULKAN_DEVICE.
+            size_t vcolon = s.find(':');
+            int vidx = (vcolon == std::string::npos) ? std::stoi(s) - 1
+                       : std::stoi(s.substr(vcolon + 1));
+
+            if (vidx >= 0) {
+                engine_tuning.gpu_platform = 0;
+                engine_tuning.gpuid        = vidx;
+                engine_tuning.gpu_explicit = true;
+            }
+        } else
+#endif
+        {
+            size_t colon = s.find(':');
+
+            if (colon == std::string::npos) {
+                int idx = std::stoi(s);
+#ifdef SIAMIZE_CL_ENUM
+
+                // -G 0 keeps the default (auto-pick first GPU); -G N (1-based)
+                // maps the flat clinfo-order index to MNN's (platformId, deviceId).
+                if (idx > 0) {
+                    auto devs = enumerate_opencl_devices();
+
+                    if (!devs.empty()) {
+                        if (idx > static_cast<int>(devs.size())) {
+                            siam::log_warn("[gpu] -G %d out of range: only %zu "
+                                           "OpenCL device(s) found; using the last "
+                                           "one (see --list-gpu)",
+                                           idx, devs.size());
+                            idx = static_cast<int>(devs.size());
+                        }
+
+                        const auto& d = devs[idx - 1];
+
+                        if (!d.is_gpu) {
+                            // MNN's OpenCL backend can only run on GPU devices;
+                            // pointing it at a CPU-OpenCL device (e.g. PoCL)
+                            // makes OpenCLRuntime creation fail and aborts the
+                            // session. Selecting such a device unambiguously
+                            // means "use the CPU", so route to the (multi-
+                            // threaded) MNN CPU backend instead of OpenCL.
+                            siam::log_warn("[gpu] -G %d is a %s OpenCL device "
+                                           "(%s); MNN-OpenCL needs a GPU, running "
+                                           "on the CPU backend instead "
+                                           "(see --list-gpu)",
+                                           idx, d.type.c_str(), d.name.c_str());
+                            device = "cpu";
+                        } else {
+                            // Feed MNN's post-swap platform index, not the clinfo
+                            // one -- see enumerate_opencl_devices() for why.
+                            engine_tuning.gpu_platform = d.mnn_platform;
+                            engine_tuning.gpuid        = d.gpu_index;
+                            engine_tuning.gpu_explicit = true;
+                        }
+                    } else {
+                        // Enumeration unavailable (no ICD): legacy 0-based index.
+                        engine_tuning.gpuid        = idx - 1;
+                        engine_tuning.gpu_explicit = true;
+                    }
+                }
+
+#else
+                engine_tuning.gpuid = idx;  // ORT: CUDA device index (0-based)
+#endif
+            } else {
+                engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
+                engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
+                engine_tuning.gpu_explicit = true;
+            }
+        }
+    }
+
     if (input_path.empty() || output_path.empty()) {
         usage(argv[0]);
         return 2;
@@ -1357,7 +1401,7 @@ int main(int argc, char** argv) {
                                 device == "tensorrt");
 #endif
     const long avail_vram_mb = gpu_active
-                               ? available_vram_mb(engine_tuning.gpuid)
+                               ? available_vram_mb(device == "vulkan" ? -1 : engine_tuning.gpuid)
                                : 0;
     const bool ram_tight     = lowmem_mode
                                || (avail_ram_mb  > 0 && avail_ram_mb  < 14 * 1024);
