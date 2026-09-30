@@ -138,3 +138,27 @@ This patch bundle is the basis of the upstream issue draft in
 `Tensor::elementSize()` fix is the most impactful change and would
 benefit any model with > 2 GB intermediate tensors (3D segmentation,
 high-resolution detection, video).
+
+# Vulkan native Conv3D in the NeuroJSON/MNN fork
+
+Branch `siam-vulkan-conv3d`, tag **`v3.5-vulkan-conv3d`** (siamize's default
+`MNN_REF`), six commits on top of `v3.5-opencl-conv3d`. Only the Vulkan
+backend changes; build it with `MNN_VULKAN=1 scripts/fetch_mnn.sh`
+(`-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF`).
+
+| Commit | Change |
+|---|---|
+| `[Vulkan:Perf] allocate device memory from a DEVICE_LOCAL type` | `VulkanMemoryPool` took the first allowed memory type; on NVIDIA's driver that is a flag-less type on the system-RAM heap, so every tensor lived across PCIe (~40x slower end-to-end). |
+| `[Vulkan:Bugfix] Scale / PRelu: cover every spatial dim of 5D tensors` | Plane size was `width() * height() * batch()`, which drops W for (N, C, D, H, W) -- wrong InstanceNorm affine in every block. |
+| `[Vulkan:Bugfix] report device out-of-memory instead of crashing` | Failed `vkAllocateMemory` now propagates as `OUT_OF_MEMORY` from resize (it used to bind a null allocation and segfault in the driver); `VulkanRaster` temp sizes `int` -> `size_t` (3.2 GB concat at 256x256x192). |
+| `[Vulkan:Feature] MNN_VULKAN_DEVICE selects the physical device` | `sharedContext` is read as a full `MNNVulkanContext`, so it cannot carry an index. |
+| `[Vulkan:Feature] native Conv3D / ConvTranspose3D for the buffer backend` | `VulkanConvolution3D.cpp` + `glsl/conv3d.comp`: one shader for conv and gather-form transposed conv; kernel / stride / pad / NC4HW4-vs-NCHW layouts / tiling are specialization constants; `OC_TILE` x 4 channels x `W_TILE` interleaved voxels per invocation, fp32 accumulation; weights in device-local memory. `compiler/splice_shader.py` adds one shader to the generated tables without regenerating all 8 MB (rerun `python3 splice_shader.py conv3d.comp` after editing the shader). |
+| `[Vulkan:Perf] fast host<->device copies: transfer queue, cached staging` | `HOST_CACHED` staging (CPU reads of write-combined memory ran at ~0.65 GB/s), threaded memcpy / fp16 conversion for copies >= 16 MB, copies on a dedicated transfer queue (RTX 5090: 5.7 GB/s on the graphics/compute queue vs 28.4 GB/s on the copy engines; readback 79 -> 24 ms per 340 MB tile), `CONCURRENT` buffer sharing across the two families, and an opt-in `VK_EXT_external_memory_host` path (`MNN_VULKAN_HOST_IMPORT=1`; per-copy page pinning makes it slower than staging on the GPUs tested). |
+
+Every commit builds on its own. Validation (`tools/mnn_probe/layercheck.cpp`,
+fold 0, random N(0,1) input, 128^3, fp32): all 529 op outputs within 2e-3
+relative of MNN CPU, final argmax agreement 99.975 % on TITAN V and on the AMD
+Raphael iGPU (RADV). End-to-end on `sub-01_T1w`: 99.9999 % voxel agreement
+with MNN-OpenCL, 99.99 % with ORT-CUDA, bit-identical across TITAN V and
+RTX 5090. `VK_LAYER_KHRONOS_validation` (errors, warnings, perf,
+synchronization validation) reports nothing, with and without host import.

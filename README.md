@@ -418,9 +418,13 @@ cmake --build build -j
 What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
-   [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Two relevant
-   refs:
-   - **`v3.5-opencl-conv3d` (default)** — the production ref:
+   [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Relevant refs:
+   - **`v3.5-vulkan-conv3d` (default)** — `v3.5-opencl-conv3d` plus the
+     native-Conv3D / native-Deconv3D Vulkan path and the Vulkan
+     buffer-backend fixes SIAM needs (head of the `siam-vulkan-conv3d`
+     branch; see [Vulkan](#vulkan)). Only the Vulkan backend differs, so
+     OpenCL / CPU builds behave exactly as with `v3.5-opencl-conv3d`.
+   - **`v3.5-opencl-conv3d`** — the previous production ref:
      `v3.5-int64fix` plus a native-Conv3D / native-Deconv3D OpenCL
      BUFFER path, output tiling, a MatMul LWS fix, and the
      `siam_mnn_*_cl_error` diagnostics. Roughly **17× faster** Conv3D
@@ -439,7 +443,7 @@ What `scripts/fetch_mnn.sh` does:
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-opencl-conv3d`); e.g.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-vulkan-conv3d`); e.g.
 `MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
@@ -448,6 +452,32 @@ pass `MNN_STATIC=1` on the make line:
 ```bash
 MNN_STATIC=1 MNN_REF=siam-opencl-conv3d make opencl
 ```
+
+#### Vulkan
+
+The same MNN build can also carry MNN's Vulkan backend, which runs on any
+Vulkan 1.1 GPU (NVIDIA, AMD via Mesa RADV or AMDVLK, Intel, ARM Mali /
+Adreno) through the system Vulkan loader -- no CUDA, cuDNN or OpenCL ICD:
+
+```bash
+MNN_VULKAN=1 scripts/fetch_mnn.sh               # OpenCL + Vulkan in one libMNN
+cmake -S . -B build -DSIAMIZE_BACKEND=mnn && cmake --build build -j
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c vulkan            # first Vulkan GPU
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c vulkan -G 3       # GPU2 in vulkaninfo
+build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c vulkan --mnn-fp16 # fp16 storage
+```
+
+`MNN_VULKAN=1` builds MNN's buffer-based Vulkan backend
+(`-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF`) from the default
+`v3.5-vulkan-conv3d` ref, which adds a native Vulkan Conv3D /
+ConvTranspose3D executor (the Vulkan counterpart of the OpenCL native-Conv3D
+path) and the buffer-backend fixes SIAM needs: device-local tensor memory,
+copies on the GPU's dedicated transfer queue, 5D Scale / PRelu, clean
+out-of-memory errors -- see [the fork notes](tools/mnn_probe/patches/README.md).
+Stock MNN Vulkan has no Conv3D kernel at all: every Conv3D falls back to the
+CPU (~30 min per fold).
+Vulkan output matches MNN-OpenCL on 99.9999 % of voxels and ORT-CUDA on
+99.99 %; see [Performance](#mnn-gpu-fold-0-192x192x128-patch) for timings.
 
 The siamize CMakeLists.txt auto-detects `.a` vs `.so/.dylib` under
 `third_party/mnn/lib/` and switches the link line accordingly. The
@@ -464,17 +494,21 @@ MNN-relevant CLI flags:
 
 | Flag | Default | Effect |
 |---|---|---|
-| `-c {auto\|cpu\|opencl\|vulkan\|metal}` | `auto` | MNN forward type. `auto` picks OpenCL when MNN was built with `MNN_OPENCL=ON`, else CPU. `vulkan` / `metal` require the corresponding MNN build flag. |
-| `-G N` / `-G P:D` | `0` | OpenCL/Vulkan device. `-G N` is a **1-based flat index** over every OpenCL device across all platforms in `clinfo -l` order (CPU-OpenCL / PoCL included), so `-G 1` reaches a GPU on a non-zero platform without the `P:D` form; `-G 0` = auto (first GPU). Run `--list-gpu` to see the index→device table. Selecting a non-GPU device routes to the (multithreaded) CPU backend with a warning. `-G P:D` is a raw MNN platform/device escape hatch (P is MNN's post-swap order — NVIDIA/AMD first — not `clinfo`). MNN's `MNNDeviceContext` device selection is wired up correctly (it honors the chosen platform+device, including platform 0). |
+| `-c {auto\|cpu\|opencl\|vulkan\|metal}` | `auto` | MNN forward type. `auto` picks OpenCL when MNN was built with `MNN_OPENCL=ON`, else CPU. `vulkan` needs `MNN_VULKAN=1 scripts/fetch_mnn.sh` (see [Vulkan](#vulkan)); `metal` needs `MNN_METAL`. |
+| `-G N` / `-G P:D` | `0` | OpenCL/Vulkan device. `-G N` is a **1-based flat index** over every OpenCL device across all platforms in `clinfo -l` order (CPU-OpenCL / PoCL included), so `-G 1` reaches a GPU on a non-zero platform without the `P:D` form; `-G 0` = auto (first GPU). Run `--list-gpu` to see the index→device table. Selecting a non-GPU device routes to the (multithreaded) CPU backend with a warning. `-G P:D` is a raw MNN platform/device escape hatch (P is MNN's post-swap order — NVIDIA/AMD first — not `clinfo`). MNN's `MNNDeviceContext` device selection is wired up correctly (it honors the chosen platform+device, including platform 0). With `-c vulkan`, `-G N` is a 1-based index over Vulkan devices in `vulkaninfo --summary` order (`-G 1` = `GPU0`) and `-G P:D` uses `D`; it is forwarded as `MNN_VULKAN_DEVICE`. |
 | `--list-gpu` | — | List all OpenCL devices with their (1-based) `-G` index, then exit. |
 | `--mnn-buffer` | **on (BUFFER)** | MNN OpenCL memory layout: `cl_mem` BUFFER (default) vs `image2d_t`. BUFFER is required for the shipped native-Conv3D fp32 weights (`mnn_n3d`); without it OpenCL falls through to a slow ~3300-op geometry decomposition. Use `--mnn-image` to force IMAGE mode (only needed for the legacy int8 `mnn_i8a` weights on drivers whose `conv_2d_buf` int kernel fails to JIT-compile). |
-| `--mnn-fp16` | off | Maps to MNN's `Precision_Normal` — fp16 storage for activations + fp32 compute. Cuts VRAM ~2× on the MNN-OpenCL path. No FLOPs speedup on NVIDIA OpenCL (no Tensor Core access from OpenCL); useful win on Mali / Adreno / Intel Arc. |
+| `--mnn-fp16` | off | Maps to MNN's `Precision_Normal` — fp16 storage for activations + fp32 compute. Cuts VRAM ~2× on the MNN-OpenCL path. No FLOPs speedup on NVIDIA OpenCL (no Tensor Core access from OpenCL); useful win on Mali / Adreno / Intel Arc. On Vulkan it stores activations and weights in fp16 (the native Conv3D still accumulates in fp32): ~9 % faster end-to-end on RTX 4090 / 5090, 99.995 % voxel agreement with fp32. |
 
 MNN-relevant environment variables:
 
 | Env var | Values | Effect |
 |---|---|---|
 | `SIAMIZE_TUNE` | `FAST` (default) / `WIDE` / `NORMAL` / `HEAVY` / `NONE` | OpenCL kernel auto-tuning level. `FAST` is the production default — ~5 s cold cache on 5090, ~13 s on Titan V, ~26 s on 2080 SUPER. `WIDE` can pick faster LWS on Mali / Adreno but has been observed to choose **180 s** kernels on small patches with NVIDIA drivers. Tuned LWS values cache per device + model under `~/.cache/siamize/mnn-tune/opencl-fp32-<MB>m-p<plat>g<dev>.cache`. |
+| `MNN_VULKAN_DEVICE` | integer | Vulkan physical-device index (`vulkaninfo --summary` order); set by `-G` for `-c vulkan`. |
+| `MNN_VULKAN_NO_TRANSFER_QUEUE` | `1` | Keep host<->device copies on the compute queue instead of the GPU's dedicated transfer (copy-engine) queue. |
+| `MNN_VULKAN_HOST_IMPORT` | `1` | Opt-in `VK_EXT_external_memory_host` copies straight into the caller's buffer. Off by default: pinning the pages per copy costs more than the staging memcpy it saves. |
+| `MNN_VK_CONV3D_WTILE` / `MNN_VK_CONV3D_OCTILE` / `MNN_VK_CONV3D_LOCAL` | `2` / `4` / `64` | Vulkan Conv3D tiling: output voxels (along W) and output-channel blocks per invocation, and work-group size. Defaults were tuned on TITAN V, RTX 4090 and RTX 5090; `tools/mnn_probe/layercheck.cpp` times alternatives. |
 | `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |
 
 Weights are served as pre-converted `.mnn` binaries from
@@ -1001,6 +1035,34 @@ CLI (or `engine_tuning.cpu_arena = false` from the MEX). The
 `-v` header surfaces the choice (`--no-arena` is appended when
 the arena is disabled).
 
+### MNN GPU (fold 0, 192x192x128 patch)
+
+Wall time of one fold (`-M 0`) on the bundled `sub-01_T1w.nii.gz`,
+27 tiles, including preprocessing, weight load and output writing; all
+three backends forced to `-P 192x192x128`. ORT uses the fp16 `.onnx`
+weights, MNN the fp32 `.mnn` weights.
+
+| GPU | MNN Vulkan fp32 | MNN Vulkan `--mnn-fp16` | MNN OpenCL fp32 | ORT CUDA EP (warm) |
+|---|---|---|---|---|
+| RTX 5090 (driver 580) | 14.6 s | 13.2 s | 13.6 s | 7.4 s |
+| RTX 4090 (driver 535) | 15.8 s | 14.4 s | 28.7 s | 8.7 s |
+| TITAN V (driver 580) | 28.7 s | 26.3 s | 40.3 s | n/a (pip cuDNN 9 has no sm_70 kernels) |
+
+ORT times are warm runs: the first ORT run on a host took ~14 s, most likely
+because the pip cuDNN JIT-compiles kernels into `~/.nv/ComputeCache`.
+Per tile on the RTX 5090, ORT spends 114 ms in `run_tile` against 303 ms
+(fp32) / 257 ms (fp16) for MNN Vulkan; cuDNN runs the fp16 convolutions on
+Tensor Cores, while the Vulkan Conv3D uses plain fp32-accumulating FMA. A
+`VK_KHR_cooperative_matrix` Conv3D would be the route to closing that gap.
+MNN session setup also costs ~2.6 s vs ~0.7 s for ORT (540 MB fp32 `.mnn`).
+
+The AMD Raphael iGPU (Mesa RADV) in the TITAN V host runs the Vulkan path
+correctly (99.97 % argmax agreement with CPU on a random 128^3 input) but,
+with 2 compute units, slower than the CPU. Output readback (340 MB per tile)
+runs on the GPU's dedicated transfer queue when it has one: 24 ms on the
+RTX 5090 (79 ms on the graphics/compute queue); the TITAN V (40 ms) and this
+RTX 4090 host (70 ms) are PCIe-link-bound either way.
+
 ### NVIDIA GPU (siamize built with `-DSIAMIZE_GPU=cuda`)
 
 | Run | GPU | Time | vs CPU C++ |
@@ -1036,7 +1098,7 @@ covered by a separate smoke-test job.
 | `ort` | `coreml` | `coreml` | Apple Silicon CPU + Metal GPU + ANE via ORT CoreML EP | CI: macos-14 build |
 | `mnn` | (n/a — picked at runtime) | `cpu` | any CPU | vendor-neutral path |
 | `mnn` | | `opencl` | any OpenCL 1.2+ GPU (NVIDIA, AMD, Intel, Mali, Adreno) | shipped, see [MNN section](#optional-mnn-backend-vendor-neutral-gpu) |
-| `mnn` | | `vulkan` | Vulkan 1.0+ GPU (if MNN was built with `MNN_VULKAN=ON`) | build-flag opt-in |
+| `mnn` | | `vulkan` | any Vulkan 1.1 GPU (NVIDIA, AMD, Intel, Mali, Adreno) | `MNN_VULKAN=1 scripts/fetch_mnn.sh`, see [Vulkan](#vulkan) |
 | `mnn` | | `metal` | Apple Metal GPU (if MNN was built with `MNN_METAL=ON`) | build-flag opt-in |
 
 On a given host you build with the backend(s) you want; siamize's `-c

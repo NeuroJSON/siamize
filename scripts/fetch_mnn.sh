@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Fetch and build the patched MNN (NeuroJSON/MNN v3.5-opencl-conv3d) into
+# Fetch and build the patched MNN (NeuroJSON/MNN v3.5-vulkan-conv3d) into
 # third_party/mnn/ so siamize built with `cmake -DSIAMIZE_BACKEND=mnn`
 # can find the include headers and libMNN.so / .dylib / .dll.
 #
 # Why a patched MNN: stock MNN 3.5.0 silently produces wrong logits on
 # SIAM-class workloads (>2 GB intermediate tensors after Conv3DTurn2D),
 # and decomposes Conv3D into thousands of geometry ops. The NeuroJSON/MNN
-# fork's `v3.5-opencl-conv3d` tag is the production ref: it carries the
-# 12-file int64 audit (fixing offset arithmetic on the hot paths) PLUS the
-# native OpenCL Conv3D/Deconv3D path, the MatMul LWS fix, and the
-# siam_mnn_*_cl_error diagnostics siamize uses. The older `v3.5-int64fix`
-# tag is the int64-only subset (geometry-decomposed Conv3D, much slower).
-# See tools/mnn_probe/patches/README.md.
+# fork's `v3.5-vulkan-conv3d` tag is the production ref: it carries the
+# 12-file int64 audit (fixing offset arithmetic on the hot paths), the
+# native OpenCL Conv3D/Deconv3D path, the MatMul LWS fix, the
+# siam_mnn_*_cl_error diagnostics siamize uses, and the native Vulkan
+# Conv3D/Deconv3D path (used with MNN_VULKAN=1). `v3.5-opencl-conv3d` is the
+# same without the Vulkan work; `v3.5-int64fix` is the int64-only subset
+# (geometry-decomposed Conv3D, much slower). See tools/mnn_probe/patches/README.md.
 #
 # This script is heavyweight on first run (~15-20 min for cmake + make
 # of the MNN C++ tree). It caches build artifacts under
@@ -19,8 +20,9 @@
 # clean rebuild: `rm -rf third_party/mnn third_party/mnn-build`.
 #
 # Environment variables:
-#   MNN_TAG       Git tag/branch in NeuroJSON/MNN. Default v3.5-opencl-conv3d.
+#   MNN_TAG       Git tag/branch in NeuroJSON/MNN. Default v3.5-vulkan-conv3d.
 #   MNN_OPENCL    1 (default) to enable MNN's OpenCL backend, 0 to skip.
+#   MNN_VULKAN    1 to enable MNN's Vulkan backend, 0 (default) to skip.
 #   MNN_JOBS      Parallel make jobs. Default $(nproc) on Linux, sysctl
 #                 hw.logicalcpu on macOS, else 4.
 #   FORCE         1 = remove third_party/mnn and rebuild even if it
@@ -30,12 +32,20 @@ set -euo pipefail
 
 # MNN_REF can be a branch, tag, or commit SHA on NeuroJSON/MNN. The
 # default tag is the production ref: int64-overflow fixes + native OpenCL
-# Conv3D/Deconv3D + MatMul LWS fix + siam_mnn_*_cl_error diagnostics. Pin
-# MNN_REF=v3.5-int64fix for the slower int64-only subset. MNN_TAG is
-# accepted as a synonym for back-compat.
-MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-opencl-conv3d}}"
+# and Vulkan Conv3D/Deconv3D + MatMul LWS fix + siam_mnn_*_cl_error
+# diagnostics. Pin MNN_REF=v3.5-int64fix for the slower int64-only subset.
+# MNN_TAG is accepted as a synonym for back-compat.
+MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-vulkan-conv3d}}"
 MNN_TAG="$MNN_REF"   # used in stage-dir naming below
 MNN_OPENCL="${MNN_OPENCL:-1}"
+# MNN_VULKAN=1 also builds MNN's Vulkan backend. Opt-in (default 0) because the
+# Vulkan path is newer than OpenCL; it matters when you want the vendor-neutral
+# Vulkan ICD (NVIDIA / AMD / Intel / ARM) rather than the OpenCL ICD.
+# When enabled the same libMNN.so/.a carries both backends (SEP_BUILD=OFF).
+# We build MNN's BUFFER-based Vulkan backend (MNN_VULKAN_IMAGE=OFF): the
+# native Conv3D / Deconv3D executors live there, and the default IMAGE
+# backend has no 5D-tensor support worth using for SIAM.
+MNN_VULKAN="${MNN_VULKAN:-0}"
 # MNN_STATIC=1 builds libMNN.a instead of libMNN.so/.dylib. Pair with
 # the siamize CMakeLists.txt's static-detection branch to produce a
 # self-contained binary (no libMNN.so to ship next to siamize). The
@@ -78,8 +88,14 @@ if [[ -z "${MNN_JOBS:-}" ]]; then
     fi
 fi
 
-# Idempotency: skip if already staged unless FORCE=1.
-if [[ "$FORCE" == "0" && -f "$MNN_STAGE/include/MNN/Interpreter.hpp" && -f "$MNN_STAGE/lib/$LIB_NAME" ]]; then
+# Idempotency: skip if already staged with the SAME configuration unless
+# FORCE=1. The stamp records the knobs that change what libMNN contains, so
+# e.g. re-running with MNN_VULKAN=1 over an OpenCL-only stage rebuilds
+# instead of silently keeping a library without the Vulkan backend.
+BUILD_STAMP="ref=$MNN_REF opencl=$MNN_OPENCL vulkan=$MNN_VULKAN static=$MNN_STATIC"
+STAMP_FILE="$MNN_STAGE/.fetch_mnn_config"
+if [[ "$FORCE" == "0" && -f "$MNN_STAGE/include/MNN/Interpreter.hpp" && -f "$MNN_STAGE/lib/$LIB_NAME" \
+      && "$(cat "$STAMP_FILE" 2>/dev/null)" == "$BUILD_STAMP" ]]; then
     echo "[fetch_mnn] $MNN_STAGE already populated (set FORCE=1 to rebuild)"
     echo "[fetch_mnn]   include: $MNN_STAGE/include/MNN/Interpreter.hpp"
     echo "[fetch_mnn]   lib:     $MNN_STAGE/lib/$LIB_NAME"
@@ -186,6 +202,9 @@ esac
 if [[ "$MNN_OPENCL" == "1" ]]; then
     CMAKE_FLAGS+=(-DMNN_OPENCL=ON)
 fi
+if [[ "$MNN_VULKAN" == "1" ]]; then
+    CMAKE_FLAGS+=(-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF)
+fi
 
 # Pin the compiler explicitly when CC / CXX are exported. cmake only reads
 # CC/CXX from the environment on a *fresh* build dir, which is fragile in CI
@@ -220,7 +239,7 @@ if [[ "$OS_NAME" == "Linux" && "${SIAMIZE_GLIBCXX_COMPAT:-0}" == "1" ]]; then
     CMAKE_FLAGS+=(-DCMAKE_CXX_FLAGS="-include $SCRIPT_DIR/glibcxx_compat.h")
 fi
 
-echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL, static=$MNN_STATIC)"
+echo "[fetch_mnn] cmake configure (tag=$MNN_TAG, opencl=$MNN_OPENCL, vulkan=$MNN_VULKAN, static=$MNN_STATIC)"
 (cd "$CMAKE_BUILD" && cmake "${CMAKE_FLAGS[@]}" "$SRC_DIR")
 
 echo "[fetch_mnn] cmake build --target MNN -j$MNN_JOBS (the slow step, ~15-20 min)"
@@ -279,6 +298,8 @@ case "$LIB_NAME" in
         ;;
 esac
 
+echo "$BUILD_STAMP" > "$STAMP_FILE"
+
 echo ""
 echo "[fetch_mnn] done"
 echo "[fetch_mnn]   include:  $MNN_STAGE/include/MNN/Interpreter.hpp"
@@ -289,3 +310,4 @@ echo "Next:"
 echo "  cmake -S . -B build-mnn -DSIAMIZE_BACKEND=mnn"
 echo "  cmake --build build-mnn -j"
 echo "  ./build-mnn/siamize -i tests/sub-01_T1w.nii.gz -M 0 -c cpu --device cpu"
+echo "  ./build-mnn/siamize -i tests/sub-01_T1w.nii.gz -M 0 -c vulkan -G 0   # if MNN_VULKAN=1"

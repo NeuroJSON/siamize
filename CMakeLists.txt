@@ -239,11 +239,13 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     if(MNN_STATIC_LIB)
         # Static link: pass the .a/.lib by path so CMake picks STATIC
         # over any sibling shared (linker rule prefers .so otherwise).
-        # Then add system libs MNN's CPU + OpenCL backends pull in:
+        # Then add system libs MNN's CPU + OpenCL + Vulkan backends pull in:
         #   pthread + dl + m for the CPU runtime
         #   dl (already listed) for the runtime dlopen of libOpenCL.so.1
         #     -- MNN was built with MNN_USE_SYSTEM_LIB=OFF so the OpenCL
         #     ICD is loaded at runtime, not link time. No -lOpenCL.
+        #   Vulkan is analogous: MNN loads the Vulkan ICD at runtime, so no
+        #     -lvulkan is needed (unlike a statically-linked Vulkan loader).
         #   stdc++/c++ is brought in automatically by the C++ linker.
         target_link_libraries(siamize PRIVATE ${MNN_STATIC_LIB})
         if(UNIX AND NOT APPLE)
