@@ -419,7 +419,13 @@ What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
    [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Relevant refs:
-   - **`v3.5-vulkan-conv3d` (default)** — `v3.5-opencl-conv3d` plus the
+   - **`v3.5-gpu-opt` (default)** — `v3.5-vulkan-conv3d` plus faster GPU
+     kernels for both backends: a vectorized, register-blocked OpenCL
+     Conv3D (NVIDIA's OpenCL compiler split the old kernels' `vload4` into
+     32-bit loads), a Vulkan Conv3D whose work-groups span output-channel
+     blocks, and InstanceNorm (`LayerNorm`) kernels that split long rows
+     across work-groups. See [the fork notes](tools/mnn_probe/patches/README.md).
+   - **`v3.5-vulkan-conv3d`** — `v3.5-opencl-conv3d` plus the
      native-Conv3D / native-Deconv3D Vulkan path and the Vulkan
      buffer-backend fixes SIAM needs (head of the `siam-vulkan-conv3d`
      branch; see [Vulkan](#vulkan)). Only the Vulkan backend differs, so
@@ -443,7 +449,7 @@ What `scripts/fetch_mnn.sh` does:
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-vulkan-conv3d`); e.g.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt`); e.g.
 `MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
@@ -469,7 +475,7 @@ build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c vulkan --mnn-fp16 # fp16 st
 
 `MNN_VULKAN=1` builds MNN's buffer-based Vulkan backend
 (`-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF`) from the default
-`v3.5-vulkan-conv3d` ref, which adds a native Vulkan Conv3D /
+`v3.5-gpu-opt` ref, which adds a native Vulkan Conv3D /
 ConvTranspose3D executor (the Vulkan counterpart of the OpenCL native-Conv3D
 path) and the buffer-backend fixes SIAM needs: device-local tensor memory,
 copies on the GPU's dedicated transfer queue, 5D Scale / PRelu, clean
@@ -508,7 +514,9 @@ MNN-relevant environment variables:
 | `MNN_VULKAN_DEVICE` | integer | Vulkan physical-device index (`vulkaninfo --summary` order); set by `-G` for `-c vulkan`. |
 | `MNN_VULKAN_NO_TRANSFER_QUEUE` | `1` | Keep host<->device copies on the compute queue instead of the GPU's dedicated transfer (copy-engine) queue. |
 | `MNN_VULKAN_HOST_IMPORT` | `1` | Opt-in `VK_EXT_external_memory_host` copies straight into the caller's buffer. Off by default: pinning the pages per copy costs more than the staging memcpy it saves. |
-| `MNN_VK_CONV3D_WTILE` / `MNN_VK_CONV3D_OCTILE` / `MNN_VK_CONV3D_LOCAL` | `2` / `4` / `64` | Vulkan Conv3D tiling: output voxels (along W) and output-channel blocks per invocation, and work-group size. Defaults were tuned on TITAN V, RTX 4090 and RTX 5090; `tools/mnn_probe/layercheck.cpp` times alternatives. |
+| `MNN_VK_CONV3D_WTILE` / `_HTILE` / `_OCTILE` / `_LX` / `_LY` / `_LZ` | per layer size | Vulkan Conv3D tiling: output voxels along W and H and output-channel blocks per invocation, and the work-group shape (`MNN_VK_CONV3D_LOCAL` is an alias of `_LX`). Defaults, tuned on an RTX 5090: 2x1 voxels in 16x1x8 groups for >= 64k output voxels, 2x2 in 8x2x8 down to 8k, 1x1 in 8x4x4 below. Setting a variable overrides it for every layer; `tools/mnn_probe/layercheck.cpp` times alternatives. |
+| `MNN_CONV3D_LEGACY` | `1` | OpenCL: use the original `conv_3d_buf_nc4dhw4` / `_t22` Conv3D kernels instead of `conv_3d_buf_opt` (A/B comparison). |
+| `MNN_LAYERNORM_NOSPLIT` | `1` | OpenCL and Vulkan: keep the one-work-group-per-row LayerNorm kernels instead of the split-row path used for rows of >= 64k values. |
 | `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |
 
 Weights are served as pre-converted `.mnn` binaries from
@@ -1044,15 +1052,24 @@ weights, MNN the fp32 `.mnn` weights.
 
 | GPU | MNN Vulkan fp32 | MNN Vulkan `--mnn-fp16` | MNN OpenCL fp32 | ORT CUDA EP (warm) |
 |---|---|---|---|---|
-| RTX 5090 (driver 580) | 14.6 s | 13.2 s | 13.6 s | 7.4 s |
-| RTX 4090 (driver 535) | 15.8 s | 14.4 s | 28.7 s | 8.7 s |
-| TITAN V (driver 580) | 28.7 s | 26.3 s | 40.3 s | n/a (pip cuDNN 9 has no sm_70 kernels) |
+| RTX 5090 (driver 580) | 13.2 s | 12.6 s | 10.7 s | 7.4 s |
+| RTX 4090 (driver 535) | 15.2 s | 13.7 s | 13.5 s | 8.7 s |
+| TITAN V (driver 580) | 29.6 s | 31.0 s | 26.9 s | n/a (pip cuDNN 9 has no sm_70 kernels) |
+
+With `v3.5-vulkan-conv3d` (before the kernel optimizations in
+`v3.5-gpu-opt`) the same runs took 14.6 / 13.2 / 13.6 s (RTX 5090),
+15.8 / 14.4 / 28.7 s (RTX 4090) and 28.7 / 26.3 / 40.3 s (TITAN V). The
+Vulkan Conv3D tiles were tuned on the RTX 5090; on the TITAN V they are
+faster in fp32 (0.93 -> 0.87 s per tile) but slower with `--mnn-fp16`
+(0.76 -> 0.90 s per tile), where the previous flat 1D work mapping suited
+Volta better.
 
 ORT times are warm runs: the first ORT run on a host took ~14 s, most likely
 because the pip cuDNN JIT-compiles kernels into `~/.nv/ComputeCache`.
-Per tile on the RTX 5090, ORT spends 114 ms in `run_tile` against 303 ms
-(fp32) / 257 ms (fp16) for MNN Vulkan; cuDNN runs the fp16 convolutions on
-Tensor Cores, while the Vulkan Conv3D uses plain fp32-accumulating FMA. A
+Per tile on the RTX 5090, ORT spends 114 ms in `run_tile` against ~190 ms
+for MNN OpenCL and ~240 ms (fp32) / ~220 ms (fp16) for MNN Vulkan (GPU
+compute + readback); cuDNN runs the fp16 convolutions on Tensor Cores,
+while the MNN Conv3D kernels use plain fp32-accumulating FMA. A
 `VK_KHR_cooperative_matrix` Conv3D would be the route to closing that gap.
 MNN session setup also costs ~2.6 s vs ~0.7 s for ORT (540 MB fp32 `.mnn`).
 

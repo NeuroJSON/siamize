@@ -80,7 +80,7 @@ make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
 make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
 
 # Vendor-neutral GPU via MNN OpenCL/Vulkan/Metal (the default MNN ref,
-# v3.5-vulkan-conv3d, carries the native-Conv3D fast path):
+# v3.5-gpu-opt, carries the native-Conv3D fast path):
 make opencloct                # Octave MEX, -DSIAMIZE_BACKEND=mnn
 make openclmex                # MATLAB MEX, -DSIAMIZE_BACKEND=mnn
 ```

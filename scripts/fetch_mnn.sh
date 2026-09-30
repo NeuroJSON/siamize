@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Fetch and build the patched MNN (NeuroJSON/MNN v3.5-vulkan-conv3d) into
+# Fetch and build the patched MNN (NeuroJSON/MNN v3.5-gpu-opt) into
 # third_party/mnn/ so siamize built with `cmake -DSIAMIZE_BACKEND=mnn`
 # can find the include headers and libMNN.so / .dylib / .dll.
 #
 # Why a patched MNN: stock MNN 3.5.0 silently produces wrong logits on
 # SIAM-class workloads (>2 GB intermediate tensors after Conv3DTurn2D),
 # and decomposes Conv3D into thousands of geometry ops. The NeuroJSON/MNN
-# fork's `v3.5-vulkan-conv3d` tag is the production ref: it carries the
+# fork's `v3.5-gpu-opt` tag is the production ref: it carries the
 # 12-file int64 audit (fixing offset arithmetic on the hot paths), the
 # native OpenCL Conv3D/Deconv3D path, the MatMul LWS fix, the
-# siam_mnn_*_cl_error diagnostics siamize uses, and the native Vulkan
-# Conv3D/Deconv3D path (used with MNN_VULKAN=1). `v3.5-opencl-conv3d` is the
-# same without the Vulkan work; `v3.5-int64fix` is the int64-only subset
+# siam_mnn_*_cl_error diagnostics siamize uses, the native Vulkan
+# Conv3D/Deconv3D path (used with MNN_VULKAN=1), and the vectorized Conv3D
+# and split-row LayerNorm kernels for both GPU backends.
+# `v3.5-vulkan-conv3d` is the same without those kernel optimizations,
+# `v3.5-opencl-conv3d` without the Vulkan work; `v3.5-int64fix` is the int64-only subset
 # (geometry-decomposed Conv3D, much slower). See tools/mnn_probe/patches/README.md.
 #
 # This script is heavyweight on first run (~15-20 min for cmake + make
@@ -20,7 +22,7 @@
 # clean rebuild: `rm -rf third_party/mnn third_party/mnn-build`.
 #
 # Environment variables:
-#   MNN_TAG       Git tag/branch in NeuroJSON/MNN. Default v3.5-vulkan-conv3d.
+#   MNN_TAG       Git tag/branch in NeuroJSON/MNN. Default v3.5-gpu-opt.
 #   MNN_OPENCL    1 (default) to enable MNN's OpenCL backend, 0 to skip.
 #   MNN_VULKAN    1 to enable MNN's Vulkan backend, 0 (default) to skip.
 #   MNN_JOBS      Parallel make jobs. Default $(nproc) on Linux, sysctl
@@ -35,7 +37,7 @@ set -euo pipefail
 # and Vulkan Conv3D/Deconv3D + MatMul LWS fix + siam_mnn_*_cl_error
 # diagnostics. Pin MNN_REF=v3.5-int64fix for the slower int64-only subset.
 # MNN_TAG is accepted as a synonym for back-compat.
-MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-vulkan-conv3d}}"
+MNN_REF="${MNN_REF:-${MNN_TAG:-v3.5-gpu-opt}}"
 MNN_TAG="$MNN_REF"   # used in stage-dir naming below
 MNN_OPENCL="${MNN_OPENCL:-1}"
 # MNN_VULKAN=1 also builds MNN's Vulkan backend. Opt-in (default 0) because the

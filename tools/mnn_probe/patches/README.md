@@ -141,8 +141,8 @@ high-resolution detection, video).
 
 # Vulkan native Conv3D in the NeuroJSON/MNN fork
 
-Branch `siam-vulkan-conv3d`, tag **`v3.5-vulkan-conv3d`** (siamize's default
-`MNN_REF`), six commits on top of `v3.5-opencl-conv3d`. Only the Vulkan
+Branch `siam-vulkan-conv3d`, tag `v3.5-vulkan-conv3d`, six commits on top of
+`v3.5-opencl-conv3d` (siamize's default `MNN_REF` is now `v3.5-gpu-opt`, below). Only the Vulkan
 backend changes; build it with `MNN_VULKAN=1 scripts/fetch_mnn.sh`
 (`-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF`).
 
@@ -162,3 +162,21 @@ Raphael iGPU (RADV). End-to-end on `sub-01_T1w`: 99.9999 % voxel agreement
 with MNN-OpenCL, 99.99 % with ORT-CUDA, bit-identical across TITAN V and
 RTX 5090. `VK_LAYER_KHRONOS_validation` (errors, warnings, perf,
 synchronization validation) reports nothing, with and without host import.
+
+# GPU kernel optimizations (`v3.5-gpu-opt`, siamize's default `MNN_REF`)
+
+Four more commits on `siam-vulkan-conv3d`, from profiling one SIAM v0.3 tile
+(192x192x128) on an RTX 5090. `tools/mnn_probe/clbench.cpp` benchmarks OpenCL
+Conv3D kernels on every SIAM layer shape and dumps their PTX.
+
+| Commit | Change |
+|---|---|
+| `[OpenCL:Perf] Conv3D: FLOAT4-typed, register-blocked kernel (1.9x)` | The `conv_3d_buf` kernels read `FLOAT*` through `vload4`; NVIDIA's compiler can only assume 4-byte alignment and emits four 32-bit loads per vector (no `ld.global.v4` in the PTX), capping the inner loop at ~18 TFLOP/s. `conv_3d_buf_opt` types the buffers `FLOAT4` + `restrict` and register-blocks 4x2 / 2x2 / 1x1 output voxels per work-item by layer size (~43 TFLOP/s on the large layers). Conv3D 211 -> 111 ms per tile. `MNN_CONV3D_LEGACY=1` keeps the old kernels. |
+| `[OpenCL:Perf] LayerNorm: split few very long rows across work-groups` | One work-group per row meant 32 work-groups for InstanceNorm at full resolution. Rows >= 64k values now run as per-chunk statistics, a per-row Chan merge and a parallel normalize: 16.4 -> 7.5 ms per tile. `MNN_LAYERNORM_NOSPLIT=1` keeps the old kernel. |
+| `[Vulkan:Perf] Conv3D: 3D work-groups spanning OC blocks, H tile` | The flat 1D launch shared one output-channel block per work-group, so each input voxel was re-fetched per block. 3D launch with host-chosen group shape (groups span 8 OC blocks) and an H tile: 0.272 -> 0.230 s per tile (fp32). Slower on a TITAN V with fp16 (0.76 -> 0.90 s), where the flat mapping suited Volta better. |
+| `[Vulkan:Perf] LayerNorm: split few very long rows across work-groups` | Same split for `norm_opt` (one 64-invocation group per row): `glsl/norm_split.comp`, three dispatches with buffer barriers. 0.231 -> 0.218 s per tile. |
+
+Every commit builds on its own. All 529 op outputs stay within 2e-3 of the CPU
+backend on both GPU backends; end-to-end on `sub-01_T1w` the labels match the
+previous kernels on 99.9999 % (fp32) of voxels. One fold on the RTX 5090:
+OpenCL 13.6 -> 10.7 s, Vulkan 14.6 -> 13.2 s (fp32) / 13.2 -> 12.6 s (fp16).
