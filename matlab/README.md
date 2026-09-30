@@ -79,10 +79,10 @@ make cudamex                 # MATLAB MEX,  -DSIAMIZE_GPU=cuda
 make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
 make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
 
-# Vendor-neutral GPU via MNN OpenCL/Vulkan/Metal (recommended:
-# pair with MNN_REF=siam-opencl-conv3d for the native-Conv3D fast path):
-MNN_REF=siam-opencl-conv3d make opencloct                # Octave MEX, -DSIAMIZE_BACKEND=mnn
-MNN_REF=siam-opencl-conv3d make openclmex                # MATLAB MEX, -DSIAMIZE_BACKEND=mnn
+# Vendor-neutral GPU via MNN OpenCL/Vulkan/Metal (the default MNN ref,
+# v3.5-vulkan-conv3d, carries the native-Conv3D fast path):
+make opencloct                # Octave MEX, -DSIAMIZE_BACKEND=mnn
+make openclmex                # MATLAB MEX, -DSIAMIZE_BACKEND=mnn
 ```
 
 All `make` targets drop the `.mex*` next to `matlab/siamize.m` so the

@@ -399,12 +399,12 @@ library plus per-EP runtime stacks.
 
 ```bash
 # Fast path -- native-Conv3D OpenCL (recommended for production):
-MNN_REF=siam-opencl-conv3d make opencl
+make opencl
 build/siamize -i input.nii.gz -o pred.nii.gz -M 0 -c opencl --mnn-buffer
 
 # MNN MEX variants (same flag plumbing as cudamex / coremlmex):
-MNN_REF=siam-opencl-conv3d make opencloct                # Octave MEX
-MNN_REF=siam-opencl-conv3d make openclmex                # MATLAB MEX
+make opencloct                # Octave MEX
+make openclmex                # MATLAB MEX
 ```
 
 `make opencl` is shorthand for the explicit two-step:
@@ -450,7 +450,7 @@ For a self-contained binary with no `libMNN.so` to ship next to it,
 pass `MNN_STATIC=1` on the make line:
 
 ```bash
-MNN_STATIC=1 MNN_REF=siam-opencl-conv3d make opencl
+MNN_STATIC=1 make opencl
 ```
 
 #### Vulkan

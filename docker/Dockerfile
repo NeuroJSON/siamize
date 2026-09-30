@@ -71,7 +71,7 @@ RUN cmake -S . -B build \
  && cmake --build build --config Release --parallel "$(nproc)"
 
 # Also build the MNN/OpenCL backend (siamize-opencl). fetch_mnn.sh downloads
-# and compiles the patched MNN (NeuroJSON/MNN, default ref v3.5-opencl-conv3d)
+# and compiles the patched MNN (NeuroJSON/MNN, default ref v3.5-vulkan-conv3d)
 # as a static libMNN.a; MNN bundles its own OpenCL headers and dlopen's the
 # ICD at runtime (MNN_USE_SYSTEM_LIB=OFF), so no OpenCL dev package is needed
 # to build. STATIC_LINK folds libMNN.a in -> a self-contained ~9 MB binary
