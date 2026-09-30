@@ -608,6 +608,23 @@ MnnEngine::MnnEngine(const std::string& model_path,
     mInterpreter->resizeTensor(mInput, tile_shape);
     mInterpreter->resizeSession(mSession);
 
+    // resizeSession returns void; a failed allocation (typically device
+    // out-of-memory for a large patch) only shows up in RESIZE_STATUS, and
+    // running such a session crashes on the first output access.
+    {
+        int resize_status = 0;
+        mInterpreter->getSessionInfo(mSession, MNN::Interpreter::RESIZE_STATUS, &resize_status);
+
+        if (resize_status != 0) {
+            std::ostringstream msg;
+            msg << "MNN: failed to allocate buffers for a " << patch_size[0] << "x"
+                << patch_size[1] << "x" << patch_size[2] << " patch (RESIZE_STATUS="
+                << resize_status << "; most likely out of GPU memory). Retry with a "
+                "smaller patch, e.g. -P 192x192x128 or -P 128x128x96, or --lowmem.";
+            throw std::runtime_error(msg.str());
+        }
+    }
+
     if (_prof) {
         fprintf(stderr, "[mnn-ctor] resizeSession (buffer alloc + kernel build): %.1f ms\n",
                 std::chrono::duration<double, std::milli>(
