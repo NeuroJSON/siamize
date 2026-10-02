@@ -24,9 +24,8 @@
 When the user does not supply a local `.onnx` weight path, this
 module shells out to the system `curl` to fetch the requested fold
 from NeuroJSON's CGI endpoint. The downloaded `.onnx.gz` is
-inflated in-place via zmat's miniz instance (the same one
-nifti_io.cpp activates with ZMAT_IMPLEMENTATION), so the binary
-keeps zero dependency on a system zlib.
+inflated in memory by zlibmt.h (mimamo's header-only zlib), so the
+binary links no zlib.
 
 The cache directory and the base URL are environment-overridable
 (`SIAMIZE_CACHE_DIR`, `SIAMIZE_WEIGHTS_BASE_URL`) for CI runners
@@ -36,16 +35,7 @@ and offline / proxied installations.
 #include "weights.h"
 #include "siam_log.h"
 
-/**
- * @brief Forward declaration of zmat's bundled miniz one-shot gzip inflater
- *
- * zmat.h gates its implementation behind `ZMAT_IMPLEMENTATION`, which
- * is defined exactly once (in nifti_io.cpp). Forward-declaring the
- * helper here lets us call into the same linked-in copy without
- * pulling in the whole 6500-line header.
- */
-int miniz_gzip_uncompress(void* in_data, size_t in_len,
-                          void** out_data, size_t* out_len);
+#include "zlibmt.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -175,34 +165,14 @@ void write_file_bytes(const std::string& path, const uint8_t* data, size_t n) {
 
 /*******************************************************************************/
 /*! \fn    std::vector<uint8_t> gunzip(const uint8_t* in, size_t n)
-    \brief Inflate an in-memory gzip blob via zmat/miniz
-
-    Calls the forward-declared `miniz_gzip_uncompress` whose definition
-    lives in zmat.h's ZMAT_IMPLEMENTATION block (instantiated by
-    nifti_io.cpp). The output buffer is malloc'd by miniz; we copy
-    into a std::vector and free the original.
+    \brief Inflate an in-memory gzip blob (zlibmt)
 
     \param  in  gzip-encoded buffer (must start with magic 0x1F 0x8B)
     \param  n   number of bytes in \a in
     \return     decompressed bytes
 */
 std::vector<uint8_t> gunzip(const uint8_t* in, size_t n) {
-    void* out = nullptr;
-    size_t outlen = 0;
-    int rc = miniz_gzip_uncompress(const_cast<uint8_t*>(in), n, &out, &outlen);
-
-    if (rc != 0 || out == nullptr) {
-        if (out) {
-            std::free(out);
-        }
-
-        throw std::runtime_error("gzip decode failed (rc=" + std::to_string(rc) + ")");
-    }
-
-    std::vector<uint8_t> result(static_cast<uint8_t*>(out),
-                                static_cast<uint8_t*>(out) + outlen);
-    std::free(out);
-    return result;
+    return zlibmt::gzip_decompress(in, n);
 }
 
 }  // anonymous namespace
@@ -287,7 +257,7 @@ std::string default_weights_url(WeightVariant variant) {
     basename is already in the cache; (3) `curl`-download the weight
     from NeuroJSON (trying `<basename>.gz` first, falling back to
     `<basename>` raw) into the cache. The gzipped path is decompressed
-    in-memory via the zmat-bundled miniz so we don't depend on `gunzip`
+    in-memory via zlibmt.h so we don't depend on `gunzip`
     being on PATH.
 
     \param  spec     fold spec (filename, digit shortcut, or full path)
@@ -329,7 +299,7 @@ std::string resolve_model_path(const std::string& spec, bool verbose,
     }
 
     // 3. Download from default URL into the cache dir. Try the .gz form
-    //    first; decompress via zmat's bundled miniz (no external tool).
+    //    first; decompress via zlibmt.h (no external tool).
     //    Fall back to the raw uncompressed URL if the .gz form 404s.
     fs::create_directories(cache, ec);
     std::string url_base = default_weights_url(variant);

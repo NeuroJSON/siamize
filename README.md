@@ -1210,16 +1210,17 @@ the published SIAM v0.3 weights without modification.
 
 ### Bundled third-party code
 
-- **[zmat](https://github.com/NeuroJSON/zmat)** by Qianqian Fang — the
-  single-header amalgamation `src/zmat/zmat.h` provides all `.nii.gz`
-  compression and decompression. zmat is part of the
-  [NeuroJSON project](https://neurojson.org), supported by US NIH grant
-  [U24-NS124027](https://reporter.nih.gov/project-details/10308329).
-  Upstream zmat is GPL-3.0; this single file has been **dual-licensed
-  under Apache-2.0 for siamize** by the zmat author, as documented in
-  the file's header. Inside zmat:
-  - **[miniz](https://github.com/richgel999/miniz)** by Rich Geldreich
-    — public-domain (Unlicense) zlib-subset deflate/inflate.
+- **[mimamo](https://github.com/fangq/mimamo)** by Qianqian Fang — its
+  header-only `mmm_zlib.hpp` and `mmm_base64.hpp` (BSD-3-Clause, vendored
+  unchanged in `src/mimamo/`, used through `src/zlibmt.h`) provide all
+  zlib, gzip and base64 work: `.nii.gz` and the JNIfTI payloads. It
+  compresses with **zlibmt** — 4 MiB blocks deflated on every core and joined
+  into one standard zlib / gzip stream any reader inflates, its bytes
+  independent of the thread count — and inflates in parallel too. The system
+  zlib is opened at run time when present (nothing is linked);
+  `ZLIBMT_THREADS` and `ZLIBMT_LEVEL` (default: every core, level 6)
+  override. This replaced the earlier zmat / miniz single-header, whose
+  zlibmt construction it shares.
 - **[nlohmann/json](https://github.com/NeuroJSON/json)** (NeuroJSON
   fork) — the single-header `src/nlohmann/json.hpp` provides the
   JSON / BJData parser and serializer used for `.jnii` / `.bnii` I/O.

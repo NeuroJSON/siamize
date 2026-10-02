@@ -178,12 +178,17 @@ if(SIAMIZE_BACKEND STREQUAL "ort"
     endif()
 endif()
 
-# ---- zmat (bundled, single-header at src/zmat/zmat.h) ----------------------
-# zmat.h is dual-licensed Apache-2.0 for siamize (see header). It includes
-# miniz internally (public domain). No external zlib, no external nifti_clib.
-set(ZMAT_INCLUDE ${CMAKE_SOURCE_DIR}/src/zmat)
-if(NOT EXISTS ${ZMAT_INCLUDE}/zmat.h)
-    message(FATAL_ERROR "zmat.h not found at ${ZMAT_INCLUDE}/zmat.h.")
+# ---- zlib + base64: mimamo's header-only units, via src/zlibmt.h ----------
+# src/mimamo/mmm_zlib.hpp + mmm_base64.hpp (BSD-3-Clause, vendored unchanged):
+# a multithreaded zlib (zlibmt) that opens the system libz at run time when it
+# can and uses its own deflate otherwise -- nothing to link but threads / dl.
+set(ZLIBMT_INCLUDE ${CMAKE_SOURCE_DIR}/src/mimamo)
+if(NOT EXISTS ${ZLIBMT_INCLUDE}/mmm_zlib.hpp)
+    message(FATAL_ERROR "mmm_zlib.hpp not found at ${ZLIBMT_INCLUDE}.")
+endif()
+find_package(Threads REQUIRED)
+if(CMAKE_DL_LIBS)
+    set(CMAKE_DL_LIBS_FLAG "-l${CMAKE_DL_LIBS}")
 endif()
 
 # ---- OpenMP (optional everywhere) -------------------------------------------
@@ -216,12 +221,13 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
 endif()
 
 add_executable(siamize ${SIAMIZE_SOURCES})
+target_link_libraries(siamize PRIVATE Threads::Threads ${CMAKE_DL_LIBS})   # (zlibmt)
 
 if(SIAMIZE_BACKEND STREQUAL "ort")
     target_include_directories(siamize PRIVATE
         src
         ${ORT_ROOT}/include
-        ${ZMAT_INCLUDE}
+        ${ZLIBMT_INCLUDE}
     )
     target_link_directories(siamize PRIVATE ${ORT_ROOT}/lib)
     if(WIN32)
@@ -234,7 +240,7 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     target_include_directories(siamize PRIVATE
         src
         ${MNN_ROOT}/include
-        ${ZMAT_INCLUDE}
+        ${ZLIBMT_INCLUDE}
     )
     if(MNN_STATIC_LIB)
         # Static link: pass the .a/.lib by path so CMake picks STATIC
@@ -337,12 +343,11 @@ elseif(SIAMIZE_BACKEND STREQUAL "mnn")
     endif()
 endif()
 
-# zmat / miniz are C code inside a header; silence a few stylistic warnings
-# coming from that block.
+# silence a few stylistic MSVC warnings from the bundled headers
 if(MSVC)
     target_compile_definitions(siamize PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
     target_compile_options(siamize PRIVATE
-        /wd4068   # unknown pragma (zmat.h has #pragma GCC blocks)
+        /wd4068   # unknown pragma
         /wd4244   # implicit narrowing conversions
         /wd4267   # size_t -> int narrowing
     )
@@ -522,13 +527,13 @@ if(SIAMIZE_BACKEND STREQUAL "ort")
     set(_siamize_mex_includes
         src
         ${ORT_ROOT}/include
-        ${ZMAT_INCLUDE}
+        ${ZLIBMT_INCLUDE}
     )
 else()
     set(_siamize_mex_includes
         src
         ${MNN_ROOT}/include
-        ${ZMAT_INCLUDE}
+        ${ZLIBMT_INCLUDE}
     )
 endif()
 
@@ -545,6 +550,7 @@ if(SIAMIZE_BUILD_MATLAB_MEX)
             SRC ${_siamize_mex_sources}
             OUTPUT_NAME siamex
         )
+        target_link_libraries(siamize_mex Threads::Threads ${CMAKE_DL_LIBS})   # (zlibmt; plain signature, as matlab_add_mex)
         # Drop the .mex* next to matlab/siamize.m so the wrapper finds it
         # without a manual addpath. siamize.m's auto-addpath block looks
         # in `here = fileparts(mfilename('fullpath'))` and only adds the
@@ -745,6 +751,9 @@ if(SIAMIZE_BUILD_OCTAVE_MEX)
         else()
             set(_oct_ld "-L${MNN_LIB_DIR} -lMNN -Wl,-rpath,${MNN_LIB_DIR} -Wl,-rpath,\\\$ORIGIN")
         endif()
+        if(UNIX)   # (zlibmt: threads, and dlopen of the system libz)
+            set(_oct_ld "${_oct_ld} -lpthread ${CMAKE_DL_LIBS_FLAG}")
+        endif()
         # Octave loads its MEX into a process that already has a
         # dynamically-loaded libstdc++. Statically embedding a second
         # copy of libstdc++ inside the MEX causes ABI conflicts at
@@ -849,7 +858,7 @@ else()
     message(STATUS "  MNN:              ${MNN_ROOT}")
     message(STATUS "  GPU backend:      runtime --device (cpu / opencl / vulkan / metal)")
 endif()
-message(STATUS "  zmat header:      ${ZMAT_INCLUDE}/zmat.h (bundled)")
+message(STATUS "  zlib (zlibmt):    ${ZLIBMT_INCLUDE}/mmm_zlib.hpp (bundled, mimamo)")
 message(STATUS "  build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  OpenMP:           ${OpenMP_CXX_FOUND}")
 message(STATUS "  MATLAB MEX:       ${SIAMIZE_BUILD_MATLAB_MEX}")

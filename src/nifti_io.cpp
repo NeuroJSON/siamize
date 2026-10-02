@@ -22,16 +22,15 @@
 \brief   NIfTI-1 (.nii / .nii.gz) reader/writer implementation
 
 This translation unit reads and writes plain NIfTI-1 files without
-pulling in nifti_clib or a system zlib -- the only compression
-dependency is the bundled zmat single-header (src/zmat/zmat.h),
-which also instantiates miniz in this TU (the only place
-ZMAT_IMPLEMENTATION is defined in the project).
+linking nifti_clib or a system zlib -- compression is the bundled
+zlibmt.h (mimamo's header-only zlib, multithreaded; it uses the system
+libz at run time when it can open one, its own deflate otherwise).
 
 Strategy:
 
   - Read the whole file into memory.
-  - If gzipped (magic bytes 0x1F 0x8B), inflate via zmat/miniz to a
-    fresh buffer.
+  - If gzipped (magic bytes 0x1F 0x8B), inflate it (zlibmt, on every
+    core) into a fresh buffer.
   - Parse the 348-byte `nifti_1_header` from the buffer directly.
   - Recover the affine, preferring `sform` when set and otherwise
     decoding `qform`'s quaternion. Derive the axis permutation and
@@ -39,8 +38,8 @@ Strategy:
     then copy the data into a contiguous float32 Volume via the
     typed copy_reorient_to_canonical templates.
   - For writes, build the on-disk image in memory (header + 4 byte
-    padding + data), gzip-encode via zmat if the output path ends in
-    `.gz`, then write the buffer to disk in a single I/O.
+    padding + data), gzip it (zlibmt, on every core) if the output path
+    ends in `.gz`, then write the buffer to disk in a single I/O.
 
 The buffer-oriented strategy is deliberate: typical brain volumes
 fit comfortably in RAM (~5-200 MB uncompressed), so streaming
@@ -51,9 +50,7 @@ compression isn't worth the added complexity.
 #include "orient.h"
 #include "siam.h"
 
-// zmat: define the implementation in this TU only.
-#define ZMAT_IMPLEMENTATION
-#include "zmat.h"
+#include "zlibmt.h"
 
 #include <algorithm>
 #include <array>
@@ -212,68 +209,26 @@ bool ends_with(const std::string& s, const std::string& suffix) {
 
 /*******************************************************************************/
 /*! \fn    std::vector<uint8_t> gunzip(const uint8_t* in, size_t n)
-    \brief Inflate a gzipped buffer using zmat's direct miniz helper
-
-    Calls the lower-level `miniz_gzip_uncompress` exposed by zmat,
-    which uses a streaming inflate sized for typical NIfTI volumes.
-    The returned buffer is malloc'd internally; we copy into a
-    std::vector and free the malloc'd buffer before returning so
-    the caller never has to worry about manual cleanup.
+    \brief Inflate a gzipped buffer (zlibmt: in parallel where it can)
 
     \param  in  gzip-encoded buffer (must start with magic 0x1F 0x8B)
     \param  n   number of bytes in \a in
     \return     decompressed payload bytes
 */
 std::vector<uint8_t> gunzip(const uint8_t* in, size_t n) {
-    void* out = nullptr;
-    size_t outlen = 0;
-    int rc = miniz_gzip_uncompress(const_cast<uint8_t*>(in), n, &out, &outlen);
-
-    if (rc != 0 || out == nullptr) {
-        if (out) {
-            free(out);
-        }
-
-        throw std::runtime_error("gzip decode failed (rc=" + std::to_string(rc) + ")");
-    }
-
-    std::vector<uint8_t> result(static_cast<uint8_t*>(out),
-                                static_cast<uint8_t*>(out) + outlen);
-    free(out);
-    return result;
+    return zlibmt::gzip_decompress(in, n);
 }
 
 /*******************************************************************************/
 /*! \fn    std::vector<uint8_t> gzip_compress(const uint8_t* in, size_t n)
-    \brief Deflate a buffer into gzip format via zmat_encode
-
-    zmat does not expose a standalone `miniz_gzip_compress` helper
-    (compression lives inside `zmat_encode`), so we go through
-    `zmat_encode(... zmGzip ...)` here. The returned buffer is
-    malloc'd by zmat and released via `zmat_free` after copying.
+    \brief Deflate a buffer into one gzip stream, on every core (zlibmt)
 
     \param  in  raw buffer to compress
     \param  n   number of bytes in \a in
     \return     gzip-encoded bytes
 */
 std::vector<uint8_t> gzip_compress(const uint8_t* in, size_t n) {
-    unsigned char* out = nullptr;
-    size_t outlen = 0;
-    int ret = 0;
-    int rc = zmat_encode(n, const_cast<unsigned char*>(in), &outlen, &out, zmGzip, &ret);
-
-    if (rc != 0 || out == nullptr) {
-        if (out) {
-            zmat_free(&out);
-        }
-
-        throw std::runtime_error("gzip encode failed (rc=" + std::to_string(rc)
-                                 + ", ret=" + std::to_string(ret) + ")");
-    }
-
-    std::vector<uint8_t> result(out, out + outlen);
-    zmat_free(&out);
-    return result;
+    return zlibmt::gzip_compress(in, n);
 }
 
 /* ============================================================================ */

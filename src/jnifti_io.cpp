@@ -34,7 +34,7 @@ the NIfTI-1 functionality in nifti_io.cpp but emits / consumes JNIfTI
 containers per https://neurojson.org/jnifti -- JData-annotated JSON
 (.jnii, text) or BJData (.bnii, binary JSON). Voxel data is always
 stored compressed via the `_ArrayZipData_` field; compression and
-base64 encoding/decoding are delegated to zmat (src/zmat/zmat.h),
+base64 encoding/decoding are delegated to zlibmt.h (mimamo; multithreaded zlib),
 matching the codec siamize already uses for `.nii.gz` gzip I/O.
 
 The reader handles the dtype variety that real-world NIfTI volumes
@@ -53,7 +53,7 @@ compressed arrays).
 #include "siam.h"
 
 #include "nlohmann/json.hpp"
-#include "zmat.h"   // declarations only; impl lives in nifti_io.cpp's TU
+#include "zlibmt.h"   // zlib (multithreaded) + base64: mimamo, via the adapter
 
 #include <cmath>
 #include <cstdint>
@@ -81,47 +81,6 @@ bool ends_with(const std::string& s, const std::string& suffix) {
            && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-/*******************************************************************************/
-/*! \fn    std::vector<uint8_t> zmat_xform(const uint8_t* in, size_t n,
-                                           int zipid, int iscompress)
-    \brief Thin C++ wrapper around zmat's all-in-one driver zmat_run
-
-    Returns the output buffer in a std::vector and throws on error. zmat
-    owns the raw output buffer via malloc; this wrapper copies into a
-    vector and calls zmat_free before returning so the caller never has
-    to worry about manual cleanup. JNIfTI only mandates zlib for the
-    `_ArrayZipType_` field, but zmat itself supports zmGzip, zmLzma,
-    zmZstd, zmBlosc2*, etc. -- the same wrapper handles them all.
-
-    \param  in          input buffer (read-only)
-    \param  n           number of bytes in \a in
-    \param  zipid       codec ID: zmZlib / zmGzip / zmBase64 / ...
-    \param  iscompress  1 = encode/compress, 0 = decode/decompress
-    \return             a std::vector<uint8_t> holding the transformed bytes
-*/
-std::vector<uint8_t> zmat_xform(const uint8_t* in, size_t n, int zipid, int iscompress) {
-    unsigned char* out = nullptr;
-    size_t outlen = 0;
-    int zret = 0;
-    int rc = zmat_run(n, const_cast<unsigned char*>(in), &outlen, &out,
-                      zipid, &zret, iscompress);
-
-    if (rc != 0 || out == nullptr) {
-        if (out) {
-            zmat_free(&out);
-        }
-
-        throw std::runtime_error(
-            std::string("zmat_run failed (zipid=") + std::to_string(zipid)
-            + ", iscompress=" + std::to_string(iscompress)
-            + ", rc=" + std::to_string(rc)
-            + ", zret=" + std::to_string(zret) + ")");
-    }
-
-    std::vector<uint8_t> result(out, out + outlen);
-    zmat_free(&out);
-    return result;
-}
 
 /*******************************************************************************/
 /*! \fn    template <typename T>
@@ -338,7 +297,7 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
         raw_ptr = shuffled.data();
     }
 
-    auto comp = zmat_xform(raw_ptr, raw_bytes, zmZlib, /*iscompress=*/1);
+    auto comp = zlibmt::zlib_compress(raw_ptr, raw_bytes);   // (on every core: zlibmt.h)
 
     json arr = json::object();
     arr["_ArrayType_"]    = jdata_dtype<T>();
@@ -358,8 +317,7 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
         // should be on the .bnii wire.
         arr["_ArrayZipData_"] = json::binary(comp);
     } else {
-        auto b64 = zmat_xform(comp.data(), comp.size(), zmBase64, /*iscompress=*/1);
-        arr["_ArrayZipData_"] = std::string(b64.begin(), b64.end());
+        arr["_ArrayZipData_"] = zlibmt::base64_encode(comp.data(), comp.size());
     }
 
     return arr;
@@ -764,7 +722,7 @@ std::array<float, 16> extract_affine(const json& nii_header) {
 
       - **Compressed**: `_ArrayZipData_` (zlib bytes, in either a BJData
         binary string, base64-encoded JSON string, or a defensive
-        numeric-array fallback). Decompressed via zmat.
+        numeric-array fallback). Decompressed via zlibmt.
       - **Uncompressed**: `_ArrayData_` as a flat numeric array (or a
         BJData binary string for uint8). Each element is marshalled
         into its dtype's wire representation via std::memcpy.
@@ -844,10 +802,9 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
             const auto& b = zd.get_binary();
             comp.assign(b.begin(), b.end());
         } else if (zd.is_string()) {
-            // .jnii: base64 ASCII -> raw zlib bytes via zmat.
+            // .jnii: base64 ASCII -> raw zlib bytes.
             const std::string& s = zd.get<std::string>();
-            comp = zmat_xform(reinterpret_cast<const uint8_t*>(s.data()), s.size(),
-                              zmBase64, /*iscompress=*/0);
+            comp = zlibmt::base64_decode(s.data(), s.size());
         } else if (zd.is_array()) {
             // Defensive: a few encoders emit byte payloads as numeric arrays.
             comp.reserve(zd.size());
@@ -859,7 +816,7 @@ std::vector<uint8_t> decode_nifti_data(const json& nd,
             throw std::runtime_error("_ArrayZipData_ has unexpected type");
         }
 
-        auto raw = zmat_xform(comp.data(), comp.size(), zmZlib, /*iscompress=*/0);
+        auto raw = zlibmt::zlib_decompress(comp.data(), comp.size(), raw_bytes);
 
         if (raw.size() != raw_bytes) {
             throw std::runtime_error(
@@ -1241,10 +1198,14 @@ NiftiImage load_jnifti_ras(const std::string& path) {
     copy_reorient_to_canonical<float>(col_f.data(), X, Y, Z, dst, sgn, out.volume);
     out.affine_canon = canonicalize_affine(affine, dst, sgn, {X, Y, Z});
 
-    // perm_canon_to_orig[i] = the input-axis index that ends up at canonical axis i.
-    // dst[i] tells us "canonical axis dst[i] receives input axis i". Invert.
+    // perm_canon_to_orig[i] = the canonical axis input axis i went to (siam.h),
+    // i.e. dst[i] itself -- as load_nifti_ras stores it, and as the writers read
+    // it back (dst[i] = perm_canon_to_orig[i]). (Stored inverted, it is only
+    // right when the permutation is its own inverse: an axial scan, or two axes
+    // swapped; a 3-cycle -- a sagittal PSL scan -- was written back on the
+    // wrong axes: the labels doubled / shifted against the input.)
     for (int i = 0; i < 3; ++i) {
-        out.perm_canon_to_orig[dst[i]] = i;
+        out.perm_canon_to_orig[i] = dst[i];
     }
 
     for (int i = 0; i < 3; ++i) {

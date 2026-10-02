@@ -43,7 +43,7 @@ namespace siam {
  * @brief Load a NIfTI-1 file and convert to canonical RAS (Z, Y, X) float32
  *
  * Reads `.nii` or `.nii.gz` (gzip-detected by magic bytes 1F 8B and
- * inflated via zmat/miniz), parses the 348-byte NIfTI-1 header,
+ * inflated via zlibmt), parses the 348-byte NIfTI-1 header,
  * recovers the affine from sform when set otherwise from qform, then
  * uses axes_to_canonical + copy_reorient_to_canonical to produce a
  * (Z, Y, X) RAS volume regardless of the on-disk axis order.
