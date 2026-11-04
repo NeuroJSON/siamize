@@ -30,7 +30,7 @@ jobs:
               ldd build/siamize
               echo "--- direct (NEEDED) deps ---"
               readelf -d build/siamize | grep NEEDED
-          - os: macos-14
+          - os: macos-15
             binary: build/siamize
             deps_check: |
               echo "--- otool -L (linked dylibs) ---"
@@ -481,11 +481,11 @@ jobs:
     # Builds siamize with the CoreML Execution Provider enabled and
     # actually runs end-to-end inference on a real Apple Silicon runner
     # (M-class CPU + Metal GPU + Neural Engine). Unlike cpp-build-cuda
-    # where GHA has no NVIDIA GPU, GHA's macos-14 runner DOES expose
+    # where GHA has no NVIDIA GPU, GHA's macos-15 runner DOES expose
     # the full Apple Silicon stack to CoreML, so this is the "GPU
     # smoke" leg for macOS.
-    name: build+run coreml (macos-14)
-    runs-on: macos-14
+    name: build+run coreml (macos-15)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -519,7 +519,7 @@ jobs:
       # only on tag pushes -- that's where we actually want to validate
       # the macOS-arm64-coreml release bundle end-to-end. Pull requests
       # and main-branch pushes stop at "Build" above.
-      # DISABLED end-to-end CoreML inference: on the ~7 GB macos-14 runner the
+      # DISABLED end-to-end CoreML inference: on the ~7 GB macos-15 runner the
       # GPU/ANE path OOMs, so it falls back to MLComputeUnits=CPUOnly, which is
       # too slow (>30 min) and timed out the tag CI. The Build + `--help` steps
       # above still validate the CoreML build, and Package/Upload below still
@@ -544,7 +544,7 @@ jobs:
 
       - name: Run single-fold inference on Apple Silicon
         if: false
-        # macos-14 free-tier runner has ~7 GB RAM, which forces
+        # macos-15 free-tier runner has ~7 GB RAM, which forces
         # auto-lowmem to MLComputeUnits=CPUOnly (the only target whose
         # mlcompilerd peak fits the budget; ALL and even cpugpu OOM at
         # exit 137). CPU-only Core ML completes in ~7-10 min wall.
@@ -612,7 +612,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             binary: build/siamize
-          - os: macos-14
+          - os: macos-15
             binary: build/siamize
           - os: windows-2022
             # MSVC multi-config generator drops the binary under Release/.
@@ -885,15 +885,15 @@ jobs:
 
   mex-coreml-smoke:
     # macOS-only compile + strings-grep test for `make coremloct`.
-    # The macos-14 runner DOES have a real CoreML stack, but we keep
+    # The macos-15 runner DOES have a real CoreML stack, but we keep
     # this leg lightweight (compile + symbol probe only) since the
     # heavier end-to-end MEX-load test would require MATLAB on Apple
     # Silicon, which isn't part of the matlab-actions/setup-matlab
-    # macos-14 support yet. Validates SIAMIZE_HAS_COREML propagates
+    # macos-15 support yet. Validates SIAMIZE_HAS_COREML propagates
     # to the MEX -- same kind of regression as dee8b1d but for the
     # CoreML path.
     name: mex-coreml-smoke (octave)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
