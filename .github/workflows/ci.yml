@@ -963,14 +963,20 @@ jobs:
     # SHA dropped, so each push replaces the last) and copied to the nightly folder
     # of mcx.space (the MCX_* secrets mcx / trussnet upload with). Whatever bundles
     # were built are uploaded, so one failing leg does not hold back the others.
+    # Only the cpu and opencl ones: a cuda bundle is ~200 MB zipped (ONNX Runtime's
+    # CUDA provider, 344 MB of it GPU code for every arch) and stays a CI artifact.
     name: upload the bundles (nightly)
-    needs: [cpp-build, cpp-build-cuda, mex-build, cpp-build-opencl]
+    needs: [cpp-build, mex-build, cpp-build-opencl]
     runs-on: ubuntu-22.04
     if: ${{ !cancelled() && needs.cpp-build.result == 'success' && github.repository == 'NeuroJSON/siamize' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: siam*
+          pattern: siam*-cpu
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: siam*-opencl
           path: artifacts
       - name: Zip each bundle
         run: |
