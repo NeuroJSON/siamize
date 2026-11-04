@@ -957,3 +957,41 @@ jobs:
         run: |
           python -c "import sys; sys.path.insert(0, 'py'); import siam_ref; print(siam_ref.build_network.__name__)"
           python tools/onnx_export/compare.py --help || true
+
+  nightly:
+    # each bundle of a main push zipped as <name>-github-latest.zip (the version and
+    # SHA dropped, so each push replaces the last) and copied to the nightly folder
+    # of mcx.space (the MCX_* secrets mcx / trussnet upload with). Whatever bundles
+    # were built are uploaded, so one failing leg does not hold back the others.
+    name: upload the bundles (nightly)
+    needs: [cpp-build, cpp-build-cuda, mex-build, cpp-build-opencl]
+    runs-on: ubuntu-22.04
+    if: ${{ !cancelled() && needs.cpp-build.result == 'success' && github.repository == 'NeuroJSON/siamize' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: siam*
+          path: artifacts
+      - name: Zip each bundle
+        run: |
+          mkdir packages
+          for d in artifacts/siam*; do
+            [ -d "$d" ] || continue
+            b=$(basename "$d")
+            # siamize-0.2.0-ced3c28-linux-x86_64-cpu -> siamize-linux-x86_64-cpu
+            name=$(echo "$b" | sed -E 's/^(siam[a-z]+)-[0-9][0-9.]*-[0-9a-f]{7}-/\1-/')
+            top=${b%%-*}
+            mkdir pkg && cp -a "$d"/. pkg/
+            # (artifacts lose the executable bit)
+            find pkg -type f \( -name siamize -o -name '*.so*' -o -name '*.dylib' \) -exec chmod +x {} +
+            mv pkg "$top" && zip -qFSr --symlink "packages/$name-github-latest.zip" "$top" && rm -rf "$top"
+          done
+          ls -l packages
+      - name: Copy the packages to the server
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.4
+        with:
+          server: ${{ secrets.MCX_SERVER }}
+          username: ${{ secrets.MCX_SERVER_USER }}
+          ssh_private_key: ${{ secrets.MCX_SERVER_SSH_KEY }}
+          local_path: "packages/*"
+          remote_path: ${{ secrets.MCX_CI_PATH }}
