@@ -508,7 +508,8 @@ NiftiImage load_nifti_ras(const std::string& path) {
 */
 void save_nifti_labels(const std::string& path,
                        const NiftiImage& src,
-                       const uint8_t* labels_zyx) {
+                       const uint8_t* labels_zyx,
+                       const std::string& label_json) {
     Nifti1Header h{};
     h.sizeof_hdr = 348;
     h.dim[0] = 3;
@@ -576,10 +577,32 @@ void save_nifti_labels(const std::string& path,
                                  src.volume.shape[0], src.volume.shape[1], src.volume.shape[2],
                                  X, Y, Z, dst, sgn, labels_xyz.data());
 
-    // Assemble the on-disk image: header + 4 bytes padding + data.
+    // The label names: a NIfTI-1 extension after the header -- the extender
+    // flag {1,0,0,0}, then esize (a multiple of 16, its 8-byte head included),
+    // ecode 6 (comment) and the JSON, zero-padded; the voxels follow it.
+    int32_t esize = 0;
+
+    if (!label_json.empty()) {
+        esize = static_cast<int32_t>((8 + label_json.size() + 1 + 15) / 16 * 16);
+        h.intent_code = 1002;  // NIFTI_INTENT_LABEL
+        std::memcpy(h.intent_name, "LabelTable", 11);
+        h.vox_offset = static_cast<float>(sizeof(Nifti1Header) + 4 + esize);
+    }
+
+    // Assemble the on-disk image: header + 4 bytes (extender) + extension + data.
     const size_t total_size = static_cast<size_t>(h.vox_offset) + labels_xyz.size();
     std::vector<uint8_t> nii(total_size, 0);
     std::memcpy(nii.data(), &h, sizeof(Nifti1Header));
+
+    if (esize > 0) {
+        const int32_t ecode = 6;
+        uint8_t* e = nii.data() + sizeof(Nifti1Header);
+        e[0] = 1;
+        std::memcpy(e + 4, &esize, 4);
+        std::memcpy(e + 8, &ecode, 4);
+        std::memcpy(e + 12, label_json.data(), label_json.size());
+    }
+
     std::memcpy(nii.data() + static_cast<size_t>(h.vox_offset),
                 labels_xyz.data(),
                 labels_xyz.size());
@@ -591,6 +614,7 @@ void save_nifti_labels(const std::string& path,
         write_file_bytes(path, nii.data(), nii.size());
     }
 }
+
 
 
 /*******************************************************************************/

@@ -129,6 +129,16 @@ void save_jnifti_tpm(const std::string& path,
  */
 NiftiImage load_jnifti_ras(const std::string& path);
 
+/**
+ * @brief The label set's LabelTable as JSON text, `{"LabelTable": {...}}`
+ *
+ * The same table save_jnifti_labels attaches at NIFTIHeader._DataInfo_ (names
+ * and RGBA per label); save_nifti_labels stores it in a NIfTI-1 extension.
+ *
+ * @return the JSON, or empty for a label set without a table
+ */
+std::string label_table_json(ClassSet class_set, int num_classes);
+
 }  // namespace siam
 
 #endif  // SIAMIZE_JNIFTI_IO_H

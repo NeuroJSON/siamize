@@ -63,10 +63,15 @@ NiftiImage load_nifti_ras(const std::string& path);
  * @param  path        destination file path (`.nii` or `.nii.gz`)
  * @param  src         the input NiftiImage that supplied the affine and axis order
  * @param  labels_zyx  canonical-axis (Z, Y, X) labelmap, length cZ*cY*cX bytes
+ * @param  label_json  the label names, `{"LabelTable": {...}}` (jnifti_io's
+ *                     label_table_json): when given, intent_code is
+ *                     NIFTI_INTENT_LABEL and the JSON is stored in a NIfTI-1
+ *                     header extension (ecode 6, comment)
  */
 void save_nifti_labels(const std::string& path,
                        const NiftiImage& src,
-                       const uint8_t* labels_zyx);
+                       const uint8_t* labels_zyx,
+                       const std::string& label_json = std::string());
 
 /**
  * @brief Save a 4D float32 tissue probability map (TPM) as NIfTI-1

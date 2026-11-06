@@ -53,6 +53,7 @@ single-binary with no Python runtime.
 #include "preprocess.h"
 #include "sliding.h"
 #include "weights.h"
+#include "dkatlas.h"
 
 #ifdef SIAMIZE_HAS_ORT
     #include <onnxruntime_cxx_api.h>
@@ -109,6 +110,7 @@ using siam::ClassSet;
 using siam::SIAM18_TO_SPM6;
 using siam::SPM6_NUM_CLASSES;
 using siam::SPM6_AIR_CHANNEL;
+using siam::SPM6_LABEL;
 
 
 /*******************************************************************************/
@@ -773,6 +775,14 @@ void usage(const char* exe) {
                  "                      T > 1 softens the distribution (more graded boundaries,\n"
                  "                      better-calibrated probabilities); T < 1 sharpens. Only\n"
                  "                      meaningful when --tpm is on.\n"
+                 "      --parcel dk     also parcellate SIAM's cerebral GM into the 68 Desikan-\n"
+                 "                      Killiany cortical regions (brainchop's DKatlas network on\n"
+                 "                      the input T1, ~1-2 min on the CPU): written next to the\n"
+                 "                      output as <output>_dk.<ext>, uint8, DK index 1..34 left,\n"
+                 "                      35..68 right on SIAM's cerebral GM (also with --classes\n"
+                 "                      spm), 0 elsewhere. Label outputs only (not --tpm).\n"
+                 "      --parcel-weights FILE  other DKatlas weights (brainchop model24chan104cls_synth\n"
+                 "                      model.bin layout; default: the compiled-in copy)\n"
                  "      --upsample      save the output at the internal inference resolution\n"
                  "                      (target spacing, default 0.75 mm isotropic) instead\n"
                  "                      of the input file's grid. Skips the per-channel\n"
@@ -796,7 +806,8 @@ void usage(const char* exe) {
                  "                      output channels. Pass 'spm' to remap SIAM v0.3's\n"
                  "                      18 classes into SPM12's 6 TPM channels (GM, WM,\n"
                  "                      CSF, Bone, Soft, Air). Works with both labelmap\n"
-                 "                      (argmax -> 0..5 in that order) and --tpm output\n"
+                 "                      (0 Air = background, 1 GM, 2 WM, 3 CSF, 4 Bone,\n"
+                 "                      5 Soft) and --tpm output\n"
                  "                      (4D float32 in spm12/tpm/TPM.nii channel order).\n"
                  "                      Anomalies (SIAM class 17) fold into GM.\n"
                  "  -v, --verbose       print progress (default ON; flag kept for backward\n"
@@ -852,6 +863,49 @@ void usage(const char* exe) {
 }  // namespace
 
 /*******************************************************************************/
+/*! \fn    void write_parcel(...)
+    \brief DK parcellation of SIAM's cerebral GM (--parcel dk), written to
+           <output>_dk.<ext> on the output's grid and in its format; `labels`
+           marks that GM with 1 (the 18-class labels, or --classes spm's cortex mask)
+*/
+static void write_parcel(const std::string& output_path, const std::string& out_format, const NiftiImage& t1,
+                         const NiftiImage& grid, const uint8_t* labels, const std::string& weights) {
+    std::string base = output_path, ext;
+
+    auto ends_ci = [](const std::string & s, const char* suf) {
+        const size_t n = std::strlen(suf);
+        return s.size() >= n && std::equal(s.end() - static_cast<std::ptrdiff_t>(n), s.end(), suf, [](char x, char y) {
+            return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+        });
+    };
+
+    for (const char* e : {
+                ".nii.gz", ".nii", ".jnii", ".bnii"
+            }) {
+        if (ends_ci(base, e)) {
+            ext = base.substr(base.size() - std::strlen(e));
+            base.resize(base.size() - std::strlen(e));
+            break;
+        }
+    }
+
+    const std::string path = base + "_dk" + ext;
+    siam::DKStats st;
+    const std::vector<uint8_t> par = siam::dk_parcellate(t1, grid, labels, 1, weights, st);
+    siam::log_tag("parcel", "DKatlas %.1fs (%d classes); GM %" PRId64 ": %.1f%% inside a DK cortical label, "
+                  "%.1f%% grown through the GM, %" PRId64 " unreached (%.1fs)",
+                  st.seconds_net, st.classes, st.gm, st.gm ? 100.0 * st.direct / st.gm : 0.0,
+                  st.gm ? 100.0 * st.grown / st.gm : 0.0, st.unreached, st.seconds_transfer);
+
+    if (out_format == "nii") {
+        siam::save_nifti_labels(path, grid, par.data(), siam::label_table_json(ClassSet::DK, 69));
+    } else {
+        siam::save_jnifti_labels(path, grid, par.data(), out_format, ClassSet::DK, 69);
+    }
+
+    siam::log_tag("parcel", "saved %s", path.c_str());
+}
+
 /*! \fn    int main(int argc, char** argv)
     \brief Program entry point: parse args, run the pipeline, write output
 
@@ -922,6 +976,8 @@ int main(int argc, char** argv) {
     // jsonlab); pass --shuffle to opt in to
     // the 1.5-2.5x size win for spec-compliant
     // readers (siamize itself, future jsonlab).
+    std::string parcel;                  // "dk" => DK cortical parcellation of the GM (dkatlas.h)
+    std::string parcel_weights;          // its weights file (empty => cache / download)
     bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
     //         (skip per-channel back-resample),
     //         un-cropped to full canonical extent,
@@ -1181,6 +1237,15 @@ int main(int argc, char** argv) {
                     tpm_mode = true;
                 }
             }
+        } else if (a == "--parcel") {
+            parcel = need();
+
+            if (parcel != "dk") {
+                std::fprintf(stderr, "--parcel must be dk (got '%s')\n", parcel.c_str());
+                return 2;
+            }
+        } else if (a == "--parcel-weights") {
+            parcel_weights = need();
         } else if (a == "--tpm-t") {
             tpm_temperature = std::stof(need());
 
@@ -1315,6 +1380,11 @@ int main(int argc, char** argv) {
 
     if (input_path.empty() || output_path.empty()) {
         usage(argv[0]);
+        return 2;
+    }
+
+    if (!parcel.empty() && tpm_mode) {
+        std::fprintf(stderr, "--parcel needs a label output (not --tpm)\n");
         return 2;
     }
 
@@ -2032,15 +2102,17 @@ int main(int argc, char** argv) {
             // is GM). Compute per-bin score = sum_{c in bin} exp(logit_c
             // - max_logit) and argmax that. Skip the divide-by-Z step
             // since argmax is invariant under per-voxel scaling.
-            // Outside-bbox default: 0 in the standard 18-class ordering
-            // (label 0 = background), but in SPM ordering label 0 = GM,
-            // so outside-bbox voxels need label 5 (Air) instead.
-            const uint8_t bg_label =
-                (class_set == ClassSet::SPM)
-                ? static_cast<uint8_t>(SPM6_AIR_CHANNEL)
-                : static_cast<uint8_t>(0);
-            std::vector<uint8_t> labels_up(static_cast<size_t>(voxel_count_up), bg_label);
+            // Outside-bbox: label 0, the background (Air with --classes spm:
+            // SPM6_LABEL renumbers the SPM channels, air first).
+            std::vector<uint8_t> labels_up(static_cast<size_t>(voxel_count_up), 0);
             const bool spm = (class_set == ClassSet::SPM);
+            // --parcel with --classes spm: SPM's GM merges the deep nuclei and
+            // the cerebellum, so the cortex is SIAM's own GM, the 18-class argmax
+            std::vector<uint8_t> cortex_up;
+
+            if (spm && !parcel.empty()) {
+                cortex_up.assign(static_cast<size_t>(voxel_count_up), 0);
+            }
 
             #pragma omp parallel for schedule(static) collapse(2)
 
@@ -2056,13 +2128,19 @@ int main(int argc, char** argv) {
 
                         if (spm) {
                             float M = logits.channel_ptr(0)[i_net];
+                            int top = 0;
 
                             for (int64_t c = 1; c < num_classes; ++c) {
                                 float v = logits.channel_ptr(c)[i_net];
 
                                 if (v > M) {
                                     M = v;
+                                    top = static_cast<int>(c);
                                 }
+                            }
+
+                            if (!cortex_up.empty()) {
+                                cortex_up[z * plane_up + y * Xup + x] = top == 1;
                             }
 
                             float bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
@@ -2094,7 +2172,7 @@ int main(int argc, char** argv) {
                         }
 
                         labels_up[z * plane_up + y * Xup + x] =
-                            static_cast<uint8_t>(best);
+                            spm ? SPM6_LABEL[best] : static_cast<uint8_t>(best);
                     }
                 }
             }
@@ -2102,11 +2180,17 @@ int main(int argc, char** argv) {
             logits = LogitsVolume{};
 
             if (out_format == "nii") {
-                siam::save_nifti_labels(output_path, img_up, labels_up.data());
+                siam::save_nifti_labels(output_path, img_up, labels_up.data(),
+                                        siam::label_table_json(class_set, static_cast<int>(num_classes)));
             } else {
                 siam::save_jnifti_labels(output_path, img_up, labels_up.data(),
                                          out_format, class_set,
                                          static_cast<int>(num_classes));
+            }
+
+            if (!parcel.empty()) {
+                write_parcel(output_path, out_format, img, img_up, spm ? cortex_up.data() : labels_up.data(),
+                             parcel_weights);
             }
         }
 
@@ -2247,6 +2331,12 @@ int main(int argc, char** argv) {
         // invariant).
         std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, 0);
         const bool spm_labels = (class_set == ClassSet::SPM);
+        // (--parcel with --classes spm: the cortex from the 18-class argmax, as above)
+        std::vector<uint8_t> cortex_canon;
+
+        if (spm_labels && !parcel.empty()) {
+            cortex_canon.assign(static_cast<size_t>(Zc) * Yc * Xc, 0);
+        }
 
         #pragma omp parallel for schedule(static)
 
@@ -2258,13 +2348,20 @@ int main(int argc, char** argv) {
 
                     if (spm_labels) {
                         float M = logits_back.channel_ptr(0)[i];
+                        int top = 0;
 
                         for (int64_t c = 1; c < num_classes; ++c) {
                             float v = logits_back.channel_ptr(c)[i];
 
                             if (v > M) {
                                 M = v;
+                                top = static_cast<int>(c);
                             }
+                        }
+
+                        if (!cortex_canon.empty()) {
+                            cortex_canon[(z + crop.bbox[0][0]) * Yc * Xc + (y + crop.bbox[1][0]) * Xc + x + crop.bbox[2][0]] =
+                                top == 1;
                         }
 
                         float bin[SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
@@ -2295,20 +2392,15 @@ int main(int argc, char** argv) {
                         }
                     }
 
-                    labels_crop[i] = static_cast<uint8_t>(best);
+                    labels_crop[i] = spm_labels ? SPM6_LABEL[best] : static_cast<uint8_t>(best);
                 }
             }
         }
 
         logits_back = LogitsVolume{};
 
-        // See note in upsample labels branch: SPM ordering puts Air
-        // at label 5, so outside-bbox needs label 5 (not 0 = GM).
-        const uint8_t bg_label_canon =
-            (class_set == ClassSet::SPM)
-            ? static_cast<uint8_t>(SPM6_AIR_CHANNEL)
-            : static_cast<uint8_t>(0);
-        std::vector<uint8_t> labels_canon(static_cast<size_t>(Zc) * Yc * Xc, bg_label_canon);
+        // outside-bbox: label 0, the background (Air with --classes spm)
+        std::vector<uint8_t> labels_canon(static_cast<size_t>(Zc) * Yc * Xc, 0);
 
         for (int64_t z = 0; z < cZ; ++z) {
             for (int64_t y = 0; y < cY; ++y) {
@@ -2321,11 +2413,17 @@ int main(int argc, char** argv) {
         }
 
         if (out_format == "nii") {
-            siam::save_nifti_labels(output_path, img, labels_canon.data());
+            siam::save_nifti_labels(output_path, img, labels_canon.data(),
+                                    siam::label_table_json(class_set, static_cast<int>(num_classes)));
         } else {
             siam::save_jnifti_labels(output_path, img, labels_canon.data(),
                                      out_format, class_set,
                                      static_cast<int>(num_classes));
+        }
+
+        if (!parcel.empty()) {
+            write_parcel(output_path, out_format, img, img, spm_labels ? cortex_canon.data() : labels_canon.data(),
+                         parcel_weights);
         }
     }
 

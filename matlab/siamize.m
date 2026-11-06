@@ -178,8 +178,10 @@ function nii = siamize(varargin)
 %            opts.classes='spm' is set.
 %            Default labels: integers 0..17 per SIAM v0.3 (0=background,
 %            1=GM, 2=WM, 3=CSF, ..., 17=Anomalies).
-%            SPM labels (opts.classes='spm'): integers 0..5 in SPM12
-%            order (0=GM, 1=WM, 2=CSF, 3=Bone, 4=Soft, 5=Air).
+%            SPM labels (opts.classes='spm'): integers 0..5, 0 the
+%            background (0=Air, 1=GM, 2=WM, 3=CSF, 4=Bone, 5=Soft); the
+%            SPM TPM keeps spm12's channel order (GM, WM, CSF, Bone,
+%            Soft, Air).
 %            Default TPM: per-class softmax probabilities over 18
 %            channels, sums to 1 per voxel; argmax along the 4th axis
 %            (minus 1) reproduces the default label volume.
@@ -510,7 +512,9 @@ function tbl = siamize_label_table_(opts)
 %       opts.classes==18): full anatomical dictionary from
 %       label_siamV03_.json with FreeSurfer-inspired colors.
 %     - SPM 6-class (opts.classes=='spm'): GM, WM, CSF, Bone, Soft,
-%       Air in spm12/tpm/TPM.nii order.
+%       Air -- for a label map keyed by value, Air the background 0
+%       (GM 1, WM 2, CSF 3, Bone 4, Soft 5); for the TPM (opts.tpm)
+%       keyed by channel, in spm12/tpm/TPM.nii order.
 %   Returns an empty struct() for any other class set; the caller
 %   should then omit LabelTable so viewers fall back to defaults.
 %   Per JGIFTI rules, the background/Air entry uses alpha=0
@@ -525,7 +529,11 @@ if isfield(opts, 'classes') && ischar(opts.classes) ...
               [0.900 0.850 0.550 1.0]; ...
               [0.950 0.750 0.650 1.0]; ...
               [0.000 0.000 0.000 0.0]};
-    ids = 0:5;
+    if isfield(opts, 'tpm') && opts.tpm
+        ids = 0:5;                % TPM channels: spm12's order
+    else
+        ids = [1 2 3 4 5 0];      % label values: Air the background
+    end
 elseif ~isfield(opts, 'classes') ...
         || (isnumeric(opts.classes) && opts.classes == 18)
     names  = {'background', 'GM', 'WM', 'CSF', 'CSFv', 'cerGM', ...

@@ -208,6 +208,7 @@ struct NiftiImage {
 enum class ClassSet {
     CUSTOM_N,   /**< pass through N channels (default) */
     SPM,        /**< SIAM 18 -> SPM 6 merge after softmax */
+    DK,         /**< --parcel dk's output: the 68 Desikan-Killiany cortical regions */
 };
 
 /**
@@ -244,6 +245,12 @@ constexpr int8_t SIAM18_TO_SPM6[18] = {
 };
 constexpr int64_t SPM6_NUM_CLASSES = 6;
 constexpr int8_t  SPM6_AIR_CHANNEL = 5;   /**< background equivalent in SPM order */
+/**
+ * The --classes spm LABEL map's value of each SPM channel: air 0 (the background,
+ * as every label map has it), then GM 1, WM 2, CSF 3, Bone 4, Soft 5. The 4-D TPM
+ * keeps the channels in spm12/tpm/TPM.nii order.
+ */
+constexpr uint8_t SPM6_LABEL[SPM6_NUM_CLASSES] = {1, 2, 3, 4, 5, 0};
 
 }  // namespace siam
 

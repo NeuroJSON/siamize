@@ -213,6 +213,7 @@ set(SIAMIZE_SOURCES
     src/sliding.cpp
     src/weights.cpp
     src/siam_log.cpp
+    src/dkatlas.cpp
 )
 if(SIAMIZE_BACKEND STREQUAL "ort")
     list(APPEND SIAMIZE_SOURCES src/engine_ort.cpp)

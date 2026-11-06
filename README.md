@@ -651,12 +651,14 @@ JGIFTI-style `LabelTable` at
 `NIFTIHeader._DataInfo_.LabelTable` — anatomical names + per-tissue
 RGBA colors keyed by label ID. Two presets are emitted automatically:
 the full SIAM v0.3 18-class dictionary (default), or the SPM12
-6-class TPM dictionary (GM, WM, CSF, Bone, Soft, Air) when
-`--classes spm` is set. Viewers that honour the
+6-class dictionary when `--classes spm` is set. The `--classes spm`
+label map is 0 Air (the background), 1 GM, 2 WM, 3 CSF, 4 Bone,
+5 Soft; its `--tpm` map keeps spm12/tpm/TPM.nii's channel order (GM,
+WM, CSF, Bone, Soft, Air). Viewers that honour the
 [JGIFTI spec](https://github.com/NeuroJSON/jgifti) render tissue
-names and colors instead of an unlabeled colormap. NIfTI-1 output
-(`.nii` / `.nii.gz`) doesn't carry the LabelTable since the format
-has no extensible JSON header.
+names and colors instead of an unlabeled colormap. NIfTI-1 label
+output (`.nii` / `.nii.gz`) carries the same LabelTable as JSON in a
+header extension (ecode 6), with intent NIFTI_INTENT_LABEL.
 
 For TPM output (`--tpm`) on the `.jnii` / `.bnii` path, opt into
 byte-shuffle compression with `--shuffle`. The flag wraps the

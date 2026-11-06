@@ -1092,13 +1092,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 }
             } else {
                 // Labels: argmax (SPM-aware) at network resolution, then
-                // bbox-copy into the upsampled canonical buffer. Outside-
-                // bbox default is label 0 (background) by default, label
-                // 5 (Air) in SPM ordering.
+                // bbox-copy into the upsampled canonical buffer; outside the
+                // bbox is label 0, the background (Air with --classes spm).
                 const bool spm = (opts.class_set == siam::ClassSet::SPM);
-                const uint8_t bg_label = spm
-                                         ? static_cast<uint8_t>(siam::SPM6_AIR_CHANNEL)
-                                         : static_cast<uint8_t>(0);
+                const uint8_t bg_label = 0;   // the background (Air with --classes spm: siam::SPM6_LABEL)
                 const mwSize odims[3] = {
                     static_cast<mwSize>(Xup),
                     static_cast<mwSize>(Yup),
@@ -1161,7 +1158,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                             }
 
                             out_ptr[z * plane_up + y * Xup + x] =
-                                static_cast<uint8_t>(best);
+                                spm ? siam::SPM6_LABEL[best] : static_cast<uint8_t>(best);
                         }
                     }
                 }
@@ -1308,9 +1305,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             // and argmax that; skip the divide-by-Z since argmax is
             // scale invariant.
             const bool spm_labels = (opts.class_set == siam::ClassSet::SPM);
-            const uint8_t bg_label = spm_labels
-                                     ? static_cast<uint8_t>(siam::SPM6_AIR_CHANNEL)
-                                     : static_cast<uint8_t>(0);
+            const uint8_t bg_label = 0;   // the background (Air with --classes spm: siam::SPM6_LABEL)
             std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, bg_label);
 
             #pragma omp parallel for schedule(static)
@@ -1360,7 +1355,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                             }
                         }
 
-                        labels_crop[i] = static_cast<uint8_t>(best);
+                        labels_crop[i] = spm_labels ? siam::SPM6_LABEL[best] : static_cast<uint8_t>(best);
                     }
                 }
             }

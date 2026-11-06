@@ -49,6 +49,7 @@ compressed arrays).
 *******************************************************************************/
 
 #include "jnifti_io.h"
+#include "dkatlas_labels.h"
 #include "orient.h"
 #include "siam.h"
 
@@ -339,7 +340,7 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
     \return      a NIFTIHeader JSON object
 */
 /*******************************************************************************/
-/*! \fn    json build_label_table(ClassSet class_set, int num_classes)
+/*! \fn    json build_label_table(ClassSet class_set, int num_classes, bool tpm)
     \brief Build a JGIFTI-style LabelTable for the labelmap output
 
     Constructs the per-class anatomical dictionary that goes into
@@ -363,8 +364,10 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
         label_siamV03_.json (Background, GM, WM, CSF, CSFv, CerGM,
         Thal, Pal, Put, Caud, Accu, Amyg, Hippo, Dura, Vascular,
         Skull, Head, Anomalies).
-      - SPM (6 classes, when class_set == SPM): GM, WM, CSF, Bone,
-        Soft, Air in spm12/tpm/TPM.nii channel order (no SIAMLabel).
+      - SPM (6 classes, when class_set == SPM): for the label map Air 0
+        (the background), GM 1, WM 2, CSF 3, Bone 4, Soft 5 (SPM6_LABEL);
+        for the 4-D TPM (tpm) GM, WM, CSF, Bone, Soft, Air in
+        spm12/tpm/TPM.nii channel order (no SIAMLabel).
 
     For other class sets we return an empty json::object() and the
     caller omits LabelTable entirely; viewers will then fall back to
@@ -375,10 +378,12 @@ json jdata_annotated(const T* data, const std::vector<int64_t>& shape,
     \param  class_set     semantic label set selector
     \param  num_classes   total class count (only used to decide
                           whether to emit SIAM v0.3 names)
+    \param  tpm           keyed by the 4-D TPM's channels (SPM: their order
+                          differs from the label map's values)
     \return  LabelTable JSON object, or empty if the class set is
              unknown
 */
-json build_label_table(ClassSet class_set, int num_classes) {
+json build_label_table(ClassSet class_set, int num_classes, bool tpm = false) {
     // {label-id -> {"Label": name, "RGBA": [r,g,b,a]}}
     json tbl = json::object();
 
@@ -402,14 +407,18 @@ json build_label_table(ClassSet class_set, int num_classes) {
     };
 
     if (class_set == ClassSet::SPM) {
-        // SPM12 6-class TPM order: GM, WM, CSF, Bone, Soft, Air.
-        // Air keeps alpha=0 per JGIFTI "unassigned -> transparent".
-        add(0, "GM",   "Gray matter",         nullptr, 0.700f, 0.700f, 0.700f, 1.0f);
-        add(1, "WM",   "White matter",        nullptr, 0.950f, 0.950f, 0.950f, 1.0f);
-        add(2, "CSF",  "Cerebrospinal fluid", nullptr, 0.000f, 0.600f, 0.900f, 1.0f);
-        add(3, "Bone", "Bone",                nullptr, 0.900f, 0.850f, 0.550f, 1.0f);
-        add(4, "Soft", "Soft tissue",         nullptr, 0.950f, 0.750f, 0.650f, 1.0f);
-        add(5, "Air",  "Air",                 nullptr, 0.000f, 0.000f, 0.000f, 0.0f);
+        // The 4-D TPM: keyed by channel, in SPM12's TPM.nii order (GM, WM, CSF,
+        // Bone, Soft, Air); the label map: keyed by value, Air the background 0
+        // (SPM6_LABEL). Air keeps alpha=0 per JGIFTI "unassigned -> transparent".
+        auto key = [&](int ch) {
+            return tpm ? ch : static_cast<int>(SPM6_LABEL[ch]);
+        };
+        add(key(0), "GM",   "Gray matter",         nullptr, 0.700f, 0.700f, 0.700f, 1.0f);
+        add(key(1), "WM",   "White matter",        nullptr, 0.950f, 0.950f, 0.950f, 1.0f);
+        add(key(2), "CSF",  "Cerebrospinal fluid", nullptr, 0.000f, 0.600f, 0.900f, 1.0f);
+        add(key(3), "Bone", "Bone",                nullptr, 0.900f, 0.850f, 0.550f, 1.0f);
+        add(key(4), "Soft", "Soft tissue",         nullptr, 0.950f, 0.750f, 0.650f, 1.0f);
+        add(key(5), "Air",  "Air",                 nullptr, 0.000f, 0.000f, 0.000f, 0.0f);
         return tbl;
     }
 
@@ -438,6 +447,24 @@ json build_label_table(ClassSet class_set, int num_classes) {
         add(15, "Skull",       "Skull",                            "Skull",      0.900f, 0.850f, 0.550f, 1.0f);
         add(16, "Head",        "Extracranial soft tissue",         "Head",       0.950f, 0.750f, 0.650f, 1.0f);
         add(17, "Anomalies",   "Anomalies",                        "Anomalies",  1.000f, 0.000f, 1.000f, 1.0f);
+        return tbl;
+    }
+
+    if (class_set == ClassSet::DK) {
+        // --parcel dk: the 68 Desikan-Killiany cortical regions (brainchop's
+        // DKatlas indices and colours); Label the DK token, Name readable
+        // ("ctx-lh-precentral" -> "Left precentral"), FreeSurferID its
+        // FreeSurferColorLUT code (the voxels keep the uint8 index)
+        add(0, "Background", "Background", nullptr, 0.0f, 0.0f, 0.0f, 0.0f);
+
+        for (int id = 1; id <= 68; ++id) {
+            const std::string tok = kDKNames[id];
+            const std::string name = std::string(tok.compare(0, 7, "ctx-lh-") == 0 ? "Left " : "Right ") + tok.substr(7);
+            add(id, kDKNames[id], name.c_str(), nullptr, kDKRGB[id][0] / 255.0f, kDKRGB[id][1] / 255.0f,
+                kDKRGB[id][2] / 255.0f, 1.0f);
+            tbl[std::to_string(id)]["FreeSurferID"] = kDKFreeSurfer[id];   // (its FreeSurferColorLUT code)
+        }
+
         return tbl;
     }
 
@@ -963,6 +990,11 @@ std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vecto
 
 }  // anonymous namespace
 
+std::string label_table_json(ClassSet class_set, int num_classes) {
+    const json t = build_label_table(class_set, num_classes);
+    return t.empty() ? std::string() : json{{"LabelTable", t}}.dump();
+}
+
 
 /*******************************************************************************/
 /*! \fn    void save_jnifti_labels(const std::string& path,
@@ -1031,6 +1063,7 @@ void save_jnifti_labels(const std::string& path,
                             data_xyz.data(), {X, Y, Z}, binary);
     write_jnifti_root(path, root, binary);
 }
+
 
 
 /*******************************************************************************/
@@ -1103,7 +1136,7 @@ void save_jnifti_tpm(const std::string& path,
     // presets as the labelmap path -- SIAM v0.3 18-channel default
     // and SPM 6-channel for class_set==SPM.
     json label_table = build_label_table(class_set,
-                                         static_cast<int>(num_classes));
+                                         static_cast<int>(num_classes), true);
 
     if (!label_table.empty()) {
         json data_info = json::object();
