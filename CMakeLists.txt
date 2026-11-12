@@ -214,6 +214,7 @@ set(SIAMIZE_SOURCES
     src/weights.cpp
     src/siam_log.cpp
     src/dkatlas.cpp
+    src/dkatlas_cl.cpp
 )
 if(SIAMIZE_BACKEND STREQUAL "ort")
     list(APPEND SIAMIZE_SOURCES src/engine_ort.cpp)

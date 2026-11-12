@@ -4,6 +4,7 @@
 *******************************************************************************/
 
 #include "dkatlas.h"
+#include "dkatlas_cl.h"
 
 
 #include <algorithm>
@@ -342,7 +343,35 @@ void norm_gelu(float* x, const float* scale, const float* shift) {
 }
 
 /* the network on the conformed input: per-voxel DK class (0..103) */
-std::vector<uint8_t> run_net(const std::vector<float>& in, const Weights& W) {
+std::vector<uint8_t> run_net(const std::vector<float>& in, const Weights& W, int cl_device, std::string& where) {
+    // an OpenCL device first (cl_device >= 0; SIAMIZE_DK_CPU=1 forces the CPU), this as the fallback
+    const char* force_cpu = std::getenv("SIAMIZE_DK_CPU");
+
+    if (cl_device >= 0 && !(force_cpu && *force_cpu && *force_cpu != '0')) {
+        DKNetWeights w;
+
+        for (int l = 0; l < kLayers; ++l) {
+            w.conv[l] = W.conv[l].data();
+        }
+
+        w.scale = W.scale;
+        w.shift = W.shift;
+        w.fk = W.fk.data();
+        w.fb = W.fb;
+        w.dil = kDil;
+        std::vector<uint8_t> lab(static_cast<size_t>(kVox));
+        std::string info;
+
+        if (dk_run_cl(in.data(), w, cl_device, lab.data(), info)) {
+            where = "OpenCL " + info;
+            return lab;
+        }
+
+        where = "CPU (OpenCL: " + info + ")";
+    } else {
+        where = "CPU";
+    }
+
     std::vector<float> A(static_cast<size_t>(kVox) * kC), B(static_cast<size_t>(kVox) * kC);
     conv3(in.data(), 1, A.data(), W.conv[0].data(), kDil[0]);
     norm_gelu(A.data(), W.scale[0], W.shift[0]);
@@ -390,12 +419,12 @@ bool cortical(int dk) {
 }  // namespace
 
 std::vector<uint8_t> dk_parcellate(const NiftiImage& t1, const NiftiImage& grid, const uint8_t* labels_zyx,
-                                   uint8_t gm_label, const std::string& weights, DKStats& st) {
+                                   uint8_t gm_label, const std::string& weights, int cl_device, DKStats& st) {
     using clk = std::chrono::steady_clock;
     const auto t0 = clk::now();
     const Weights W = load_weights(weights);
     const Mat4 C = conform_affine(t1);
-    std::vector<uint8_t> dk = run_net(conform_input(t1, C), W);
+    std::vector<uint8_t> dk = run_net(conform_input(t1, C), W, cl_device, st.device);
 
     if (const char* dump = std::getenv("SIAMIZE_DK_DUMP")) {  // (debug: the raw 256^3 classes, i slowest)
         std::ofstream(dump, std::ios::binary).write(reinterpret_cast<const char*>(dk.data()),

@@ -777,7 +777,8 @@ void usage(const char* exe) {
                  "                      meaningful when --tpm is on.\n"
                  "      --parcel dk     also parcellate SIAM's cerebral GM into the 68 Desikan-\n"
                  "                      Killiany cortical regions (brainchop's DKatlas network on\n"
-                 "                      the input T1, ~1-2 min on the CPU): written next to the\n"
+                 "                      the input T1; ~2 s on an OpenCL GPU -- -G's, else the first\n"
+                 "                      GPU -- or ~30 s on the CPU with -c cpu): written next to the\n"
                  "                      output as <output>_dk.<ext>, uint8, DK index 1..34 left,\n"
                  "                      35..68 right on SIAM's cerebral GM (also with --classes\n"
                  "                      spm), 0 elsewhere. Label outputs only (not --tpm).\n"
@@ -869,7 +870,7 @@ void usage(const char* exe) {
            marks that GM with 1 (the 18-class labels, or --classes spm's cortex mask)
 */
 static void write_parcel(const std::string& output_path, const std::string& out_format, const NiftiImage& t1,
-                         const NiftiImage& grid, const uint8_t* labels, const std::string& weights) {
+                         const NiftiImage& grid, const uint8_t* labels, const std::string& weights, int cl_device) {
     std::string base = output_path, ext;
 
     auto ends_ci = [](const std::string & s, const char* suf) {
@@ -891,7 +892,8 @@ static void write_parcel(const std::string& output_path, const std::string& out_
 
     const std::string path = base + "_dk" + ext;
     siam::DKStats st;
-    const std::vector<uint8_t> par = siam::dk_parcellate(t1, grid, labels, 1, weights, st);
+    const std::vector<uint8_t> par = siam::dk_parcellate(t1, grid, labels, 1, weights, cl_device, st);
+    siam::log_tag("parcel", "DKatlas on %s", st.device.c_str());
     siam::log_tag("parcel", "DKatlas %.1fs (%d classes); GM %" PRId64 ": %.1f%% inside a DK cortical label, "
                   "%.1f%% grown through the GM, %" PRId64 " unreached (%.1fs)",
                   st.seconds_net, st.classes, st.gm, st.gm ? 100.0 * st.direct / st.gm : 0.0,
@@ -966,6 +968,7 @@ int main(int argc, char** argv) {
 
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
+    int dk_cl_device = 0;              // --parcel's OpenCL device: -G's clinfo index, 0 the first GPU
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
@@ -1339,6 +1342,7 @@ int main(int argc, char** argv) {
                         }
 
                         const auto& d = devs[idx - 1];
+                        dk_cl_device = idx;
 
                         if (!d.is_gpu) {
                             // MNN's OpenCL backend can only run on GPU devices;
@@ -2190,7 +2194,7 @@ int main(int argc, char** argv) {
 
             if (!parcel.empty()) {
                 write_parcel(output_path, out_format, img, img_up, spm ? cortex_up.data() : labels_up.data(),
-                             parcel_weights);
+                             parcel_weights, device == "cpu" ? -1 : dk_cl_device);
             }
         }
 
@@ -2423,7 +2427,7 @@ int main(int argc, char** argv) {
 
         if (!parcel.empty()) {
             write_parcel(output_path, out_format, img, img, spm_labels ? cortex_canon.data() : labels_canon.data(),
-                         parcel_weights);
+                         parcel_weights, device == "cpu" ? -1 : dk_cl_device);
         }
     }
 

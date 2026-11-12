@@ -10,9 +10,10 @@ label keeps it; the rest of the GM takes the nearest one, grown through the GM
 only (so a label cannot jump a sulcus) and only within its own hemisphere.
 
 The network is small (198 k parameters, 0.79 MB): its weights are compiled in
-(src/dkatlas_weights.inc; MIT, src/dkatlas_LICENSE.txt) and it runs natively on
-the CPU here, not through the ORT / MNN engine (MNN's native Conv3D has no
-dilation).
+(src/dkatlas_weights.inc; MIT, src/dkatlas_LICENSE.txt) and it runs on its own
+OpenCL kernels (dkatlas_cl.cpp; any OpenCL GPU, in either build), else natively
+on the CPU -- not through the ORT / MNN engine (MNN's native Conv3D has no
+dilation). It is small but not cheap: 13 full-resolution 256^3 layers, ~6 TFLOP.
 *******************************************************************************/
 
 #ifndef SIAMIZE_DKATLAS_H
@@ -38,6 +39,7 @@ struct DKStats {
     int64_t unreached = 0; /**< GM voxels left unlabelled (no same-side label connected) */
     int classes = 0;       /**< DK classes the network produced */
     double seconds_net = 0, seconds_transfer = 0;
+    std::string device;    /**< where the network ran ("OpenCL <name>" or "CPU (why)") */
 };
 
 /**
@@ -49,12 +51,14 @@ struct DKStats {
  * @param  gm_label    SIAM's cerebral GM label (1 for SIAM v0.3's 18 classes)
  * @param  weights     a DKatlas weights file (brainchop's model.bin, raw fp32), or
  *                     empty for the compiled-in copy
+ * @param  cl_device   the network's OpenCL device: 1-based in clinfo order (siamize -G),
+ *                     0 the first GPU, -1 the CPU only; the CPU when no device can run it
  * @param  st          filled with statistics
  * @return canonical (Z, Y, X) labels on `grid`: the DK index (1..68) on GM, else 0
  */
 std::vector<uint8_t> dk_parcellate(const NiftiImage& t1, const NiftiImage& grid,
                                    const uint8_t* labels_zyx, uint8_t gm_label,
-                                   const std::string& weights, DKStats& st);
+                                   const std::string& weights, int cl_device, DKStats& st);
 
 }  // namespace siam
 
