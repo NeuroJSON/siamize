@@ -1,4 +1,4 @@
-function nii = siamize(varargin)
+function [nii, dk] = siamize(varargin)
 % SIAMIZE  Run SIAM v0.3 head/brain MRI segmentation on a NIfTI volume.
 %
 %   labels = siamize(input)
@@ -10,6 +10,7 @@ function nii = siamize(varargin)
 %   labels = siamize(img,   affine)
 %   labels = siamize(img,   affine, outputfile)
 %   labels = siamize(img,   affine, outputfile, models, opts)
+%   [labels, dk] = siamize(..., 'parcel', 'dk')
 %   labels = siamize(img,   affine, models)
 %   labels = siamize(img,   affine, models, opts)
 %
@@ -162,6 +163,17 @@ function nii = siamize(varargin)
 %                                      names them (with FreeSurferID).
 %                                      Labels only (not 'tpm'). Mirrors
 %                                      the CLI's --parcel-merge.
+%               'parcel'              'dk': also return the DK cortical
+%                                      parcellation separately, as the 2nd
+%                                      output `dk` (a jnifti struct on the
+%                                      labels' grid: uint8, the DK index
+%                                      1..34 left, 35..68 right on SIAM's
+%                                      cerebral GM, 0 elsewhere, with its
+%                                      LabelTable), and, with an
+%                                      outputfile, write it next to it as
+%                                      <output>_dk.<ext>. Labels only (not
+%                                      'tpm'). Mirrors the CLI's --parcel
+%                                      dk; 'parcel_merge' merges instead.
 %               'parcel_weights'      char: other DKatlas weights (the
 %                                      CLI's --parcel-weights).
 %               'upsample'            logical (default false). When true,
@@ -340,8 +352,15 @@ end
 %       affine for the upsampled canonical-RAS grid. Without
 %       opts.upsample the output sits on the input grid, so the input
 %       affine is correct and only one output is requested.
+%   - third output (opts.parcel = 'dk', not merged): the DK map on the
+%       labels' grid.
 upsample = isfield(opts, 'upsample') && opts.upsample;
-if upsample
+want_dk = isfield(opts, 'parcel') && ~isempty(opts.parcel) ...
+          && ~(isfield(opts, 'parcel_merge') && opts.parcel_merge);
+dk = [];
+if want_dk
+    [data, affine_up, dkdata] = siamex(img, affine, resolved, opts);
+elseif upsample
     [data, affine_up] = siamex(img, affine, resolved, opts);
 else
     data = siamex(img, affine, resolved, opts);
@@ -389,9 +408,9 @@ end
 tbl = siamize_label_table_(opts);
 if isfield(opts, 'parcel_merge') && opts.parcel_merge && ~isempty(fieldnames(tbl))
     % the DK regions, at 100 + their DK index (the MEX's compiled-in table)
-    dk = siamex('dklabels');
-    for k = 1:numel(dk)
-        tbl.(encodevarname(num2str(100 + dk(k).DKIndex))) = dk(k);
+    reg = siamex('dklabels');
+    for k = 1:numel(reg)
+        tbl.(encodevarname(num2str(100 + reg(k).DKIndex))) = reg(k);
     end
 end
 if ~isempty(fieldnames(tbl))
@@ -404,8 +423,32 @@ if ~isempty(fieldnames(tbl))
     nii.NIFTIHeader.x0x5F_DataInfo_ = info;
 end
 
+% opts.parcel = 'dk': the DK map, with the labels' header and its own LabelTable
+if want_dk
+    dk = nii;
+    dk.NIFTIData = dkdata;
+    dktbl = struct();
+    dktbl.(encodevarname('0')) = struct('Label', 'Background', 'Name', 'Background', ...
+                                        'RGBA', single([0 0 0 0]));
+    reg = siamex('dklabels');
+    for k = 1:numel(reg)
+        dktbl.(encodevarname(num2str(reg(k).DKIndex))) = reg(k);
+    end
+    if isfield(dk.NIFTIHeader, 'x0x5F_DataInfo_')
+        info = dk.NIFTIHeader.x0x5F_DataInfo_;
+    else
+        info = struct();
+    end
+    info.LabelTable = dktbl;
+    dk.NIFTIHeader.x0x5F_DataInfo_ = info;
+end
+
 if ~isempty(outputfile)
     siamize_write_output_(nii, outputfile);
+    if want_dk   % <output>_dk.<ext>, as the CLI
+        dkfile = regexprep(outputfile, '(\.nii\.gz|\.nii|\.jnii|\.bnii)$', '_dk$1', 'ignorecase');
+        siamize_write_output_(dk, dkfile);
+    end
 end
 end
 

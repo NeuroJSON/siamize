@@ -47,7 +47,7 @@ Inputs:
   - opts:    optional struct with any of `.device`, `.threads`,
              `.patch`, `.spacing`, `.classes`, `.tpm`, `.tpm_t`,
              `.trt_cache`, `.gpu`, `.arena`, `.lowmem`, `.verbose`,
-             `.parcel_merge`, `.parcel_weights`.
+             `.parcel`, `.parcel_merge`, `.parcel_weights`.
              See read_opts() in this file for parsing details.
              The `.arena` toggle mirrors the CLI's `--no-arena` flag:
              pass `'arena', false` to keep peak RSS small at the
@@ -66,6 +66,11 @@ Output:
              With `opts.parcel_merge` (CLI --parcel-merge) the cortical GM
              carries 100 + its Desikan-Killiany index (101..134 left,
              135..168 right; still uint8).
+  - affine:  (2nd) the output grid's 4x4 affine: the upsampled grid's with
+             `opts.upsample`, else the input's.
+  - dk:      (3rd) with `opts.parcel = 'dk'` (CLI --parcel dk, not merged):
+             the DK map on the labels' grid, uint8, the DK index 1..68 on
+             the cortical GM, 0 elsewhere; [] when not asked for.
 
 MEX and CLI share the same `siamize_core` static library, so MEX
 predictions are bit-identical to `siamize -i ... -o ...` when run
@@ -344,6 +349,7 @@ struct Opts {
     bool  parcel_merge = false;                        /**< true -> DK parcellation merged into the labels
                                                             (100 + DK index on the cortical GM; CLI
                                                             --parcel-merge) */
+    std::string parcel;                                /**< "dk": the DK map as the 3rd output (CLI --parcel) */
     std::string parcel_weights;                        /**< other DKatlas weights (CLI --parcel-weights) */
     bool  lowmem = false;                              /**< true -> force the lowmem preset
                                                             (smaller patch, no arena, smaller
@@ -565,6 +571,14 @@ void read_opts(const mxArray* a, Opts& o) {
         // into nii.NIFTIHeader.Affine so downstream tools see the
         // correct spatial metadata.
         o.upsample = (mxGetScalar(f) != 0.0);
+    }
+
+    if ((f = mxGetField(a, 0, "parcel")) && !mxIsEmpty(f)) {
+        o.parcel = mx_to_string(f);
+
+        if (o.parcel != "dk") {
+            die("siamize:parcel", "opts.parcel must be 'dk'");
+        }
     }
 
     if ((f = mxGetField(a, 0, "parcel_merge")) && !mxIsEmpty(f)) {
@@ -949,21 +963,29 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             canon.shape[0], canon.shape[1], canon.shape[2]
         };
 
-        if (opts.parcel_merge && opts.tpm) {
-            die("siamize:parcel", "opts.parcel_merge needs a label output (not opts.tpm)");
+        // the DK parcellation: merged into the labels (parcel_merge), or the 3rd output (parcel 'dk')
+        const bool want_dk = opts.parcel_merge || !opts.parcel.empty();
+
+        if (want_dk && opts.tpm) {
+            die("siamize:parcel", "opts.parcel / opts.parcel_merge need a label output (not opts.tpm)");
         }
 
-        // --parcel-merge: DKatlas reads the whole input (canonical) and its affine
+        if (nlhs >= 3) {
+            plhs[2] = mxCreateDoubleMatrix(0, 0, mxREAL);   // (replaced when the DK map is made)
+        }
+
+        // DKatlas reads the whole input (canonical) and its affine
         siam::NiftiImage t1;
 
-        if (opts.parcel_merge) {
+        if (want_dk) {
             t1.volume = canon;
             t1.affine_canon = affine_canon;
         }
 
         const int dk_device = opts.device == "cpu" ? -1 : 0;   // (0: the first OpenCL GPU)
-        // DK on the cortical GM of `gm` (1 there) on the grid (shape, affine), into `labels`
-        auto merge_dk = [&](const std::array<int64_t, 3>& shape, const std::array<float, 16>& aff,
+        // DK on the cortical GM of `gm` (1 there) on the grid (shape, affine), canonical (Z, Y, X):
+        // merged into `labels` (parcel_merge), else returned
+        auto run_dk = [&](const std::array<int64_t, 3>& shape, const std::array<float, 16>& aff,
         const uint8_t* gm, uint8_t* labels) {
             siam::NiftiImage grid;
             grid.volume.shape = shape;
@@ -977,13 +999,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                           st.seconds_net, st.classes, st.gm, st.gm ? 100.0 * st.direct / st.gm : 0.0,
                           st.gm ? 100.0 * st.grown / st.gm : 0.0, st.unreached);
 
-            for (size_t i = 0; i < par.size(); ++i) {
-                if (par[i]) {
-                    labels[i] = static_cast<uint8_t>(siam::DK_MERGE_OFFSET + par[i]);
+            if (opts.parcel_merge) {
+                for (size_t i = 0; i < par.size(); ++i) {
+                    if (par[i]) {
+                        labels[i] = static_cast<uint8_t>(siam::DK_MERGE_OFFSET + par[i]);
+                    }
                 }
+
+                siam::log_tag("parcel", "merged into the labels as %d + the DK index", siam::DK_MERGE_OFFSET);
             }
 
-            siam::log_tag("parcel", "merged into the labels as %d + the DK index", siam::DK_MERGE_OFFSET);
+            return par;
         };
 
         auto crop = siam::crop_to_nonzero(canon);
@@ -1193,7 +1219,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 // parcel_merge with --classes spm: the cortex is SIAM's own GM (the 18-class argmax)
                 std::vector<uint8_t> cortex_up;
 
-                if (spm && opts.parcel_merge) {
+                if (spm && want_dk) {
                     cortex_up.assign(static_cast<size_t>(Xup) * Yup * Zup, 0);
                 }
 
@@ -1260,8 +1286,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     }
                 }
 
-                if (opts.parcel_merge) {
-                    merge_dk({Zup, Yup, Xup}, A_up, spm ? cortex_up.data() : out_ptr, out_ptr);
+                if (want_dk) {
+                    const std::vector<uint8_t> par = run_dk({Zup, Yup, Xup}, A_up, spm ? cortex_up.data() : out_ptr,
+                                                            out_ptr);
+
+                    if (!opts.parcel_merge && nlhs >= 3) {   // (the same canonical layout as the labels)
+                        mxDestroyArray(plhs[2]);
+                        plhs[2] = mxCreateNumericArray(3, odims, mxUINT8_CLASS, mxREAL);
+                        std::copy(par.begin(), par.end(), static_cast<uint8_t*>(mxGetData(plhs[2])));
+                    }
                 }
             }
 
@@ -1411,7 +1444,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             // parcel_merge with --classes spm: the cortex is SIAM's own GM (the 18-class argmax)
             std::vector<uint8_t> cortex_crop;
 
-            if (spm_labels && opts.parcel_merge) {
+            if (spm_labels && want_dk) {
                 cortex_crop.assign(labels_crop.size(), 0);
             }
 
@@ -1488,9 +1521,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 }
             }
 
-            if (opts.parcel_merge) {
-                merge_dk({Zc, Yc, Xc}, affine_canon, spm_labels ? cortex_canon.data() : labels_canon.data(),
-                         labels_canon.data());
+            std::vector<uint8_t> par;
+
+            if (want_dk) {
+                par = run_dk({Zc, Yc, Xc}, affine_canon, spm_labels ? cortex_canon.data() : labels_canon.data(),
+                             labels_canon.data());
             }
 
             const mwSize odims[3] = {
@@ -1507,6 +1542,18 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 X, Y, Z,
                 dst, sgn,
                 out_ptr);
+
+            if (!par.empty() && !opts.parcel_merge && nlhs >= 3) {   // the DK map, in the input's axis order
+                mxDestroyArray(plhs[2]);
+                plhs[2] = mxCreateNumericArray(3, odims, mxUINT8_CLASS, mxREAL);
+                siam::copy_reorient_from_canonical<uint8_t>(par.data(), Zc, Yc, Xc, X, Y, Z, dst, sgn,
+                        static_cast<uint8_t*>(mxGetData(plhs[2])));
+            }
+        }
+
+        // the 2nd output off the upsampled grid (that branch returned): the input's affine
+        if (nlhs >= 2) {
+            plhs[1] = mxDuplicateArray(a_aff);
         }
 
     } catch (const std::exception& e) {
