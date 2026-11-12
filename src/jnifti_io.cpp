@@ -990,8 +990,22 @@ std::vector<float> to_float_col_major(const uint8_t* row_bytes, const std::vecto
 
 }  // anonymous namespace
 
-std::string label_table_json(ClassSet class_set, int num_classes) {
-    const json t = build_label_table(class_set, num_classes);
+/* the tissue table plus the DK regions at DK_MERGE_OFFSET + index (--parcel-merge) */
+static json merged_label_table(ClassSet class_set, int num_classes) {
+    json t = build_label_table(class_set, num_classes);
+    const json dk = build_label_table(ClassSet::DK, 69);
+
+    for (int id = 1; id <= 68; ++id) {
+        json e = dk[std::to_string(id)];
+        e["DKIndex"] = id;
+        t[std::to_string(DK_MERGE_OFFSET + id)] = e;
+    }
+
+    return t;
+}
+
+std::string label_table_json(ClassSet class_set, int num_classes, bool dk_merged) {
+    const json t = dk_merged ? merged_label_table(class_set, num_classes) : build_label_table(class_set, num_classes);
     return t.empty() ? std::string() : json{{"LabelTable", t}}.dump();
 }
 
@@ -1018,7 +1032,8 @@ void save_jnifti_labels(const std::string& path,
                         const uint8_t* labels_zyx,
                         const std::string& format,
                         ClassSet class_set,
-                        int num_classes) {
+                        int num_classes,
+                        bool dk_merged) {
     bool binary = (format == "bnii");
 
     if (format != "jnii" && format != "bnii") {
@@ -1051,7 +1066,7 @@ void save_jnifti_labels(const std::string& path,
     // when the class set is recognized (SIAM v0.3 18-class or SPM 6-class).
     // Viewers that honour the JGIFTI LabelTable spec will then render
     // anatomical names + per-tissue colors instead of a default colormap.
-    json label_table = build_label_table(class_set, num_classes);
+    json label_table = dk_merged ? merged_label_table(class_set, num_classes) : build_label_table(class_set, num_classes);
 
     if (!label_table.empty()) {
         json data_info = json::object();

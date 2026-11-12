@@ -251,6 +251,9 @@ constexpr int8_t  SPM6_AIR_CHANNEL = 5;   /**< background equivalent in SPM orde
  * keeps the channels in spm12/tpm/TPM.nii order.
  */
 constexpr uint8_t SPM6_LABEL[SPM6_NUM_CLASSES] = {1, 2, 3, 4, 5, 0};
+// --parcel-merge: the cortical GM voxels of the label output carry DK_MERGE_OFFSET + the
+// DK index (101..134 left, 135..168 right), the tissues keep their labels (uint8)
+constexpr uint8_t DK_MERGE_OFFSET = 100;
 
 }  // namespace siam
 

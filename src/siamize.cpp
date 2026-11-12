@@ -782,6 +782,9 @@ void usage(const char* exe) {
                  "                      output as <output>_dk.<ext>, uint8, DK index 1..34 left,\n"
                  "                      35..68 right on SIAM's cerebral GM (also with --classes\n"
                  "                      spm), 0 elsewhere. Label outputs only (not --tpm).\n"
+                 "      --parcel-merge  with --parcel dk (implied): no <output>_dk; the label output's\n"
+                 "                      cortical GM takes 100 + the DK index instead (101..134 left,\n"
+                 "                      135..168 right; still uint8), its LabelTable naming both\n"
                  "      --parcel-weights FILE  other DKatlas weights (brainchop model24chan104cls_synth\n"
                  "                      model.bin layout; default: the compiled-in copy)\n"
                  "      --upsample      save the output at the internal inference resolution\n"
@@ -867,10 +870,13 @@ void usage(const char* exe) {
 /*! \fn    void write_parcel(...)
     \brief DK parcellation of SIAM's cerebral GM (--parcel dk), written to
            <output>_dk.<ext> on the output's grid and in its format; `labels`
-           marks that GM with 1 (the 18-class labels, or --classes spm's cortex mask)
+           marks that GM with 1 (the 18-class labels, or --classes spm's cortex mask);
+           with `merge_into` (--parcel-merge) not written: its cortical GM voxels
+           take DK_MERGE_OFFSET + the DK index instead
 */
 static void write_parcel(const std::string& output_path, const std::string& out_format, const NiftiImage& t1,
-                         const NiftiImage& grid, const uint8_t* labels, const std::string& weights, int cl_device) {
+                         const NiftiImage& grid, const uint8_t* labels, const std::string& weights, int cl_device,
+                         uint8_t* merge_into = nullptr) {
     std::string base = output_path, ext;
 
     auto ends_ci = [](const std::string & s, const char* suf) {
@@ -898,6 +904,17 @@ static void write_parcel(const std::string& output_path, const std::string& out_
                   "%.1f%% grown through the GM, %" PRId64 " unreached (%.1fs)",
                   st.seconds_net, st.classes, st.gm, st.gm ? 100.0 * st.direct / st.gm : 0.0,
                   st.gm ? 100.0 * st.grown / st.gm : 0.0, st.unreached, st.seconds_transfer);
+
+    if (merge_into) {
+        for (size_t i = 0; i < par.size(); ++i) {
+            if (par[i]) {
+                merge_into[i] = static_cast<uint8_t>(siam::DK_MERGE_OFFSET + par[i]);
+            }
+        }
+
+        siam::log_tag("parcel", "merged into the labels as %d + the DK index", siam::DK_MERGE_OFFSET);
+        return;
+    }
 
     if (out_format == "nii") {
         siam::save_nifti_labels(path, grid, par.data(), siam::label_table_json(ClassSet::DK, 69));
@@ -981,6 +998,7 @@ int main(int argc, char** argv) {
     // readers (siamize itself, future jsonlab).
     std::string parcel;                  // "dk" => DK cortical parcellation of the GM (dkatlas.h)
     std::string parcel_weights;          // its weights file (empty => cache / download)
+    bool        parcel_merge = false;    // --parcel-merge: DK into the label output (DK_MERGE_OFFSET + index)
     bool        upsample_mode   = false; // true => save at internal 0.75 mm resolution
     //         (skip per-channel back-resample),
     //         un-cropped to full canonical extent,
@@ -1249,6 +1267,12 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--parcel-weights") {
             parcel_weights = need();
+        } else if (a == "--parcel-merge") {
+            parcel_merge = true;
+
+            if (parcel.empty()) {
+                parcel = "dk";
+            }
         } else if (a == "--tpm-t") {
             tpm_temperature = std::stof(need());
 
@@ -2183,16 +2207,21 @@ int main(int argc, char** argv) {
 
             logits = LogitsVolume{};
 
+            if (!parcel.empty() && parcel_merge) {
+                write_parcel(output_path, out_format, img, img_up, spm ? cortex_up.data() : labels_up.data(),
+                             parcel_weights, device == "cpu" ? -1 : dk_cl_device, labels_up.data());
+            }
+
             if (out_format == "nii") {
                 siam::save_nifti_labels(output_path, img_up, labels_up.data(),
-                                        siam::label_table_json(class_set, static_cast<int>(num_classes)));
+                                        siam::label_table_json(class_set, static_cast<int>(num_classes), parcel_merge));
             } else {
                 siam::save_jnifti_labels(output_path, img_up, labels_up.data(),
                                          out_format, class_set,
-                                         static_cast<int>(num_classes));
+                                         static_cast<int>(num_classes), parcel_merge);
             }
 
-            if (!parcel.empty()) {
+            if (!parcel.empty() && !parcel_merge) {
                 write_parcel(output_path, out_format, img, img_up, spm ? cortex_up.data() : labels_up.data(),
                              parcel_weights, device == "cpu" ? -1 : dk_cl_device);
             }
@@ -2416,16 +2445,21 @@ int main(int argc, char** argv) {
             }
         }
 
+        if (!parcel.empty() && parcel_merge) {
+            write_parcel(output_path, out_format, img, img, spm_labels ? cortex_canon.data() : labels_canon.data(),
+                         parcel_weights, device == "cpu" ? -1 : dk_cl_device, labels_canon.data());
+        }
+
         if (out_format == "nii") {
             siam::save_nifti_labels(output_path, img, labels_canon.data(),
-                                    siam::label_table_json(class_set, static_cast<int>(num_classes)));
+                                    siam::label_table_json(class_set, static_cast<int>(num_classes), parcel_merge));
         } else {
             siam::save_jnifti_labels(output_path, img, labels_canon.data(),
                                      out_format, class_set,
-                                     static_cast<int>(num_classes));
+                                     static_cast<int>(num_classes), parcel_merge);
         }
 
-        if (!parcel.empty()) {
+        if (!parcel.empty() && !parcel_merge) {
             write_parcel(output_path, out_format, img, img, spm_labels ? cortex_canon.data() : labels_canon.data(),
                          parcel_weights, device == "cpu" ? -1 : dk_cl_device);
         }

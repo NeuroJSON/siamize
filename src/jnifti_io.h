@@ -69,13 +69,16 @@ namespace siam {
  * @param  num_classes total class count; only used to decide whether to
  *                     attach the SIAM v0.3 LabelTable (i.e. == 18) when
  *                     class_set is CUSTOM_N. Ignored for SPM (always 6).
+ * @param  dk_merged   the map carries the DK regions too (--parcel-merge): the
+ *                     table adds them at DK_MERGE_OFFSET + DK index
  */
 void save_jnifti_labels(const std::string& path,
                         const NiftiImage& src,
                         const uint8_t* labels_zyx,
                         const std::string& format,
                         ClassSet class_set = ClassSet::CUSTOM_N,
-                        int num_classes = 18);
+                        int num_classes = 18,
+                        bool dk_merged = false);
 
 /**
  * @brief Save a 4D float32 tissue probability map (TPM) as JNIfTI
@@ -135,9 +138,10 @@ NiftiImage load_jnifti_ras(const std::string& path);
  * The same table save_jnifti_labels attaches at NIFTIHeader._DataInfo_ (names
  * and RGBA per label); save_nifti_labels stores it in a NIfTI-1 extension.
  *
+ * @param  dk_merged  add the DK regions at DK_MERGE_OFFSET + DK index (--parcel-merge)
  * @return the JSON, or empty for a label set without a table
  */
-std::string label_table_json(ClassSet class_set, int num_classes);
+std::string label_table_json(ClassSet class_set, int num_classes, bool dk_merged = false);
 
 }  // namespace siam
 
