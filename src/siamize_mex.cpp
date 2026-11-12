@@ -46,7 +46,8 @@ Inputs:
              "fold_<d>_fp16.onnx".
   - opts:    optional struct with any of `.device`, `.threads`,
              `.patch`, `.spacing`, `.classes`, `.tpm`, `.tpm_t`,
-             `.trt_cache`, `.gpu`, `.arena`, `.lowmem`, `.verbose`.
+             `.trt_cache`, `.gpu`, `.arena`, `.lowmem`, `.verbose`,
+             `.parcel_merge`, `.parcel_weights`.
              See read_opts() in this file for parsing details.
              The `.arena` toggle mirrors the CLI's `--no-arena` flag:
              pass `'arena', false` to keep peak RSS small at the
@@ -62,6 +63,9 @@ Output:
   - labels:  uint8 3D array of the SAME shape as `img`, in input
              axis order (suitable for round-trip via savenifti),
              OR float32 4D (X, Y, Z, C) when `opts.tpm` is true.
+             With `opts.parcel_merge` (CLI --parcel-merge) the cortical GM
+             carries 100 + its Desikan-Killiany index (101..134 left,
+             135..168 right; still uint8).
 
 MEX and CLI share the same `siamize_core` static library, so MEX
 predictions are bit-identical to `siamize -i ... -o ...` when run
@@ -77,6 +81,8 @@ with matching options.
 #include "sliding.h"
 #include "engine.h"      // siam::backend_name() for the 'backend' query
 #include "weights.h"
+#include "dkatlas.h"
+#include "dkatlas_labels.h"
 
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
@@ -335,6 +341,10 @@ struct Opts {
                                                             --upsample. The MEX's second output arg
                                                             carries the corresponding 4x4 affine; the
                                                             wrapper writes it to nii.NIFTIHeader.Affine. */
+    bool  parcel_merge = false;                        /**< true -> DK parcellation merged into the labels
+                                                            (100 + DK index on the cortical GM; CLI
+                                                            --parcel-merge) */
+    std::string parcel_weights;                        /**< other DKatlas weights (CLI --parcel-weights) */
     bool  lowmem = false;                              /**< true -> force the lowmem preset
                                                             (smaller patch, no arena, smaller
                                                             thread cap, tight VRAM knobs).
@@ -557,6 +567,14 @@ void read_opts(const mxArray* a, Opts& o) {
         o.upsample = (mxGetScalar(f) != 0.0);
     }
 
+    if ((f = mxGetField(a, 0, "parcel_merge")) && !mxIsEmpty(f)) {
+        o.parcel_merge = (mxGetScalar(f) != 0.0);
+    }
+
+    if ((f = mxGetField(a, 0, "parcel_weights")) && !mxIsEmpty(f)) {
+        o.parcel_weights = mx_to_string(f);
+    }
+
     if ((f = mxGetField(a, 0, "tpm_t")) && !mxIsEmpty(f)) {
         o.tpm_temperature = static_cast<float>(mxGetScalar(f));
 
@@ -619,12 +637,42 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             plhs[0] = mxCreateString(siam::backend_name());
             return;
         }
+
+        // siamex('dklabels'): the 68 Desikan-Killiany regions (DK index 1..68), a
+        // 68x1 struct array of Label, Name, RGBA (0..1) and FreeSurferID -- the
+        // LabelTable siamize.m attaches with opts.parcel_merge
+        if (q == "dklabels") {
+            const char* fields[] = {"Label", "Name", "RGBA", "FreeSurferID", "DKIndex"};
+            plhs[0] = mxCreateStructMatrix(68, 1, 5, fields);
+
+            for (int id = 1; id <= 68; ++id) {
+                const std::string tok = siam::kDKNames[id];
+                const std::string name = std::string(tok.compare(0, 7, "ctx-lh-") == 0 ? "Left " : "Right ") +
+                                         tok.substr(7);
+                mxArray* rgba = mxCreateNumericMatrix(1, 4, mxSINGLE_CLASS, mxREAL);
+                float* c = static_cast<float*>(mxGetData(rgba));
+
+                for (int k = 0; k < 3; ++k) {
+                    c[k] = siam::kDKRGB[id][k] / 255.0f;
+                }
+
+                c[3] = 1.0f;
+                mxSetField(plhs[0], id - 1, "Label", mxCreateString(tok.c_str()));
+                mxSetField(plhs[0], id - 1, "Name", mxCreateString(name.c_str()));
+                mxSetField(plhs[0], id - 1, "RGBA", rgba);
+                mxSetField(plhs[0], id - 1, "FreeSurferID", mxCreateDoubleScalar(siam::kDKFreeSurfer[id]));
+                mxSetField(plhs[0], id - 1, "DKIndex", mxCreateDoubleScalar(id));
+            }
+
+            return;
+        }
     }
 
     if (nrhs < 3) {
         die("siamize:nrhs",
             "Usage: labels = siamize(img, affine, models, [opts])\n"
             "       backend = siamize('backend')\n"
+            "       dk      = siamize('dklabels')\n"
             "See `help siamize` for details.");
     }
 
@@ -901,6 +949,43 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             canon.shape[0], canon.shape[1], canon.shape[2]
         };
 
+        if (opts.parcel_merge && opts.tpm) {
+            die("siamize:parcel", "opts.parcel_merge needs a label output (not opts.tpm)");
+        }
+
+        // --parcel-merge: DKatlas reads the whole input (canonical) and its affine
+        siam::NiftiImage t1;
+
+        if (opts.parcel_merge) {
+            t1.volume = canon;
+            t1.affine_canon = affine_canon;
+        }
+
+        const int dk_device = opts.device == "cpu" ? -1 : 0;   // (0: the first OpenCL GPU)
+        // DK on the cortical GM of `gm` (1 there) on the grid (shape, affine), into `labels`
+        auto merge_dk = [&](const std::array<int64_t, 3>& shape, const std::array<float, 16>& aff,
+        const uint8_t* gm, uint8_t* labels) {
+            siam::NiftiImage grid;
+            grid.volume.shape = shape;
+            grid.affine_canon = aff;
+            siam::DKStats st;
+            const std::vector<uint8_t> par = siam::dk_parcellate(t1, grid, gm, 1, opts.parcel_weights,
+                                             dk_device, st);
+            siam::log_tag("parcel", "DKatlas on %s", st.device.c_str());
+            siam::log_tag("parcel", "DKatlas %.1fs (%d classes); GM %" PRId64 ": %.1f%% inside a DK cortical "
+                          "label, %.1f%% grown through the GM, %" PRId64 " unreached",
+                          st.seconds_net, st.classes, st.gm, st.gm ? 100.0 * st.direct / st.gm : 0.0,
+                          st.gm ? 100.0 * st.grown / st.gm : 0.0, st.unreached);
+
+            for (size_t i = 0; i < par.size(); ++i) {
+                if (par[i]) {
+                    labels[i] = static_cast<uint8_t>(siam::DK_MERGE_OFFSET + par[i]);
+                }
+            }
+
+            siam::log_tag("parcel", "merged into the labels as %d + the DK index", siam::DK_MERGE_OFFSET);
+        };
+
         auto crop = siam::crop_to_nonzero(canon);
         canon = siam::Volume{};   // free
 
@@ -1105,6 +1190,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 uint8_t* out_ptr = static_cast<uint8_t*>(mxGetData(plhs[0]));
                 std::fill_n(out_ptr,
                             static_cast<size_t>(Xup) * Yup * Zup, bg_label);
+                // parcel_merge with --classes spm: the cortex is SIAM's own GM (the 18-class argmax)
+                std::vector<uint8_t> cortex_up;
+
+                if (spm && opts.parcel_merge) {
+                    cortex_up.assign(static_cast<size_t>(Xup) * Yup * Zup, 0);
+                }
 
                 #pragma omp parallel for schedule(static) collapse(2)
 
@@ -1120,13 +1211,19 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                             if (spm) {
                                 float M = logits.channel_ptr(0)[i_net];
+                                int top = 0;
 
                                 for (int64_t c = 1; c < opts.classes; ++c) {
                                     float v = logits.channel_ptr(c)[i_net];
 
                                     if (v > M) {
                                         M = v;
+                                        top = static_cast<int>(c);
                                     }
+                                }
+
+                                if (!cortex_up.empty()) {
+                                    cortex_up[z * plane_up + y * Xup + x] = top == 1;
                                 }
 
                                 float bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
@@ -1161,6 +1258,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                                 spm ? siam::SPM6_LABEL[best] : static_cast<uint8_t>(best);
                         }
                     }
+                }
+
+                if (opts.parcel_merge) {
+                    merge_dk({Zup, Yup, Xup}, A_up, spm ? cortex_up.data() : out_ptr, out_ptr);
                 }
             }
 
@@ -1307,6 +1408,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             const bool spm_labels = (opts.class_set == siam::ClassSet::SPM);
             const uint8_t bg_label = 0;   // the background (Air with --classes spm: siam::SPM6_LABEL)
             std::vector<uint8_t> labels_crop(static_cast<size_t>(cZ) * cY * cX, bg_label);
+            // parcel_merge with --classes spm: the cortex is SIAM's own GM (the 18-class argmax)
+            std::vector<uint8_t> cortex_crop;
+
+            if (spm_labels && opts.parcel_merge) {
+                cortex_crop.assign(labels_crop.size(), 0);
+            }
 
             #pragma omp parallel for schedule(static)
 
@@ -1318,13 +1425,19 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                         if (spm_labels) {
                             float M = logits_back.channel_ptr(0)[i];
+                            int top = 0;
 
                             for (int64_t c = 1; c < opts.classes; ++c) {
                                 float v = logits_back.channel_ptr(c)[i];
 
                                 if (v > M) {
                                     M = v;
+                                    top = static_cast<int>(c);
                                 }
+                            }
+
+                            if (!cortex_crop.empty()) {
+                                cortex_crop[i] = top == 1;
                             }
 
                             float bin[siam::SPM6_NUM_CLASSES] = {0, 0, 0, 0, 0, 0};
@@ -1362,15 +1475,22 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
             std::vector<uint8_t> labels_canon(
                 static_cast<size_t>(Zc) * Yc * Xc, bg_label);
+            std::vector<uint8_t> cortex_canon(cortex_crop.empty() ? 0 : labels_canon.size(), 0);
 
             for (int64_t z = 0; z < cZ; ++z) {
                 for (int64_t y = 0; y < cY; ++y) {
-                    std::copy_n(&labels_crop[z * cY * cX + y * cX],
-                                cX,
-                                &labels_canon[(z + crop.bbox[0][0]) * Yc * Xc
-                                                                    + (y + crop.bbox[1][0]) * Xc
-                                                                    + crop.bbox[2][0]]);
+                    const int64_t to = (z + crop.bbox[0][0]) * Yc * Xc + (y + crop.bbox[1][0]) * Xc + crop.bbox[2][0];
+                    std::copy_n(&labels_crop[z * cY * cX + y * cX], cX, &labels_canon[to]);
+
+                    if (!cortex_crop.empty()) {
+                        std::copy_n(&cortex_crop[z * cY * cX + y * cX], cX, &cortex_canon[to]);
+                    }
                 }
+            }
+
+            if (opts.parcel_merge) {
+                merge_dk({Zc, Yc, Xc}, affine_canon, spm_labels ? cortex_canon.data() : labels_canon.data(),
+                         labels_canon.data());
             }
 
             const mwSize odims[3] = {

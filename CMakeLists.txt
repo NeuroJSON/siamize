@@ -518,6 +518,8 @@ set(_siamize_mex_sources
     src/sliding.cpp
     src/weights.cpp
     src/siam_log.cpp
+    src/dkatlas.cpp
+    src/dkatlas_cl.cpp
 )
 if(SIAMIZE_BACKEND STREQUAL "ort")
     list(APPEND _siamize_mex_sources src/engine_ort.cpp)

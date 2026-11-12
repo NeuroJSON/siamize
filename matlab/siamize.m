@@ -150,6 +150,20 @@ function nii = siamize(varargin)
 %                                      the softmax (more graded
 %                                      boundaries, better calibration).
 %                                      Only meaningful when 'tpm' is true.
+%               'parcel_merge'        logical (default false). True also
+%                                      parcellates SIAM's cerebral GM into
+%                                      the 68 Desikan-Killiany regions
+%                                      (brainchop's DKatlas; ~2 s on an
+%                                      OpenCL GPU, ~30 s on the CPU) and
+%                                      merges them into the labels: the
+%                                      cortical GM takes 100 + the DK
+%                                      index (101..134 left, 135..168
+%                                      right), still uint8; the LabelTable
+%                                      names them (with FreeSurferID).
+%                                      Labels only (not 'tpm'). Mirrors
+%                                      the CLI's --parcel-merge.
+%               'parcel_weights'      char: other DKatlas weights (the
+%                                      CLI's --parcel-weights).
 %               'upsample'            logical (default false). When true,
 %                                      siamize returns the labelmap / TPM
 %                                      at the network's internal
@@ -373,6 +387,13 @@ end
 % honour the JGIFTI LabelTable spec render anatomical names +
 % per-tissue colors.
 tbl = siamize_label_table_(opts);
+if isfield(opts, 'parcel_merge') && opts.parcel_merge && ~isempty(fieldnames(tbl))
+    % the DK regions, at 100 + their DK index (the MEX's compiled-in table)
+    dk = siamex('dklabels');
+    for k = 1:numel(dk)
+        tbl.(encodevarname(num2str(100 + dk(k).DKIndex))) = dk(k);
+    end
+end
 if ~isempty(fieldnames(tbl))
     if isfield(nii.NIFTIHeader, 'x0x5F_DataInfo_')
         info = nii.NIFTIHeader.x0x5F_DataInfo_;
