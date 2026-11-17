@@ -48,13 +48,16 @@ at any moment so peak working-set stays bounded.
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -183,7 +186,9 @@ LogitsVolume sliding_window(const Volume& data,
                             bool verbose,
                             const std::string& device,
                             const std::string& trt_cache_dir,
-                            const EngineTuning& engine_tuning) {
+                            const EngineTuning& engine_tuning,
+                            const std::vector<EngineTuning>& device_tunings,
+                            const std::vector<float>& workload) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
@@ -242,202 +247,318 @@ LogitsVolume sliding_window(const Volume& data,
     logits.resize(num_classes, spatZ, spatY, spatX);
     std::vector<float> weights(static_cast<size_t>(spatZ) * spatY * spatX, 0.0f);
 
-    const int64_t patchN = patch_size[0] * patch_size[1] * patch_size[2];
-    std::vector<float> input_buf(patchN);
-    std::vector<float> pred_buf(num_classes * patchN);
+    // The tile origins, in the fixed z/y/x order; and the per-voxel Gaussian
+    // coverage, which depends only on the tiles (the same for every fold).
+    std::vector<std::array<int64_t, 3>> tiles;
+    tiles.reserve(n_tiles);
 
-    for (size_t fi = 0; fi < model_paths.size(); ++fi) {
-        siam::log_tag("weight", "%zu/%zu  %s",
-                      fi + 1, model_paths.size(), model_paths[fi].c_str());
+    for (int64_t sz : stepsZ) {
+        for (int64_t sy : stepsY) {
+            for (int64_t sx : stepsX) {
+                tiles.push_back({sz, sy, sx});
 
-        // One Engine per fold. The Engine owns the session (ORT
-        // Ort::Session / MNN MNN::Session) for this fold's weights.
-        // Going out of scope at the end of each fold iteration
-        // releases the session memory before the next fold loads.
-        auto _me0 = std::chrono::steady_clock::now();
-        std::unique_ptr<Engine> engine = siam::make_engine(
-                                             model_paths[fi], patch_size, intra_threads, device, tuning, verbose);
+                for (int64_t z = 0; z < patch_size[0]; ++z) {
+                    for (int64_t y = 0; y < patch_size[1]; ++y) {
+                        float* wdst = weights.data() + (sz + z) * spatY * spatX + (sy + y) * spatX + sx;
+                        const float* gs = gauss.data() + z * patch_size[1] * patch_size[2] + y * patch_size[2];
 
-        if (std::getenv("SIAMIZE_PHASE") || std::getenv("SIAMIZE_OP_PROFILE")) {
-            double me = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - _me0).count();
-            fprintf(stderr, "[sliding] fold %zu make_engine (model load + session + resize): %.1f ms\n",
-                    fi, me);
-        }
-
-        // Defensive: the model's declared num_classes must agree with
-        // the caller's. If it doesn't, the accumulator math silently
-        // misaligns.
-        if (engine->num_classes() != num_classes) {
-            throw std::runtime_error(
-                "fold " + std::to_string(fi) + " (" + model_paths[fi] +
-                ") declares num_classes=" + std::to_string(engine->num_classes()) +
-                " but caller passed num_classes=" + std::to_string(num_classes));
-        }
-
-        int64_t tile_idx = 0;
-        const bool prof = std::getenv("SIAMIZE_PHASE") != nullptr ||
-                          std::getenv("SIAMIZE_OP_PROFILE") != nullptr;
-        double t_gather = 0, t_run = 0, t_accum = 0;
-        using sclk = std::chrono::steady_clock;
-
-        // Opt into GPU-side accumulation when the engine supports it (MNN
-        // OpenCL, fp32, BUFFER mode): each tile's Gaussian-weighted logits are
-        // accumulated on the GPU into a full-volume device buffer, so the
-        // per-tile device->host readback and the host accumulate loop are
-        // replaced by one per-fold readback in gpu_accum_finish(). Falls back
-        // to the host path if begin() fails (e.g. device alloc too big).
-        const bool use_gpu_accum =
-            engine->gpu_accum_supported() &&
-            engine->gpu_accum_begin({spatZ, spatY, spatX}, gauss.data());
-
-        if (prof && engine->gpu_accum_supported()) {
-            fprintf(stderr, "[sliding] fold %zu GPU accumulation: %s\n",
-                    fi, use_gpu_accum ? "ON" : "begin() failed -> host path");
-        }
-
-        for (int64_t sz : stepsZ) {
-            for (int64_t sy : stepsY) {
-                for (int64_t sx : stepsX) {
-                    auto _g0 = sclk::now();
-
-                    // copy patch into contiguous input buffer
-                    for (int64_t z = 0; z < patch_size[0]; ++z) {
-                        for (int64_t y = 0; y < patch_size[1]; ++y) {
-                            std::copy_n(
-                                &padded.data[(sz + z) * padded.stride(0) +
-                                                      (sy + y) * padded.stride(1) +
-                                                      sx],
-                                patch_size[2],
-                                &input_buf[z * patch_size[1] * patch_size[2] + y * patch_size[2]]);
+                        for (int64_t x = 0; x < patch_size[2]; ++x) {
+                            wdst[x] += gs[x];
                         }
                     }
-
-                    auto _r0 = sclk::now();
-
-                    if (use_gpu_accum) {
-                        // Forward + accumulate on the GPU; no readback here.
-                        engine->gpu_accum_tile(input_buf.data(), sz, sy, sx);
-                    } else {
-                        engine->run_tile(input_buf.data(), pred_buf.data());
-                    }
-
-                    auto _a0 = sclk::now();
-
-                    // accumulate: logits[c, z, y, x] += pred[c, ...] * gauss
-                    // weights[z, y, x] += gauss   (only first fold)
-                    //
-                    // Parallelized across output channels: each channel writes
-                    // a disjoint region of `logits` (distinct channel_ptr), so
-                    // the threads never touch the same memory -- no locking and
-                    // bit-identical results vs the serial version. The inner x
-                    // loop is a contiguous fma the compiler auto-vectorizes.
-                    //
-                    // Skipped under GPU accumulation: gpu_accum_tile() already
-                    // folded this tile's weighted logits into the device buffer.
-                    if (!use_gpu_accum) {
-                        const auto accum_channels = [&](int64_t c0, int64_t c1) {
-                            for (int64_t c = c0; c < c1; ++c) {
-                                float* logit_ch = logits.channel_ptr(c);
-                                const float* pred_ch = pred_buf.data() + c * patchN;
-
-                                for (int64_t z = 0; z < patch_size[0]; ++z) {
-                                    for (int64_t y = 0; y < patch_size[1]; ++y) {
-                                        float* dst = logit_ch + (sz + z) * spatY * spatX + (sy + y) * spatX + sx;
-                                        const float* src = pred_ch + z * patch_size[1] * patch_size[2] + y * patch_size[2];
-                                        const float* gs = gauss.data() + z * patch_size[1] * patch_size[2] + y * patch_size[2];
-
-                                        for (int64_t x = 0; x < patch_size[2]; ++x) {
-                                            dst[x] += src[x] * gs[x];
-                                        }
-                                    }
-                                }
-                            }
-                        };
-
-                        int nthreads = intra_threads > 0
-                                       ? intra_threads
-                                       : static_cast<int>(std::thread::hardware_concurrency());
-                        nthreads = std::max(1, std::min<int>(nthreads, static_cast<int>(num_classes)));
-
-                        if (nthreads == 1) {
-                            accum_channels(0, num_classes);
-                        } else {
-                            std::vector<std::thread> pool;
-                            pool.reserve(nthreads - 1);
-                            const int64_t per = (num_classes + nthreads - 1) / nthreads;
-
-                            for (int t = 1; t < nthreads; ++t) {
-                                int64_t c0 = std::min<int64_t>(num_classes, t * per);
-                                int64_t c1 = std::min<int64_t>(num_classes, c0 + per);
-
-                                if (c0 < c1) {
-                                    pool.emplace_back(accum_channels, c0, c1);
-                                }
-                            }
-
-                            accum_channels(0, std::min<int64_t>(num_classes, per));
-
-                            for (auto& th : pool) {
-                                th.join();
-                            }
-                        }
-                    }
-
-                    if (fi == 0) {
-                        for (int64_t z = 0; z < patch_size[0]; ++z) {
-                            for (int64_t y = 0; y < patch_size[1]; ++y) {
-                                float* wdst = weights.data() + (sz + z) * spatY * spatX + (sy + y) * spatX + sx;
-                                const float* gs = gauss.data() + z * patch_size[1] * patch_size[2] + y * patch_size[2];
-
-                                for (int64_t x = 0; x < patch_size[2]; ++x) {
-                                    wdst[x] += gs[x];
-                                }
-                            }
-                        }
-                    }
-
-                    auto _e0 = sclk::now();
-
-                    if (prof) {
-                        t_gather += std::chrono::duration<double, std::milli>(_r0 - _g0).count();
-                        t_run    += std::chrono::duration<double, std::milli>(_a0 - _r0).count();
-                        t_accum  += std::chrono::duration<double, std::milli>(_e0 - _a0).count();
-                    }
-
-                    ++tile_idx;
-
-                    // TTY-aware progress bar (self-redrawing on a terminal,
-                    // one-line-per-tile when piped / inside a MEX).
-                    siam::log_progress("tile",
-                                       static_cast<long long>(tile_idx),
-                                       static_cast<long long>(n_tiles));
                 }
             }
         }
+    }
 
-        // Under GPU accumulation, pull this fold's full-volume weighted logits
+    const int64_t patchN = patch_size[0] * patch_size[1] * patch_size[2];
+    const int64_t n_folds = static_cast<int64_t>(model_paths.size());
+
+    // ----- devices: one worker thread (and one Engine per fold) per device -----
+    std::vector<EngineTuning> devs = device_tunings;
+
+    if (devs.empty()) {
+        devs.push_back(tuning);
+    }
+
+    for (auto& d : devs) {
+        if (d.trt_cache_dir.empty()) {
+            d.trt_cache_dir = tuning.trt_cache_dir;
+        }
+    }
+
+    const int ndev = static_cast<int>(devs.size());
+
+    // Tile split. With -W/--workload, device d takes a fixed contiguous share
+    // of each fold's tiles in proportion to its workload; without, the devices
+    // pull tiles from a shared queue, so a faster device simply takes more.
+    const bool dynamic = workload.empty() || ndev == 1;
+    std::vector<int64_t> tile_beg(ndev + 1, 0);
+
+    if (!dynamic) {
+        double wsum = 0.0;
+
+        for (int d = 0; d < ndev; ++d) {
+            wsum += workload[d];
+        }
+
+        double cum = 0.0;
+
+        for (int d = 0; d < ndev; ++d) {
+            tile_beg[d] = std::llround(n_tiles * cum / wsum);
+            cum += workload[d];
+        }
+
+        tile_beg[ndev] = n_tiles;
+    }
+
+    if (ndev > 1) {
+        std::string split;
+
+        for (int d = 0; d < ndev; ++d) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s%d:%" PRId64, d ? " " : "", d + 1,
+                          dynamic ? int64_t(-1) : tile_beg[d + 1] - tile_beg[d]);
+            split += buf;
+        }
+
+        siam::log_tag("infer", "%d devices, %s", ndev,
+                      dynamic ? "tiles shared on demand (no -W)"
+                      : ("tiles per fold " + split).c_str());
+    }
+
+    std::atomic<int64_t> next_item{0};          // dynamic: (fold, tile) = item / n_tiles, item % n_tiles
+    std::atomic<long long> tiles_done{0};
+    std::mutex accum_mtx;                       // the host logits accumulator
+    std::mutex log_mtx;
+    std::vector<std::exception_ptr> errors(ndev);
+    const bool prof = std::getenv("SIAMIZE_PHASE") != nullptr ||
+                      std::getenv("SIAMIZE_OP_PROFILE") != nullptr;
+    using sclk = std::chrono::steady_clock;
+
+    const auto worker = [&](int dev) {
+        std::vector<float> input_buf(patchN);
+        std::vector<float> pred_buf(num_classes * patchN);
+        std::unique_ptr<Engine> engine;
+        bool use_gpu_accum = false;
+        int64_t cur_fold = -1, ntile = 0;
+        double t_gather = 0, t_run = 0, t_accum = 0;
+
+        // Under GPU accumulation, pull the fold's full-volume weighted logits
         // back once and add them into the cross-fold host accumulator.
-        if (use_gpu_accum) {
-            auto _f0 = sclk::now();
-            engine->gpu_accum_finish(logits.data.data());
+        const auto close_fold = [&]() {
+            if (engine && use_gpu_accum) {
+                auto _f0 = sclk::now();
+                std::lock_guard<std::mutex> lk(accum_mtx);
+                engine->gpu_accum_finish(logits.data.data());
+                t_run += std::chrono::duration<double, std::milli>(sclk::now() - _f0).count();
+            }
+
+            engine.reset();
+        };
+
+        const auto open_fold = [&](int64_t fi) {
+            {
+                std::lock_guard<std::mutex> lk(log_mtx);
+
+                if (ndev > 1) {
+                    siam::log_tag("weight", "%" PRId64 "/%" PRId64 "  %s  (device %d)",
+                                  fi + 1, n_folds, model_paths[fi].c_str(), dev + 1);
+                } else {
+                    siam::log_tag("weight", "%" PRId64 "/%" PRId64 "  %s",
+                                  fi + 1, n_folds, model_paths[fi].c_str());
+                }
+            }
+
+            // One Engine per fold. The Engine owns the session (ORT
+            // Ort::Session / MNN MNN::Session) for this fold's weights.
+            // Released at the fold's end before the next fold loads.
+            auto _me0 = sclk::now();
+            engine = siam::make_engine(model_paths[fi], patch_size, intra_threads,
+                                       device, devs[dev], verbose);
 
             if (prof) {
-                t_run += std::chrono::duration<double, std::milli>(
-                             sclk::now() - _f0).count();
+                fprintf(stderr, "[sliding] device %d fold %" PRId64 " make_engine (model load + session + resize): %.1f ms\n",
+                        dev + 1, fi, std::chrono::duration<double, std::milli>(sclk::now() - _me0).count());
             }
+
+            // Defensive: the model's declared num_classes must agree with
+            // the caller's. If it doesn't, the accumulator math silently
+            // misaligns.
+            if (engine->num_classes() != num_classes) {
+                throw std::runtime_error(
+                    "fold " + std::to_string(fi) + " (" + model_paths[fi] +
+                    ") declares num_classes=" + std::to_string(engine->num_classes()) +
+                    " but caller passed num_classes=" + std::to_string(num_classes));
+            }
+
+            // Opt into GPU-side accumulation when the engine supports it (MNN
+            // OpenCL, fp32, BUFFER mode): each tile's Gaussian-weighted logits
+            // are accumulated on the GPU into a full-volume device buffer, so
+            // the per-tile device->host readback and the host accumulate loop
+            // are replaced by one per-fold readback in close_fold(). Falls back
+            // to the host path if begin() fails (e.g. device alloc too big).
+            use_gpu_accum = engine->gpu_accum_supported() &&
+                            engine->gpu_accum_begin({spatZ, spatY, spatX}, gauss.data());
+
+            if (prof && engine->gpu_accum_supported()) {
+                fprintf(stderr, "[sliding] device %d fold %" PRId64 " GPU accumulation: %s\n",
+                        dev + 1, fi, use_gpu_accum ? "ON" : "begin() failed -> host path");
+            }
+
+            cur_fold = fi;
+        };
+
+        const auto run_one = [&](int64_t fi, int64_t ti) {
+            if (fi != cur_fold) {
+                close_fold();
+                open_fold(fi);
+            }
+
+            const int64_t sz = tiles[ti][0], sy = tiles[ti][1], sx = tiles[ti][2];
+            auto _g0 = sclk::now();
+
+            // copy patch into contiguous input buffer
+            for (int64_t z = 0; z < patch_size[0]; ++z) {
+                for (int64_t y = 0; y < patch_size[1]; ++y) {
+                    std::copy_n(
+                        &padded.data[(sz + z) * padded.stride(0) + (sy + y) * padded.stride(1) + sx],
+                        patch_size[2],
+                        &input_buf[z * patch_size[1] * patch_size[2] + y * patch_size[2]]);
+                }
+            }
+
+            auto _r0 = sclk::now();
+
+            if (use_gpu_accum) {
+                // Forward + accumulate on the GPU; no readback here.
+                engine->gpu_accum_tile(input_buf.data(), sz, sy, sx);
+            } else {
+                engine->run_tile(input_buf.data(), pred_buf.data());
+            }
+
+            auto _a0 = sclk::now();
+
+            // accumulate: logits[c, z, y, x] += pred[c, ...] * gauss
+            //
+            // Parallelized across output channels: each channel writes a
+            // disjoint region of `logits` (distinct channel_ptr), so the
+            // threads never touch the same memory. The inner x loop is a
+            // contiguous fma the compiler auto-vectorizes. Devices share the
+            // accumulator, so one device accumulates at a time.
+            if (!use_gpu_accum) {
+                std::lock_guard<std::mutex> lk(accum_mtx);
+                const auto accum_channels = [&](int64_t c0, int64_t c1) {
+                    for (int64_t c = c0; c < c1; ++c) {
+                        float* logit_ch = logits.channel_ptr(c);
+                        const float* pred_ch = pred_buf.data() + c * patchN;
+
+                        for (int64_t z = 0; z < patch_size[0]; ++z) {
+                            for (int64_t y = 0; y < patch_size[1]; ++y) {
+                                float* dst = logit_ch + (sz + z) * spatY * spatX + (sy + y) * spatX + sx;
+                                const float* src = pred_ch + z * patch_size[1] * patch_size[2] + y * patch_size[2];
+                                const float* gs = gauss.data() + z * patch_size[1] * patch_size[2] + y * patch_size[2];
+
+                                for (int64_t x = 0; x < patch_size[2]; ++x) {
+                                    dst[x] += src[x] * gs[x];
+                                }
+                            }
+                        }
+                    }
+                };
+
+                int nthreads = intra_threads > 0
+                               ? intra_threads
+                               : static_cast<int>(std::thread::hardware_concurrency());
+                nthreads = std::max(1, std::min<int>(nthreads, static_cast<int>(num_classes)));
+
+                if (nthreads == 1) {
+                    accum_channels(0, num_classes);
+                } else {
+                    std::vector<std::thread> pool;
+                    pool.reserve(nthreads - 1);
+                    const int64_t per = (num_classes + nthreads - 1) / nthreads;
+
+                    for (int t = 1; t < nthreads; ++t) {
+                        int64_t c0 = std::min<int64_t>(num_classes, t * per);
+                        int64_t c1 = std::min<int64_t>(num_classes, c0 + per);
+
+                        if (c0 < c1) {
+                            pool.emplace_back(accum_channels, c0, c1);
+                        }
+                    }
+
+                    accum_channels(0, std::min<int64_t>(num_classes, per));
+
+                    for (auto& th : pool) {
+                        th.join();
+                    }
+                }
+            }
+
+            auto _e0 = sclk::now();
+            t_gather += std::chrono::duration<double, std::milli>(_r0 - _g0).count();
+            t_run    += std::chrono::duration<double, std::milli>(_a0 - _r0).count();
+            t_accum  += std::chrono::duration<double, std::milli>(_e0 - _a0).count();
+            ++ntile;
+
+            // TTY-aware progress bar (self-redrawing on a terminal,
+            // one-line-per-tile when piped / inside a MEX).
+            std::lock_guard<std::mutex> lk(log_mtx);
+            siam::log_progress("tile", ++tiles_done, static_cast<long long>(n_tiles * n_folds));
+        };
+
+        try {
+            if (dynamic) {
+                for (int64_t it; (it = next_item++) < n_folds * n_tiles;) {
+                    run_one(it / n_tiles, it % n_tiles);
+                }
+            } else {
+                for (int64_t fi = 0; fi < n_folds; ++fi) {
+                    for (int64_t ti = tile_beg[dev]; ti < tile_beg[dev + 1]; ++ti) {
+                        run_one(fi, ti);
+                    }
+                }
+            }
+
+            close_fold();
+        } catch (...) {
+            errors[dev] = std::current_exception();
+            next_item = n_folds * n_tiles;      // stop the other devices pulling tiles
+            engine.reset();
         }
 
         if (prof) {
+            std::lock_guard<std::mutex> lk(log_mtx);
             fprintf(stderr,
-                    "\n[sliding] fold %zu CPU/GPU split over %lld tiles:\n"
+                    "\n[sliding] device %d CPU/GPU split over %lld tiles:\n"
                     "  patch gather (CPU)      : %8.1f ms  (%6.1f ms/tile)\n"
                     "  run_tile (GPU+xfer)     : %8.1f ms  (%6.1f ms/tile)\n"
                     "  gaussian accumulate(CPU): %8.1f ms  (%6.1f ms/tile)\n",
-                    fi, (long long)tile_idx,
-                    t_gather, t_gather / std::max<int64_t>(1, tile_idx),
-                    t_run,    t_run    / std::max<int64_t>(1, tile_idx),
-                    t_accum,  t_accum  / std::max<int64_t>(1, tile_idx));
+                    dev + 1, (long long)ntile,
+                    t_gather, t_gather / std::max<int64_t>(1, ntile),
+                    t_run,    t_run    / std::max<int64_t>(1, ntile),
+                    t_accum,  t_accum  / std::max<int64_t>(1, ntile));
+        }
+    };
+
+    if (ndev == 1) {
+        worker(0);
+    } else {
+        std::vector<std::thread> pool;
+
+        for (int d = 0; d < ndev; ++d) {
+            pool.emplace_back(worker, d);
+        }
+
+        for (auto& th : pool) {
+            th.join();
+        }
+    }
+
+    for (auto& e : errors) {
+        if (e) {
+            std::rethrow_exception(e);
         }
     }
 

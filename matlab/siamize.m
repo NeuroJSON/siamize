@@ -138,6 +138,17 @@ function [nii, dk] = siamize(varargin)
 %                                      CUDA_VISIBLE_DEVICES filter set in
 %                                      the environment. Use `nvidia-smi`
 %                                      to see what each index maps to.
+%                                      A 0/1 string of 2+ digits, e.g.
+%                                      '11', runs on several GPUs at once
+%                                      (digit i = GPU i-1), each taking a
+%                                      share of the tiles.
+%               'workload'            [w1 w2 ...] relative tile shares of
+%                                      the opts.gpu mask's devices; default
+%                                      [] = shared queue (faster takes more).
+%               'step'                sliding-window stride as a fraction
+%                                      of the patch, default 0.5; 0.75 or 1
+%                                      is faster with slightly more seam
+%                                      error.
 %
 %            TPM output mode (4D float32 tissue probability map,
 %            softmax over the 18 fold-averaged class logits):

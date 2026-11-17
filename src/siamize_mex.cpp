@@ -337,6 +337,9 @@ struct Opts {
                                                             (see siamize.cpp commit 0d4c8a3); pass
                                                             opts.verbose = false to silence. */
     siam::EngineTuning engine_tuning;                      /**< CUDA EP knobs (gpuid, mem limit, ...) */
+    std::vector<siam::EngineTuning> device_tunings;    /**< opts.gpu '0101' mask: one per device (2+) */
+    std::vector<float> workload;                       /**< opts.workload: the devices' tile shares */
+    float step = 0.5f;                                 /**< opts.step: sliding-window stride / patch */
     bool  tpm = false;                                 /**< true -> emit 4D float32 TPM, false -> 3D labels */
     float tpm_temperature = 1.0f;                      /**< softmax temperature for the TPM */
     bool  upsample = false;                            /**< true -> return output at internal inference
@@ -510,7 +513,25 @@ void read_opts(const mxArray* a, Opts& o) {
             std::string s = mx_to_string(f);
             size_t colon = s.find(':');
 
-            if (colon == std::string::npos) {
+            if (s.size() > 1 && s.find_first_not_of("01") == std::string::npos
+                    && s.find('1') != std::string::npos) {
+                // a device mask as the CLI's -G 0101: character i = GPU i (0-based)
+                for (size_t i = 0; i < s.size(); ++i) {
+                    if (s[i] == '1') {
+                        siam::EngineTuning t = o.engine_tuning;
+                        t.gpuid = static_cast<int>(i);
+                        t.gpu_explicit = true;
+                        o.device_tunings.push_back(t);
+                    }
+                }
+
+                o.engine_tuning.gpuid = o.device_tunings[0].gpuid;
+                o.engine_tuning.gpu_explicit = true;
+
+                if (o.device_tunings.size() == 1) {
+                    o.device_tunings.clear();
+                }
+            } else if (colon == std::string::npos) {
                 o.engine_tuning.gpuid = std::stoi(s);
             } else {
                 o.engine_tuning.gpu_platform = std::stoi(s.substr(0, colon));
@@ -521,11 +542,51 @@ void read_opts(const mxArray* a, Opts& o) {
         }
     }
 
+    if ((f = mxGetField(a, 0, "workload")) && !mxIsEmpty(f)) {
+        const double* w = mxGetPr(f);
+
+        for (size_t i = 0; i < mxGetNumberOfElements(f); ++i) {
+            if (!std::isfinite(w[i]) || w[i] < 0) {
+                mexErrMsgIdAndTxt("siamize:opts", "opts.workload must be finite and non-negative");
+            }
+
+            o.workload.push_back(static_cast<float>(w[i]));
+        }
+    }
+
+    if ((f = mxGetField(a, 0, "step")) && !mxIsEmpty(f)) {
+        o.step = static_cast<float>(mxGetScalar(f));
+
+        if (!(o.step > 0.f && o.step <= 1.f)) {
+            mexErrMsgIdAndTxt("siamize:opts", "opts.step must be in (0, 1]");
+        }
+    }
+
     if ((f = mxGetField(a, 0, "gpu_platform")) && !mxIsEmpty(f)) {
         // MNN OpenCL/Vulkan platform index (inert for ORT). Same field
         // semantics as the P-half of "P:D" on opts.gpu, but settable
         // independently for callers that prefer a struct-shaped opts.
         o.engine_tuning.gpu_platform = static_cast<int>(mxGetScalar(f));
+
+        for (auto& t : o.device_tunings) {
+            t.gpu_platform = o.engine_tuning.gpu_platform;
+        }
+    }
+
+    if (o.device_tunings.empty()) {
+        o.workload.clear();                 // one device: nothing to split
+    } else if (!o.workload.empty()) {
+        float wsum = 0.f;
+
+        for (float w : o.workload) {
+            wsum += w;
+        }
+
+        if (o.workload.size() < o.device_tunings.size() || !(wsum > 0.f)) {
+            mexErrMsgIdAndTxt("siamize:opts", "opts.workload needs one value per opts.gpu device, with a positive sum");
+        }
+
+        o.workload.resize(o.device_tunings.size());
     }
 
     if ((f = mxGetField(a, 0, "mnn_fp16")) && !mxIsEmpty(f)) {
@@ -1033,8 +1094,9 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
         siam::LogitsVolume logits = siam::sliding_window(
                                         resampled, models, opts.patch, opts.classes,
-                                        opts.threads, 0.5f, opts.verbose,
-                                        opts.device, opts.trt_cache, opts.engine_tuning);
+                                        opts.threads, opts.step, opts.verbose,
+                                        opts.device, opts.trt_cache, opts.engine_tuning,
+                                        opts.device_tunings, opts.workload);
         resampled = siam::Volume{};
 
         const int64_t cZ = crop.bbox[0][1] - crop.bbox[0][0];

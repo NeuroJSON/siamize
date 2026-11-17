@@ -168,6 +168,12 @@ struct EngineTuning {
  *                        when \a device == "tensorrt"); empty resolves
  *                        to `$HOME/.cache/siamize/trt`
  * @param  engine_tuning    CUDA EP overrides (see EngineTuning)
+ * @param  device_tunings   several devices (-G mask): one EngineTuning per
+ *                          device, each run by its own thread on a share of
+ *                          the tiles; empty =  engine_tuning alone
+ * @param  workload         relative tile shares of  device_tunings (-W),
+ *                          normalized by their sum; empty = the devices take
+ *                          tiles from a shared queue (faster takes more)
  * @return                logits at the same grid as \a data
  */
 LogitsVolume sliding_window(const Volume& data,
@@ -179,7 +185,9 @@ LogitsVolume sliding_window(const Volume& data,
                             bool verbose,
                             const std::string& device = "auto",
                             const std::string& trt_cache_dir = "",
-                            const EngineTuning& engine_tuning = {});
+                            const EngineTuning& engine_tuning = {},
+                            const std::vector<EngineTuning>& device_tunings = {},
+                            const std::vector<float>& workload = {});
 
 }  // namespace siam
 

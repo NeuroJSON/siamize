@@ -729,6 +729,12 @@ void usage(const char* exe) {
                  "                      With -c vulkan: N is 1-based over Vulkan devices (-G 1 =\n"
                  "                      GPU0 in `vulkaninfo --summary`), P:D uses D. --list-gpu\n"
                  "                      shows OpenCL devices only.\n"
+                 "  -G, --gpu 0101      a 0/1 mask of 2+ digits runs on several devices at once\n"
+                 "                      (as mcxcl): digit i selects -G i (above); each device\n"
+                 "                      runs its own share of the tiles. ORT: digit i = CUDA i-1.\n"
+                 "  -W, --workload a,b  relative tile shares of the -G mask's devices, normalized\n"
+                 "                      by their sum (e.g. -G 11 -W 2,1). Default: the devices\n"
+                 "                      pull tiles from a shared queue, so a faster one takes more.\n"
                  "  -L, --list-gpu      List all OpenCL devices with their (1-based) -G index, then\n"
                  "                      exit (MNN/OpenCL build).\n"
                  "  -t, --thread N      CPU worker threads. Default 0 = auto = min(hardware_\n"
@@ -804,6 +810,9 @@ void usage(const char* exe) {
                  "                      each tile is exactly one network forward pass. Peak\n"
                  "                      working memory scales with this size cubed -- on tight\n"
                  "                      RAM (e.g. 32 GB hosts) try 192x192x128 or 128x128x96.\n"
+                 "      --step r        sliding-window stride as a fraction of the patch, in\n"
+                 "                      (0,1], default 0.5 (nnU-Net). 0.75 or 1 cuts the tiles\n"
+                 "                      (faster) with slightly more seam error.\n"
                  "  -u, --spacing v     target isotropic spacing in mm, default 0.75 (SIAM v0.3 training).\n"
                  "  -C, --classes N|spm number of output classes (default 18 = SIAM v0.3).\n"
                  "                      Pass an integer to drive a non-SIAM model with N\n"
@@ -985,6 +994,9 @@ int main(int argc, char** argv) {
 
     std::string input_path, output_path, models_csv;
     std::string device = "auto";       // auto | cpu | cuda | tensorrt
+    float step_ratio = 0.5f;           // --step: the sliding-window stride as a fraction of the patch
+    std::vector<siam::EngineTuning> device_tunings;  // -G mask: one per selected device (2+)
+    std::vector<float> workload;       // -W: the devices' relative tile shares
     int dk_cl_device = 0;              // --parcel's OpenCL device: -G's clinfo index, 0 the first GPU
     std::string trt_cache_dir;         // empty => $HOME/.cache/siamize/trt
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
@@ -1144,6 +1156,27 @@ int main(int argc, char** argv) {
             std::stringstream ss(p);
             ss >> patch[0] >> x >> patch[1] >> x >> patch[2];
             patch_set = true;
+        } else if (a == "--step") {
+            step_ratio = std::stof(need());
+
+            if (!(step_ratio > 0.f && step_ratio <= 1.f)) {
+                std::fprintf(stderr, "--step must be in (0, 1]\n");
+                return 2;
+            }
+        } else if (a == "-W" || a == "--workload") {
+            std::stringstream ss(need());
+            std::string tok;
+
+            while (std::getline(ss, tok, ',')) {
+                const float w = std::stof(tok);
+
+                if (!std::isfinite(w) || w < 0.f) {
+                    std::fprintf(stderr, "-W/--workload values must be finite and non-negative\n");
+                    return 2;
+                }
+
+                workload.push_back(w);
+            }
         } else if (a == "--cudnn-max-workspace") {
             engine_tuning.cudnn_max_workspace = std::stoi(need());
             cudnn_max_workspace_set = true;
@@ -1325,8 +1358,12 @@ int main(int argc, char** argv) {
     siam::set_verbose(verbose);
 
     // ----- Resolve -G / --gpu now that the compute device is known --------
-    if (!gpu_spec.empty()) {
-        const std::string& s = gpu_spec;
+    // A 0/1 string of 2+ characters with a 1 (e.g. 011, 1101) is a device mask,
+    // as in mcxcl: character i selects -G (i+1); "0" and "1" stay device numbers.
+    const bool gpu_mask = gpu_spec.size() > 1
+                          && gpu_spec.find_first_not_of("01") == std::string::npos
+                          && gpu_spec.find('1') != std::string::npos;
+    const auto resolve_gpu = [&](const std::string & s) {
 #ifdef SIAMIZE_HAS_MNN
 
         if (device == "vulkan") {
@@ -1403,6 +1440,70 @@ int main(int argc, char** argv) {
                 engine_tuning.gpuid = std::stoi(s.substr(colon + 1));
                 engine_tuning.gpu_explicit = true;
             }
+        }
+    };
+
+    if (gpu_mask) {
+        const siam::EngineTuning base = engine_tuning;
+        int first_cl = 0;
+
+        for (size_t i = 0; i < gpu_spec.size(); ++i) {
+            if (gpu_spec[i] != '1') {
+                continue;
+            }
+
+            engine_tuning = base;
+#if defined(SIAMIZE_HAS_MNN)
+            resolve_gpu(std::to_string(i + 1));
+#else
+            resolve_gpu(std::to_string(i));  // ORT: bit i = CUDA device i
+#endif
+
+            if (device == "cpu") {
+                std::fprintf(stderr, "siamize: -G %s selects device %zu, which is not a GPU "
+                             "(see --list-gpu)\n", gpu_spec.c_str(), i + 1);
+                return 2;
+            }
+
+            if (first_cl == 0) {
+                first_cl = dk_cl_device;
+            }
+
+            device_tunings.push_back(engine_tuning);
+        }
+
+        dk_cl_device = first_cl;
+        engine_tuning = device_tunings[0];
+
+        if (device == "vulkan" && device_tunings.size() > 1) {
+            // MNN's Vulkan device is chosen by a process-wide env variable.
+            siam::log_warn("[gpu] -c vulkan runs on one device; using the first of -G %s",
+                           gpu_spec.c_str());
+            device_tunings.resize(1);
+        }
+
+        if (device_tunings.size() == 1) {
+            device_tunings.clear();
+        }
+    } else if (!gpu_spec.empty()) {
+        resolve_gpu(gpu_spec);
+    }
+
+    if (!workload.empty()) {
+        float wsum = 0.f;
+
+        for (float w : workload) {
+            wsum += w;
+        }
+
+        if (device_tunings.empty()) {
+            workload.clear();               // one device: nothing to split
+        } else if (workload.size() < device_tunings.size() || !(wsum > 0.f)) {
+            std::fprintf(stderr, "siamize: -W needs one positive-sum value per -G device (%zu)\n",
+                         device_tunings.size());
+            return 2;
+        } else {
+            workload.resize(device_tunings.size());
         }
     }
 
@@ -1498,9 +1599,18 @@ int main(int argc, char** argv) {
                                 device == "cuda" ||
                                 device == "tensorrt");
 #endif
-    const long avail_vram_mb = gpu_active
-                               ? available_vram_mb(device == "vulkan" ? -1 : engine_tuning.gpuid)
-                               : 0;
+    long avail_vram_mb = gpu_active
+                         ? available_vram_mb(device == "vulkan" ? -1 : engine_tuning.gpuid)
+                         : 0;
+
+    for (size_t d = 1; gpu_active && d < device_tunings.size(); ++d) {
+        const long v = available_vram_mb(device_tunings[d].gpuid);
+
+        if (v > 0 && (avail_vram_mb <= 0 || v < avail_vram_mb)) {
+            avail_vram_mb = v;      // multi-GPU: the patch must fit every device
+        }
+    }
+
     const bool ram_tight     = lowmem_mode
                                || (avail_ram_mb  > 0 && avail_ram_mb  < 14 * 1024);
     const bool vram_tight    = (lowmem_mode && gpu_active)
@@ -1815,7 +1925,8 @@ int main(int argc, char** argv) {
     try {
         logits = siam::sliding_window(
                      resampled, model_paths, patch, num_classes,
-                     threads, 0.5f, verbose, device, trt_cache_dir, engine_tuning);
+                     threads, step_ratio, verbose, device, trt_cache_dir, engine_tuning,
+                     device_tunings, workload);
     } catch (const Ort::Exception& e) {
         std::string msg = e.what();
         const bool oom = msg.find("allocate") != std::string::npos
@@ -1858,7 +1969,7 @@ int main(int argc, char** argv) {
             siam::log_cont("giving up on GPU.");
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
-                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+                         threads, step_ratio, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
         } else if (device == "auto" && cuda_init) {
             siam::log_warn("CUDA/cuDNN session init failed: %s", e.what());
             siam::log_hint("-c auto falling back to CPU. Common root causes:");
@@ -1869,7 +1980,7 @@ int main(int argc, char** argv) {
             siam::log_cont("  - pass `-c cpu` to skip GPU entirely");
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
-                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+                         threads, step_ratio, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
         } else if (cuda_init) {
             // User explicitly asked for cuda / tensorrt and the
             // session init failed. Print a useful diagnostic and exit
@@ -1893,7 +2004,7 @@ int main(int argc, char** argv) {
             siam::log_cont("as Reshape -> InstanceNorm2D -> Reshape (see tools/onnx_export/)");
             logits = siam::sliding_window(
                          resampled, model_paths, patch, num_classes,
-                         threads, 0.5f, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
+                         threads, step_ratio, verbose, std::string("cpu"), trt_cache_dir, engine_tuning);
         } else if (coreml_compile) {
             siam::log_warn("CoreML model compile failed: %s", e.what());
             siam::log_hint("you passed `-c %s`. The SIAM v0.3 ONNX has ops Core ML's", device.c_str());
@@ -1915,7 +2026,8 @@ int main(int argc, char** argv) {
     // on OpenCL session failure" path, this is where it belongs.
     logits = siam::sliding_window(
                  resampled, model_paths, patch, num_classes,
-                 threads, 0.5f, verbose, device, trt_cache_dir, engine_tuning);
+                 threads, step_ratio, verbose, device, trt_cache_dir, engine_tuning,
+                 device_tunings, workload);
 #endif
 
     resampled = Volume{};  // free
