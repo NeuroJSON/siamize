@@ -419,7 +419,11 @@ What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
    [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Relevant refs:
-   - **`v3.5-gpu-opt` (default)** — `v3.5-vulkan-conv3d` plus faster GPU
+   - **`v3.5-gpu-opt2` (default)** — `v3.5-gpu-opt` plus an OpenCL
+     context per device, so several GPUs (`-G 0101`) each run on their own
+     GPU (`v3.5-gpu-opt` shares one context, so a second GPU fails with
+     `CL_INVALID_DEVICE` and falls back to the CPU).
+   - **`v3.5-gpu-opt`** — `v3.5-vulkan-conv3d` plus faster GPU
      kernels for both backends: a vectorized, register-blocked OpenCL
      Conv3D (NVIDIA's OpenCL compiler split the old kernels' `vload4` into
      32-bit loads), a Vulkan Conv3D whose work-groups span output-channel
@@ -449,7 +453,7 @@ What `scripts/fetch_mnn.sh` does:
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt`); e.g.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt2`); e.g.
 `MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,

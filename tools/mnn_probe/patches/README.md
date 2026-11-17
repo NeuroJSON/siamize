@@ -163,7 +163,7 @@ with MNN-OpenCL, 99.99 % with ORT-CUDA, bit-identical across TITAN V and
 RTX 5090. `VK_LAYER_KHRONOS_validation` (errors, warnings, perf,
 synchronization validation) reports nothing, with and without host import.
 
-# GPU kernel optimizations (`v3.5-gpu-opt`, siamize's default `MNN_REF`)
+# GPU kernel optimizations (`v3.5-gpu-opt`)
 
 Four more commits on `siam-vulkan-conv3d`, from profiling one SIAM v0.3 tile
 (192x192x128) on an RTX 5090. `tools/mnn_probe/clbench.cpp` benchmarks OpenCL
@@ -180,3 +180,14 @@ Every commit builds on its own. All 529 op outputs stay within 2e-3 of the CPU
 backend on both GPU backends; end-to-end on `sub-01_T1w` the labels match the
 previous kernels on 99.9999 % (fp32) of voxels. One fold on the RTX 5090:
 OpenCL 13.6 -> 10.7 s, Vulkan 14.6 -> 13.2 s (fp32) / 13.2 -> 12.6 s (fp16).
+
+# OpenCL context per device (`v3.5-gpu-opt2`, siamize's default `MNN_REF`)
+
+One commit on `siam-vulkan-conv3d` (`7431aef`), for siamize's multi-GPU `-G 0101`.
+
+| Commit | Change |
+|---|---|
+| `[OpenCL:Bugfix] reuse the global cl::Context only on its own device` | `OpenCLRuntime` reused one process-wide `cl::Context` for every runtime, whatever device `MNNDeviceContext` chose; a context holds only the device it was made for, so a runtime on another GPU made its command queue on the wrong context: `CL_INVALID_DEVICE` (-33), and the session silently ran on the CPU (`-G 2`: 565 s instead of ~15 s on two TITAN Vs). `getGlobalContext` now returns the shared context only for its own device (under the mutex the setter already used); otherwise a new context is made. One-GPU runs are unchanged. |
+
+Two TITAN Vs, kwong scan, `-P 192x192x128`, 12 tiles: `-G 2` 15.7 s on the GPU, labels identical to
+`-G 1`; `-G 11` 7.5 s (`-G 1`: 10.2 s), labels identical.
