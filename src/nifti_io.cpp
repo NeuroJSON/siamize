@@ -640,7 +640,12 @@ void save_nifti_labels(const std::string& path,
 void save_nifti_tpm(const std::string& path,
                     const NiftiImage& src,
                     const float* tpm_canon_czyx,
-                    int64_t num_classes) {
+                    int64_t num_classes,
+                    int bits) {
+    if (bits != 32 && bits != 16 && bits != 8) {
+        throw std::runtime_error("save_nifti_tpm: bits must be 32, 16 or 8");
+    }
+
     Nifti1Header h{};
     h.sizeof_hdr = 348;
     h.dim[0] = 4;
@@ -651,8 +656,8 @@ void save_nifti_tpm(const std::string& path,
     h.dim[5] = 1;
     h.dim[6] = 1;
     h.dim[7] = 1;
-    h.datatype = DT_FLOAT32;
-    h.bitpix = 32;
+    h.datatype = bits == 32 ? DT_FLOAT32 : bits == 16 ? DT_UINT16 : DT_UINT8;
+    h.bitpix = static_cast<int16_t>(bits);
 
     auto col_norm = [&](int c) {
         const auto& A = src.affine_orig;
@@ -666,7 +671,9 @@ void save_nifti_tpm(const std::string& path,
     h.pixdim[4] = 1.0f;   // unit "step" between channels (semantically meaningless)
 
     h.vox_offset = static_cast<float>(sizeof(Nifti1Header) + 4);
-    h.scl_slope  = 0.0f;
+    // quantized: p = q * scl_slope (+ scl_inter = 0), q = round(p * (2^bits - 1))
+    const float qmax = bits == 32 ? 0.0f : static_cast<float>((1u << bits) - 1u);
+    h.scl_slope  = bits == 32 ? 0.0f : 1.0f / qmax;
     h.scl_inter  = 0.0f;
 
     // sform from src.affine_orig.
@@ -724,13 +731,30 @@ void save_nifti_tpm(const std::string& path,
     }
 
     // Assemble the on-disk image: header + 4 bytes padding + data.
-    const size_t data_bytes = static_cast<size_t>(per_channel * num_classes) * sizeof(float);
+    const size_t n_elem = static_cast<size_t>(per_channel * num_classes);
+    const size_t data_bytes = n_elem * static_cast<size_t>(bits / 8);
     const size_t total_size = static_cast<size_t>(h.vox_offset) + data_bytes;
     std::vector<uint8_t> nii(total_size, 0);
     std::memcpy(nii.data(), &h, sizeof(Nifti1Header));
-    std::memcpy(nii.data() + static_cast<size_t>(h.vox_offset),
-                tpm_xyzc.data(),
-                data_bytes);
+    uint8_t* out = nii.data() + static_cast<size_t>(h.vox_offset);
+
+    if (bits == 32) {
+        std::memcpy(out, tpm_xyzc.data(), data_bytes);
+    } else {
+        #pragma omp parallel for schedule(static)
+
+        for (int64_t i = 0; i < static_cast<int64_t>(n_elem); ++i) {
+            const float p = std::min(1.0f, std::max(0.0f, tpm_xyzc[i]));
+            const uint32_t q = static_cast<uint32_t>(std::lround(p * qmax));
+
+            if (bits == 16) {
+                const uint16_t q16 = static_cast<uint16_t>(q);
+                std::memcpy(out + 2 * i, &q16, 2);
+            } else {
+                out[i] = static_cast<uint8_t>(q);
+            }
+        }
+    }
 
     if (ends_with(path, ".gz") || ends_with(path, ".GZ")) {
         auto gz = gzip_compress(nii.data(), nii.size());

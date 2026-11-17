@@ -56,7 +56,9 @@ compressed arrays).
 #include "nlohmann/json.hpp"
 #include "zlibmt.h"   // zlib (multithreaded) + base64: mimamo, via the adapter
 
+#include <algorithm>
 #include <cmath>
+#include <type_traits>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -157,6 +159,9 @@ template <> std::string jdata_dtype<uint8_t>()  {
 }
 template <> std::string jdata_dtype<int16_t>()  {
     return "int16";
+}
+template <> std::string jdata_dtype<uint16_t>() {
+    return "uint16";
 }
 template <> std::string jdata_dtype<int32_t>()  {
     return "int32";
@@ -1107,8 +1112,13 @@ void save_jnifti_tpm(const std::string& path,
                      int64_t num_classes,
                      const std::string& format,
                      ClassSet class_set,
-                     bool shuffle) {
+                     bool shuffle,
+                     int bits) {
     bool binary = (format == "bnii");
+
+    if (bits != 32 && bits != 16 && bits != 8) {
+        throw std::runtime_error("save_jnifti_tpm: bits must be 32, 16 or 8");
+    }
 
     if (format != "jnii" && format != "bnii") {
         throw std::runtime_error(
@@ -1159,15 +1169,48 @@ void save_jnifti_tpm(const std::string& path,
         root["NIFTIHeader"]["_DataInfo_"] = data_info;
     }
 
-    // Float32 TPM: optionally enable JData _ArrayShuffle_=4 (per-byte
-    // plane regrouping). When on, empirically ~1.5-2.5x smaller TPM
-    // payload on brain-segmentation probabilities because
-    // sign/exponent bytes form long zlib-friendly runs. Disable for
-    // tools that don't yet understand _ArrayShuffle_.
-    const int sh = shuffle ? static_cast<int>(sizeof(float)) : 0;
-    root["NIFTIData"] = jdata_annotated<float>(
-                            data_xyzc.data(),
-    {X, Y, Z, num_classes}, binary, sh);
+    const std::vector<int64_t> shape{X, Y, Z, num_classes};
+
+    if (bits == 32) {
+        // Float32 TPM: optionally enable JData _ArrayShuffle_=4 (per-byte
+        // plane regrouping). When on, empirically ~1.5-2.5x smaller TPM
+        // payload on brain-segmentation probabilities because
+        // sign/exponent bytes form long zlib-friendly runs. Disable for
+        // tools that don't yet understand _ArrayShuffle_.
+        const int sh = shuffle ? static_cast<int>(sizeof(float)) : 0;
+        root["NIFTIData"] = jdata_annotated<float>(data_xyzc.data(), shape, binary, sh);
+    } else {
+        // Quantized TPM: q = round(p * (2^bits - 1)), p = q * ScaleSlope +
+        // ScaleOffset (the JNIfTI names of NIfTI's scl_slope / scl_inter).
+        // Most of a float32 TPM's bytes are the noise mantissas of p < 1e-6;
+        // 16 bits (max error 7.7e-6, the argmax unchanged) are ~20x smaller
+        // after compression.
+        const float qmax = static_cast<float>((1u << bits) - 1u);
+        root["NIFTIHeader"]["DataType"]    = bits == 16 ? "uint16" : "uint8";
+        root["NIFTIHeader"]["BitDepth"]    = bits;
+        root["NIFTIHeader"]["ScaleSlope"]  = 1.0f / qmax;
+        root["NIFTIHeader"]["ScaleOffset"] = 0.0f;
+        const auto quant = [&](auto * q) {
+            #pragma omp parallel for schedule(static)
+
+            for (int64_t i = 0; i < static_cast<int64_t>(data_xyzc.size()); ++i) {
+                const float p = std::min(1.0f, std::max(0.0f, data_xyzc[i]));
+                q[i] = static_cast<std::remove_pointer_t<decltype(q)>>(std::lround(p * qmax));
+            }
+        };
+
+        if (bits == 16) {
+            std::vector<uint16_t> q(data_xyzc.size());
+            quant(q.data());
+            root["NIFTIData"] = jdata_annotated<uint16_t>(q.data(), shape, binary,
+                                shuffle ? 2 : 0);
+        } else {
+            std::vector<uint8_t> q(data_xyzc.size());
+            quant(q.data());
+            root["NIFTIData"] = jdata_annotated<uint8_t>(q.data(), shape, binary, 0);
+        }
+    }
+
     write_jnifti_root(path, root, binary);
 }
 

@@ -631,7 +631,7 @@ void usage(const char* exe) {
                  "  -i, --input         input volume (.nii / .nii.gz NIfTI-1/2, or .jnii / .bnii\n"
                  "                      JNIfTI; format inferred from extension). 3D scalar.\n"
                  "  -o, --output        output file. By default a 3D uint8 labelmap; pass `--tpm`\n"
-                 "                      to write a 4D float32 tissue probability map instead.\n"
+                 "                      to write a 4D tissue probability map instead (--tpm-bits).\n"
                  "                      Container format follows -F/--format (default nii).\n"
                  "                      JNIfTI spec: https://neurojson.org/jnifti\n"
                  "  -F, --format        output container: nii (NIfTI-1, gzipped if .gz) | jnii\n"
@@ -772,11 +772,16 @@ void usage(const char* exe) {
                  "                      out-of-the-box behavior never breaks inference.\n"
                  "                      Flags passed alongside --lowmem are NOT overridden.\n"
                  "      --tpm [0|1]     toggle TPM-mode output (default off). When on, the\n"
-                 "                      file at `-o` is a 4D float32 tissue probability map of\n"
+                 "                      file at `-o` is a 4D tissue probability map (--tpm-bits) of\n"
                  "                      shape (X, Y, Z, num_classes) -- softmax over the 18 fold-\n"
                  "                      averaged class logits -- INSTEAD of the discrete labelmap.\n"
                  "                      Use .nii.gz to gzip on save. Raw size ~3 GB; gzipped ~250 MB.\n"
                  "                      `--tpm` alone is equivalent to `--tpm 1`.\n"
+                 "      --tpm-bits B    TPM storage: 16 (default) = uint16 round(p*65535), max error\n"
+                 "                      7.7e-6, labels (argmax) unchanged, ~20x smaller than 32;\n"
+                 "                      8 = uint8 (error 2e-3); 32 = exact float32. The scale is\n"
+                 "                      stored (NIfTI scl_slope, JNIfTI ScaleSlope), so readers\n"
+                 "                      get probabilities in [0,1].\n"
                  "      --tpm-t T       softmax temperature for the TPM output (default 1.0).\n"
                  "                      T > 1 softens the distribution (more graded boundaries,\n"
                  "                      better-calibrated probabilities); T < 1 sharpens. Only\n"
@@ -821,7 +826,7 @@ void usage(const char* exe) {
                  "                      CSF, Bone, Soft, Air). Works with both labelmap\n"
                  "                      (0 Air = background, 1 GM, 2 WM, 3 CSF, 4 Bone,\n"
                  "                      5 Soft) and --tpm output\n"
-                 "                      (4D float32 in spm12/tpm/TPM.nii channel order).\n"
+                 "                      (4D, in spm12/tpm/TPM.nii channel order).\n"
                  "                      Anomalies (SIAM class 17) fold into GM.\n"
                  "  -v, --verbose       print progress (default ON; flag kept for backward\n"
                  "                      compat with older scripts -- already-verbose runs).\n"
@@ -1002,6 +1007,7 @@ int main(int argc, char** argv) {
     bool        tpm_mode        = false; // true => write 4D TPM to output, not labels
     float       tpm_temperature = 1.0f;  // softmax temperature (>1 = softer)
     bool        tpm_shuffle     = false; // apply JData _ArrayShuffle_=4 before zlib
+    int         tpm_bits        = 16;    // --tpm-bits: 32 float32, 16/8 quantized uint16/uint8
     // on TPM jnii/bnii output. Default OFF for
     // interop with readers that don't yet
     // understand _ArrayShuffle_ (e.g. current
@@ -1305,6 +1311,13 @@ int main(int argc, char** argv) {
 
             if (parcel.empty()) {
                 parcel = "dk";
+            }
+        } else if (a == "--tpm-bits") {
+            tpm_bits = std::stoi(need());
+
+            if (tpm_bits != 32 && tpm_bits != 16 && tpm_bits != 8) {
+                std::fprintf(stderr, "--tpm-bits must be 32, 16 or 8 (got %d)\n", tpm_bits);
+                return 2;
             }
         } else if (a == "--tpm-t") {
             tpm_temperature = std::stof(need());
@@ -2222,11 +2235,11 @@ int main(int argc, char** argv) {
 
             if (out_format == "nii") {
                 siam::save_nifti_tpm(output_path, img_up,
-                                     tpm_up.data(), num_classes_out);
+                                     tpm_up.data(), num_classes_out, tpm_bits);
             } else {
                 siam::save_jnifti_tpm(output_path, img_up,
                                       tpm_up.data(), num_classes_out,
-                                      out_format, class_set, tpm_shuffle);
+                                      out_format, class_set, tpm_shuffle, tpm_bits);
             }
         } else {
             // ---- Labels branch (upsample): argmax over logits at
@@ -2462,11 +2475,11 @@ int main(int argc, char** argv) {
         logits_back = LogitsVolume{};
 
         if (out_format == "nii") {
-            siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out);
+            siam::save_nifti_tpm(output_path, img, tpm_canon.data(), num_classes_out, tpm_bits);
         } else {
             siam::save_jnifti_tpm(output_path, img, tpm_canon.data(),
                                   num_classes_out, out_format, class_set,
-                                  tpm_shuffle);
+                                  tpm_shuffle, tpm_bits);
         }
     } else {
         // ---- Labels branch: argmax -> un-crop -> save 3D uint8 ----------

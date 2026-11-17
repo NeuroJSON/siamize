@@ -108,6 +108,10 @@ void save_jnifti_labels(const std::string& path,
  *                          understand _ArrayShuffle_; set true to opt in
  *                          to the 1.5-2.5x size win at no decode cost
  *                          for spec-compliant readers.
+ * @param  bits             32 = float32 ("single"); 16 / 8 = uint16 / uint8
+ *                          quantized probabilities round(p * (2^bits - 1)),
+ *                          with NIFTIHeader.ScaleSlope = 1 / (2^bits - 1) and
+ *                          ScaleOffset = 0 so readers recover p
  */
 void save_jnifti_tpm(const std::string& path,
                      const NiftiImage& src,
@@ -115,7 +119,8 @@ void save_jnifti_tpm(const std::string& path,
                      int64_t num_classes,
                      const std::string& format,
                      ClassSet class_set = ClassSet::CUSTOM_N,
-                     bool shuffle = false);
+                     bool shuffle = false,
+                     int bits = 16);
 
 /**
  * @brief Load a JNIfTI file (.jnii or .bnii) into a canonical NiftiImage

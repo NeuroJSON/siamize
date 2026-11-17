@@ -85,11 +85,16 @@ void save_nifti_labels(const std::string& path,
  * @param  src              the input NiftiImage whose header is reused
  * @param  tpm_canon_czyx   channel-slowest TPM in canonical orientation
  * @param  num_classes      number of channels (NIfTI dim[4])
+ * @param  bits             32 = float32; 16 / 8 = uint16 / uint8 quantized
+ *                          probabilities round(p * (2^bits - 1)), with
+ *                          scl_slope = 1 / (2^bits - 1) so NIfTI readers
+ *                          recover p (max error 7.7e-6 at 16 bits)
  */
 void save_nifti_tpm(const std::string& path,
                     const NiftiImage& src,
                     const float* tpm_canon_czyx,
-                    int64_t num_classes);
+                    int64_t num_classes,
+                    int bits = 16);
 
 }  // namespace siam
 

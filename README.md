@@ -602,9 +602,10 @@ The most-used options beyond `-i / -o / -M / -c`:
 | `-P ZxYxX` | Sliding-window patch size, default `256x256x192`. Smaller patches → lower peak memory, more tiles. Requires dynamic-axes ONNX. |
 | `-u S` | Target isotropic spacing in mm, default `0.75`. |
 | `-C N\|spm` | Output classes. `-C 18` (default, SIAM v0.3) or `-C spm` to remap to SPM12's 6 TPM channels (GM, WM, CSF, Bone, Soft, Air). |
-| `--tpm [0\|1]` + `--tpm-t T` | Write a 4D float32 tissue probability map (per-voxel softmax over classes) instead of a uint8 labelmap. `--tpm-t > 1` softens the softmax. |
+| `--tpm [0\|1]` + `--tpm-t T` | Write a 4D tissue probability map (per-voxel softmax over classes) instead of a uint8 labelmap. `--tpm-t > 1` softens the softmax. |
+| `--tpm-bits 16\|8\|32` | TPM storage. `16` (default): uint16 `round(p*65535)`, max error 7.7e-6, the argmax labels unchanged, ~14-17× smaller than float32 (kwong scan: 334 MB → 24 MB `.bnii`, 327 MB → 19 MB `.nii.gz`). `8`: uint8, error 2e-3 (~5 MB). `32`: exact float32. The scale is stored as NIfTI `scl_slope` / JNIfTI `ScaleSlope` (`ScaleOffset` 0), so readers that apply it get probabilities in [0, 1]. |
 | `--upsample` | Save at the network's internal 0.75 mm canonical-RAS grid instead of resampling back to the input grid. |
-| `--shuffle` | Apply JData `_ArrayShuffle_=4` byte-shuffle before zlib on TPM `.jnii`/`.bnii` output. 1.5-2.5× smaller payload for spec-compliant readers. |
+| `--shuffle` | Apply the JData `_ArrayShuffle_` byte-shuffle (element size: 4 for float32, 2 for uint16) before zlib on TPM `.jnii`/`.bnii` output. 1.5-2.5× smaller float32 payload, ~10% smaller uint16, for spec-compliant readers. |
 | `--lowmem` | Force the full low-memory preset (smaller patch + tighter EP knobs). Auto-applied on hosts with < 14 GB free RAM / < 12 GB free VRAM. |
 | `--no-arena` | Disable ORT's CPU memory arena (saves ~16 GB peak RSS on the 18-class model at ~1.5× wall cost). |
 | `--cudnn-max-workspace 0` + `--arena-extend same` + `--cudnn-algo heuristic` | Tight-VRAM GPU recipe (8 GB consumer cards). |
