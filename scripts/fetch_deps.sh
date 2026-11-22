@@ -117,7 +117,8 @@ else
 
     # The names the tarballs had and the loaders look for: the Linux library's
     # SONAME is libonnxruntime.so.1, the macOS one's install name is
-    # @rpath/libonnxruntime.1.dylib.
+    # @rpath/libonnxruntime.1.dylib; the real files keep the tarballs'
+    # versioned names (libonnxruntime.so.<ver>, libonnxruntime.<ver>.dylib).
     case "$ORT_RID" in
         linux-*)
             mv "$out/lib/libonnxruntime.so" "$out/lib/libonnxruntime.so.${ORT_VERSION}"
@@ -125,7 +126,10 @@ else
             ln -s "libonnxruntime.so.1" "$out/lib/libonnxruntime.so"
             ;;
         osx-*)
-            ln -s "libonnxruntime.dylib" "$out/lib/libonnxruntime.1.dylib"
+            # the tarball's real file name too (scripts/package.sh copies it)
+            mv "$out/lib/libonnxruntime.dylib" "$out/lib/libonnxruntime.${ORT_VERSION}.dylib"
+            ln -s "libonnxruntime.${ORT_VERSION}.dylib" "$out/lib/libonnxruntime.1.dylib"
+            ln -s "libonnxruntime.1.dylib" "$out/lib/libonnxruntime.dylib"
             ;;
     esac
     mv "$out" "$TP/onnxruntime"
