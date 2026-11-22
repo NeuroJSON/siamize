@@ -122,13 +122,15 @@ checkout without setting `LD_LIBRARY_PATH`.
 make cuda       # re-fetches GPU ORT prebuilt (only if needed) + configures + builds
 ```
 
-That's the convenience shortcut. The equivalent explicit form:
+That's the convenience shortcut. `scripts/fetch_deps.sh` takes ONNX Runtime
+from Microsoft's NuGet packages (`Microsoft.ML.OnnxRuntime`, and
+`.Gpu.Linux` / `.Gpu.Windows` for CUDA 12; Linux x64/arm64, macOS arm64,
+Windows x64): the GitHub release tarballs it used before are no longer
+available. The equivalent explicit form:
 
 ```bash
 rm -rf third_party/onnxruntime build
-ORT_BUILD=gpu scripts/fetch_deps.sh                  # default = CUDA 12.x build
-# or, if your NVIDIA driver is CUDA 13:
-# ORT_BUILD=gpu ORT_CUDA=13 scripts/fetch_deps.sh
+ORT_BUILD=gpu scripts/fetch_deps.sh                  # CUDA 12.x build
 cmake -S . -B build -DSIAMIZE_GPU=cuda
 cmake --build build -j
 ```
