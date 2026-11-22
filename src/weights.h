@@ -130,6 +130,14 @@ std::string default_weights_url(WeightVariant variant = WeightVariant::DYNSHAPE)
 std::string resolve_model_path(const std::string& spec, bool verbose,
                                WeightVariant variant = WeightVariant::DYNSHAPE);
 
+/**
+ * @brief The local file resolve_model_path() would return without
+ *        downloading (the spec as a path, or its cached copy), or "" if
+ *        the model is not on disk yet. Logs nothing.
+ */
+std::string cached_model_path(const std::string& spec,
+                              WeightVariant variant = WeightVariant::DYNSHAPE);
+
 }  // namespace siam
 
 #endif  // SIAMIZE_WEIGHTS_H

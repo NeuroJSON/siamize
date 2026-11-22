@@ -52,6 +52,7 @@ single-binary with no Python runtime.
 #include "jnifti_io.h"
 #include "preprocess.h"
 #include "sliding.h"
+#include "engine.h"
 #include "weights.h"
 #include "dkatlas.h"
 
@@ -1826,7 +1827,22 @@ int main(int argc, char** argv) {
     }
 
     auto t_start = std::chrono::steady_clock::now();
+    siam::phase_mark("start (process init)");
 
+#ifdef SIAMIZE_HAS_MNN
+    // Parse the (first) model in the background while the input is read and
+    // preprocessed; the engine picks it up. Only when it is already on disk:
+    // a download keeps its usual place and log line below.
+    {
+        const std::string cached = model_paths.empty()
+                                   ? std::string()
+                                   : siam::cached_model_path(model_paths[0], siam::WeightVariant::MNN);
+
+        if (!cached.empty()) {
+            siam::prefetch_model(cached);
+        }
+    }
+#endif
     siam::log_tag("input", "%s", input_path.c_str());
 
     // Input dispatch: .jnii / .bnii go through the JNIfTI reader, anything
@@ -1850,6 +1866,7 @@ int main(int argc, char** argv) {
     NiftiImage img = (ends_with_ci(input_path, ".jnii") || ends_with_ci(input_path, ".bnii"))
                      ? siam::load_jnifti_ras(input_path)
                      : siam::load_nifti_ras(input_path);
+    siam::phase_mark("load input");
 
     siam::log_cont("canon shape (Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64
                    ")  voxel size (X,Y,Z) (%.3f,%.3f,%.3f) mm",
@@ -1875,11 +1892,13 @@ int main(int argc, char** argv) {
     {crop.cropped.shape[0], crop.cropped.shape[1], crop.cropped.shape[2]},
     spacing_zyx, new_spacing);
 
+    siam::phase_mark("orient + crop");
     siam::log_tag("resample", "(Z,Y,X) (%" PRId64 ",%" PRId64 ",%" PRId64 ") @ %.3f mm",
                   new_shape[0], new_shape[1], new_shape[2], target_spacing);
 
     // Forward path: cubic Catmull-Rom (matches scipy order=3 to within ~0.1% Dice).
     Volume resampled = siam::resample_cubic(crop.cropped, new_shape[0], new_shape[1], new_shape[2]);
+    siam::phase_mark("resample (cubic)");
     crop.cropped = Volume{};  // free
 
     // Resolve every model spec: existing path, cache lookup, or auto-fetch.
@@ -1932,6 +1951,22 @@ int main(int argc, char** argv) {
     // exception re-raises so the user sees the explicit failure they
     // asked for.
     LogitsVolume logits;
+
+    // Label output from one fold on one GPU: the engine may normalize,
+    // resample back and argmax on the device (MNN OpenCL), returning one
+    // code per cropped-grid voxel instead of the logits volume.
+    std::vector<uint8_t> post_codes;
+    siam::GpuPostLabels gpu_post;
+
+    if (!tpm_mode && !upsample_mode && num_classes <= 32 &&
+            (class_set == ClassSet::CUSTOM_N || (class_set == ClassSet::SPM && num_classes == 18))) {
+        gpu_post.dst = {crop.bbox[0][1] - crop.bbox[0][0],
+                        crop.bbox[1][1] - crop.bbox[1][0],
+                        crop.bbox[2][1] - crop.bbox[2][0]};
+        gpu_post.spm_map = (class_set == ClassSet::SPM) ? SIAM18_TO_SPM6 : nullptr;
+        post_codes.resize(static_cast<size_t>(gpu_post.dst[0] * gpu_post.dst[1] * gpu_post.dst[2]));
+        gpu_post.codes = post_codes.data();
+    }
 
 #ifdef SIAMIZE_HAS_ORT
 
@@ -2040,7 +2075,7 @@ int main(int argc, char** argv) {
     logits = siam::sliding_window(
                  resampled, model_paths, patch, num_classes,
                  threads, step_ratio, verbose, device, trt_cache_dir, engine_tuning,
-                 device_tunings, workload);
+                 device_tunings, workload, gpu_post.codes ? &gpu_post : nullptr);
 #endif
 
     resampled = Volume{};  // free
@@ -2358,13 +2393,15 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    siam::phase_mark("inference (sliding window)");
     // resample logits back to cropped (pre-resample) shape, per channel, with trilinear.
     LogitsVolume logits_back;
-    logits_back.resize(num_classes,
-                       crop.bbox[0][1] - crop.bbox[0][0],
-                       crop.bbox[1][1] - crop.bbox[1][0],
-                       crop.bbox[2][1] - crop.bbox[2][0]);
-    {
+
+    if (!gpu_post.done) {
+        logits_back.resize(num_classes,
+                           crop.bbox[0][1] - crop.bbox[0][0],
+                           crop.bbox[1][1] - crop.bbox[1][0],
+                           crop.bbox[2][1] - crop.bbox[2][0]);
         Volume tmp_in;
         tmp_in.shape = {logits.spat[0], logits.spat[1], logits.spat[2]};
         tmp_in.data.resize(static_cast<size_t>(logits.cstride()));
@@ -2378,11 +2415,12 @@ int main(int argc, char** argv) {
             std::copy_n(v.data.data(), v.numel(), logits_back.channel_ptr(c));
         }
     }
+    siam::phase_mark("resample logits back (trilinear)");
     logits = LogitsVolume{};  // free
 
-    const int64_t cZ = logits_back.spat[0];
-    const int64_t cY = logits_back.spat[1];
-    const int64_t cX = logits_back.spat[2];
+    const int64_t cZ = crop.bbox[0][1] - crop.bbox[0][0];
+    const int64_t cY = crop.bbox[1][1] - crop.bbox[1][0];
+    const int64_t cX = crop.bbox[2][1] - crop.bbox[2][0];
     const int64_t Zc = shape_canon[0], Yc = shape_canon[1], Xc = shape_canon[2];
 
     if (tpm_mode) {
@@ -2496,9 +2534,30 @@ int main(int argc, char** argv) {
             cortex_canon.assign(static_cast<size_t>(Zc) * Yc * Xc, 0);
         }
 
+        if (gpu_post.done) {
+            // codes from the GPU: 18-class argmax | (SPM6 bin << 5)
+            #pragma omp parallel for schedule(static)
+
+            for (int64_t z = 0; z < cZ; ++z) {
+                for (int64_t y = 0; y < cY; ++y) {
+                    for (int64_t x = 0; x < cX; ++x) {
+                        const uint8_t code = post_codes[z * cY * cX + y * cX + x];
+
+                        if (spm_labels && !cortex_canon.empty()) {
+                            cortex_canon[(z + crop.bbox[0][0]) * Yc * Xc + (y + crop.bbox[1][0]) * Xc + x + crop.bbox[2][0]] =
+                                (code & 31) == 1;
+                        }
+
+                        labels_crop[z * cY * cX + y * cX + x] = spm_labels ? SPM6_LABEL[code >> 5]
+                                                                : static_cast<uint8_t>(code & 31);
+                    }
+                }
+            }
+        }
+
         #pragma omp parallel for schedule(static)
 
-        for (int64_t z = 0; z < cZ; ++z) {
+        for (int64_t z = 0; z < (gpu_post.done ? 0 : cZ); ++z) {
             for (int64_t y = 0; y < cY; ++y) {
                 for (int64_t x = 0; x < cX; ++x) {
                     int64_t i = z * cY * cX + y * cX + x;
@@ -2590,6 +2649,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    siam::phase_mark("argmax/softmax + uncrop + save");
     auto t_end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(t_end - t_start).count();
 

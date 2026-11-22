@@ -265,6 +265,28 @@ std::string default_weights_url(WeightVariant variant) {
     \return          absolute path to the resolved .onnx file
     \throws std::runtime_error if none of the lookup stages produces a file
 */
+std::string cached_model_path(const std::string& spec, WeightVariant variant) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    if (spec.empty()) {
+        return "";
+    }
+
+    if (fs::exists(spec, ec)) {
+        return spec;
+    }
+
+    fs::path cache = default_cache_dir();
+
+    if (variant != WeightVariant::DYNSHAPE) {
+        cache /= variant_str(variant);
+    }
+
+    const fs::path cached = cache / fs::path(spec).filename();
+    return fs::exists(cached, ec) ? cached.string() : std::string();
+}
+
 std::string resolve_model_path(const std::string& spec, bool verbose,
                                WeightVariant variant) {
     namespace fs = std::filesystem;

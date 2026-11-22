@@ -38,6 +38,7 @@ caching, and accumulated multi-fold logit averaging.
 #include "siam.h"
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -146,6 +147,23 @@ struct EngineTuning {
 };
 
 /**
+ * \brief GPU post-processing request for the label output (see
+ *        Engine::gpu_post_labels). sliding_window() fills the input part;
+ *        the caller supplies the target grid, the class mapping and `codes`.
+ */
+struct GpuPostLabels {
+    const float* weights = nullptr;      /**< padded-volume Gaussian coverage, Z*Y*X */
+    float num_folds = 1.0f;              /**< logits /= weights * num_folds */
+    std::array<int64_t, 3> padded{};     /**< (Z,Y,X) of the accumulator */
+    std::array<int64_t, 3> src{};        /**< unpadded logits grid (Z,Y,X) */
+    std::array<int64_t, 3> pad_lo{};     /**< offset of src inside padded */
+    std::array<int64_t, 3> dst{};        /**< back-resampled (cropped input) grid */
+    const int8_t* spm_map = nullptr;     /**< class -> SPM6 bin, or null: plain argmax */
+    uint8_t* codes = nullptr;            /**< dst voxels: argmax | (best SPM bin << 5) */
+    bool done = false;                   /**< set by sliding_window() on success */
+};
+
+/**
  * @brief Run sliding-window inference over a canonical volume
  *
  * Runs each .onnx file in \a model_paths over a regular grid of
@@ -174,6 +192,10 @@ struct EngineTuning {
  * @param  workload         relative tile shares of  device_tunings (-W),
  *                          normalized by their sum; empty = the devices take
  *                          tiles from a shared queue (faster takes more)
+ * @param  gpu_post         label output post-processed on the GPU when the
+ *                          engine supports it (one fold, one device): on
+ *                          success gpu_post->done is set and the returned
+ *                          logits are empty; null = always return logits
  * @return                logits at the same grid as \a data
  */
 LogitsVolume sliding_window(const Volume& data,
@@ -187,7 +209,8 @@ LogitsVolume sliding_window(const Volume& data,
                             const std::string& trt_cache_dir = "",
                             const EngineTuning& engine_tuning = {},
                             const std::vector<EngineTuning>& device_tunings = {},
-                            const std::vector<float>& workload = {});
+                            const std::vector<float>& workload = {},
+                            GpuPostLabels* gpu_post = nullptr);
 
 }  // namespace siam
 

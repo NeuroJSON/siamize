@@ -30,6 +30,8 @@ so call sites stay uncluttered.
 *******************************************************************************/
 
 #include "siam_log.h"
+#include <cstdlib>
+#include <chrono>
 
 #include <cstdarg>
 #include <cstdio>
@@ -384,6 +386,23 @@ void log_hint(const char* fmt, ...) {
     va_start(ap, fmt);
     emit_formatted(head, fmt, ap);
     va_end(ap);
+}
+
+void phase_mark(const char* what) {
+    static const bool on = std::getenv("SIAMIZE_PHASE") != nullptr;
+
+    if (!on) {
+        return;
+    }
+
+    using clk = std::chrono::steady_clock;
+    static const clk::time_point t0 = clk::now();
+    static clk::time_point last = t0;
+    const clk::time_point now = clk::now();
+    std::fprintf(stderr, "[phase]    %-34s %8.1f ms   (t=%.2f s)\n", what,
+                 std::chrono::duration<double, std::milli>(now - last).count(),
+                 std::chrono::duration<double>(now - t0).count());
+    last = now;
 }
 
 }  // namespace siam

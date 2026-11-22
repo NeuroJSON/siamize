@@ -37,6 +37,7 @@ Why one backend per build (not both at runtime):
 
 namespace siam {
 
+
 /**
  * \class  Engine
  * \brief  Abstract per-fold inference engine
@@ -116,6 +117,28 @@ class Engine {
     virtual void gpu_accum_finish(float* logits_out) {
         (void)logits_out;
     }
+
+    // ---- Optional GPU post-processing (label output) --------------------
+    //
+    // With the logits still in the device accumulator, normalize by the
+    // Gaussian coverage, drop the padding, resample back to the cropped input
+    // grid (resample_trilinear's mapping) and take the per-voxel argmax, all
+    // on the GPU; only one byte per voxel is read back. Replaces the host
+    // logits volume, normalize pass, back-resample and argmax.
+
+    /// True if gpu_accum_begin() + gpu_post_labels() can be used (no opt-in
+    /// needed, unlike gpu_accum_supported(); SIAMIZE_GPU_POST=0 disables it).
+    virtual bool gpu_post_supported() const {
+        return false;
+    }
+
+    /// Run the post-processing on the fold accumulated since gpu_accum_begin()
+    /// and release the accumulator. Returns false (accumulator kept, so the
+    /// caller can still gpu_accum_finish()) if the device work failed.
+    virtual bool gpu_post_labels(const GpuPostLabels& post) {
+        (void)post;
+        return false;
+    }
 };
 
 /**
@@ -153,6 +176,14 @@ make_engine(const std::string& model_path,
             const std::string& device,
             const EngineTuning& tuning,
             bool verbose);
+
+/**
+ * \brief Start loading (parsing) a model file in the background, so a later
+ *        make_engine() on the same path picks up the parsed model instead
+ *        of reading the file itself. Lets the model load overlap the input
+ *        load and preprocessing. A no-op for backends that don't support it.
+ */
+void prefetch_model(const std::string& model_path);
 
 /// Human-readable backend name baked in at compile time
 /// ("onnxruntime" / "mnn"). For --version output and logging.

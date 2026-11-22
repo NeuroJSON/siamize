@@ -65,7 +65,9 @@ decomposition. Document this limitation in your docs.
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -76,6 +78,27 @@ decomposition. Document this limitation in your docs.
 namespace siam {
 
 namespace {
+
+// Models whose parse prefetch_model() started (one entry per path, taken
+// by the first engine built from it).
+std::mutex g_prefetch_mtx;
+std::map<std::string, std::shared_future<std::shared_ptr<MNN::Interpreter>>> g_prefetch;
+
+std::shared_ptr<MNN::Interpreter> take_prefetched_model(const std::string& path) {
+    std::shared_future<std::shared_ptr<MNN::Interpreter>> f;
+    {
+        std::lock_guard<std::mutex> lk(g_prefetch_mtx);
+        auto it = g_prefetch.find(path);
+
+        if (it == g_prefetch.end()) {
+            return nullptr;
+        }
+
+        f = it->second;
+        g_prefetch.erase(it);
+    }
+    return f.get();
+}
 
 /// Portable setenv(name, value, /*overwrite=*/0): set the variable only if
 /// it isn't already present, so a user can still override by exporting it.
@@ -312,8 +335,13 @@ class MnnEngine final : public Engine {
     void gpu_accum_tile(const float* tile,
                         int64_t sz, int64_t sy, int64_t sx) override;
     void gpu_accum_finish(float* logits_out) override;
+    bool gpu_post_supported() const override;
+    bool gpu_post_labels(const GpuPostLabels& post) override;
 
   private:
+#ifdef SIAMIZE_MNN_GPU_ACCUM
+    void gpu_accum_release();
+#endif
     // MNN's Interpreter manages model storage; Session is per-execution
     // state (allocated buffers, op graphs). One per fold.
     std::shared_ptr<MNN::Interpreter> mInterpreter;
@@ -388,8 +416,12 @@ MnnEngine::MnnEngine(const std::string& model_path,
 
     const bool _prof = std::getenv("SIAMIZE_PHASE") || std::getenv("SIAMIZE_OP_PROFILE");
     auto _c0 = std::chrono::steady_clock::now();
-    mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
-                       MNN::Interpreter::destroy);
+    mInterpreter = take_prefetched_model(model_path);
+
+    if (!mInterpreter) {
+        mInterpreter.reset(MNN::Interpreter::createFromFile(model_path.c_str()),
+                           MNN::Interpreter::destroy);
+    }
 
     if (!mInterpreter) {
         throw std::runtime_error("MNN: failed to load model: " + model_path);
@@ -993,6 +1025,193 @@ __kernel void siam_accum(
 }
 )CLC";
 
+// Label post-processing on the accumulated logits, one work-item per voxel of
+// the back-resampled (cropped input) grid. Reproduces the host chain:
+// sliding_window's normalize (logits / (coverage * folds)) and padding crop,
+// resample_trilinear (per-axis indices/weights computed on the host by the
+// same code, uploaded) and the argmax / SPM6 binning of the labels branch.
+// FP_CONTRACT OFF keeps the trilinear blend unfused, as on the host.
+static const char* kSiamPostSource = R"CLC(
+#pragma OPENCL FP_CONTRACT OFF
+#define MAXC 32
+__kernel void siam_post_labels(
+    __global const float* accum, __global const float* wsum,
+    __global const int* zi, __global const float* zw,
+    __global const int* yi, __global const float* yw,
+    __global const int* xi, __global const float* xw,
+    __global const char* spm_map, const int use_spm,
+    __global uchar* codes,
+    const int C, const int pZ, const int pY, const int pX,
+    const int lz, const int ly, const int lx,
+    const int dZ, const int dY, const int dX, const float nf) {
+    const int x = get_global_id(0), y = get_global_id(1), z = get_global_id(2);
+    if (x >= dX || y >= dY || z >= dZ) return;
+    const float wzv = zw[z], wzv1 = 1.0f - wzv;
+    const float wyv = yw[y], wyv1 = 1.0f - wyv;
+    const float wxv = xw[x], wxv1 = 1.0f - wxv;
+    const long z0 = zi[2 * z] + lz, z1 = zi[2 * z + 1] + lz;
+    const long y0 = yi[2 * y] + ly, y1 = yi[2 * y + 1] + ly;
+    const long x0 = xi[2 * x] + lx, x1 = xi[2 * x + 1] + lx;
+    const long o000 = (z0 * pY + y0) * pX + x0, o001 = (z0 * pY + y0) * pX + x1;
+    const long o010 = (z0 * pY + y1) * pX + x0, o011 = (z0 * pY + y1) * pX + x1;
+    const long o100 = (z1 * pY + y0) * pX + x0, o101 = (z1 * pY + y0) * pX + x1;
+    const long o110 = (z1 * pY + y1) * pX + x0, o111 = (z1 * pY + y1) * pX + x1;
+    const float n000 = wsum[o000] * nf, n001 = wsum[o001] * nf;
+    const float n010 = wsum[o010] * nf, n011 = wsum[o011] * nf;
+    const float n100 = wsum[o100] * nf, n101 = wsum[o101] * nf;
+    const float n110 = wsum[o110] * nf, n111 = wsum[o111] * nf;
+    const long S = (long)pZ * pY * pX;
+    float v[MAXC];
+    int top = 0;
+    float bestv = 0.0f;
+    for (int c = 0; c < C; ++c) {
+        __global const float* a = accum + c * S;
+        const float c00 = (a[o000] / n000) * wxv1 + (a[o001] / n001) * wxv;
+        const float c01 = (a[o010] / n010) * wxv1 + (a[o011] / n011) * wxv;
+        const float c10 = (a[o100] / n100) * wxv1 + (a[o101] / n101) * wxv;
+        const float c11 = (a[o110] / n110) * wxv1 + (a[o111] / n111) * wxv;
+        const float c0  = c00 * wyv1 + c01 * wyv;
+        const float c1  = c10 * wyv1 + c11 * wyv;
+        const float r   = c0 * wzv1 + c1 * wzv;
+        v[c] = r;
+        if (c == 0 || r > bestv) { bestv = r; top = c; }
+    }
+    int best6 = 0;
+    if (use_spm) {
+        float bin[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        for (int c = 0; c < C; ++c) bin[spm_map[c]] += exp(v[c] - bestv);
+        float b = bin[0];
+        for (int k = 1; k < 6; ++k) if (bin[k] > b) { b = bin[k]; best6 = k; }
+    }
+    codes[((long)z * dY + y) * dX + x] = (uchar)(top | (best6 << 5));
+}
+)CLC";
+
+// resample_trilinear's per-axis source indices (i0,i1 interleaved) and weights
+static void siam_axis_map(int64_t in, int64_t out, std::vector<int>& idx, std::vector<float>& w) {
+    idx.resize(2 * out);
+    w.resize(out);
+    const double s = static_cast<double>(in) / out;
+    const auto clampi = [in](int64_t i) {
+        return static_cast<int>(std::min<int64_t>(std::max<int64_t>(i, 0), in - 1));
+    };
+    for (int64_t k = 0; k < out; ++k) {
+        double t = (k + 0.5) * s - 0.5;
+        int64_t i0 = static_cast<int64_t>(std::floor(t));
+        double a = t - i0;
+        idx[2 * k]     = clampi(i0);
+        idx[2 * k + 1] = clampi(i0 + 1);
+        w[k] = static_cast<float>(a);
+    }
+}
+
+bool MnnEngine::gpu_post_supported() const {
+    if (mForwardType != MNN_FORWARD_OPENCL) return false;
+    if (mPrecision != MNN::BackendConfig::Precision_High) return false;
+    if (!mBufferMode) return false;
+    const char* e = std::getenv("SIAMIZE_GPU_POST");
+    return !(e && e[0] == '0');
+}
+
+bool MnnEngine::gpu_post_labels(const GpuPostLabels& p) {
+    if (!mAccumActive || !p.weights || !p.codes) return false;
+    if (mNumClasses > 32 || p.padded != mFull) return false;
+    const bool tprof = std::getenv("SIAMIZE_GPU_ACCUM_TIME") != nullptr;
+    auto _t0 = std::chrono::steady_clock::now();
+
+    auto pk = mClRuntime->buildKernelFromSource(kSiamPostSource, "siam_post_labels",
+                                                std::set<std::string>{}, 1);
+    if (!pk) return false;
+
+    std::vector<int> zi, yi, xi;
+    std::vector<float> zw, yw, xw;
+    siam_axis_map(p.src[0], p.dst[0], zi, zw);
+    siam_axis_map(p.src[1], p.dst[1], yi, yw);
+    siam_axis_map(p.src[2], p.dst[2], xi, xw);
+    const size_t nvox = static_cast<size_t>(mChannelStride);
+    const size_t ndst = static_cast<size_t>(p.dst[0] * p.dst[1] * p.dst[2]);
+    int8_t spm_dummy = 0;
+
+    cl_int err = CL_SUCCESS;
+    auto& ctx = mClRuntime->context();
+    const auto mk = [&](size_t bytes, const void* host) {
+        cl_int e2 = CL_SUCCESS;
+        std::unique_ptr<::cl::Buffer> b(new ::cl::Buffer(ctx,
+            host ? (CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR) : CL_MEM_WRITE_ONLY,
+            bytes, const_cast<void*>(host), &e2));
+        if (e2 != CL_SUCCESS) {
+            err = e2;
+            b.reset();
+        }
+        return b;
+    };
+    auto bW  = mk(nvox * sizeof(float), p.weights);
+    auto bZi = mk(zi.size() * sizeof(int), zi.data());
+    auto bZw = mk(zw.size() * sizeof(float), zw.data());
+    auto bYi = mk(yi.size() * sizeof(int), yi.data());
+    auto bYw = mk(yw.size() * sizeof(float), yw.data());
+    auto bXi = mk(xi.size() * sizeof(int), xi.data());
+    auto bXw = mk(xw.size() * sizeof(float), xw.data());
+    auto bMap = mk(p.spm_map ? static_cast<size_t>(mNumClasses) : 1,
+                   p.spm_map ? static_cast<const void*>(p.spm_map) : &spm_dummy);
+    auto bOut = mk(ndst, nullptr);
+    if (err != CL_SUCCESS) {
+        siam::log_tag("mnn", "GPU post-processing alloc failed (CL %d); host path", static_cast<int>(err));
+        return false;
+    }
+
+    auto& k = pk->get();
+    int idx = 0;
+    k.setArg(idx++, *mAccumBuf);
+    k.setArg(idx++, *bW);
+    k.setArg(idx++, *bZi);
+    k.setArg(idx++, *bZw);
+    k.setArg(idx++, *bYi);
+    k.setArg(idx++, *bYw);
+    k.setArg(idx++, *bXi);
+    k.setArg(idx++, *bXw);
+    k.setArg(idx++, *bMap);
+    k.setArg(idx++, static_cast<int>(p.spm_map != nullptr));
+    k.setArg(idx++, *bOut);
+    k.setArg(idx++, static_cast<int>(mNumClasses));
+    for (int i = 0; i < 3; ++i) k.setArg(idx++, static_cast<int>(mFull[i]));
+    for (int i = 0; i < 3; ++i) k.setArg(idx++, static_cast<int>(p.pad_lo[i]));
+    for (int i = 0; i < 3; ++i) k.setArg(idx++, static_cast<int>(p.dst[i]));
+    k.setArg(idx++, p.num_folds);
+
+    auto& q = mClRuntime->commandQueue();
+    err = q.enqueueNDRangeKernel(k, ::cl::NullRange,
+                                 ::cl::NDRange(static_cast<size_t>(p.dst[2]), static_cast<size_t>(p.dst[1]),
+                                               static_cast<size_t>(p.dst[0])),
+                                 ::cl::NullRange);
+    if (err == CL_SUCCESS) {
+        err = q.enqueueReadBuffer(*bOut, CL_TRUE, 0, ndst, p.codes);
+    }
+    if (err != CL_SUCCESS) {
+        siam::log_tag("mnn", "GPU post-processing failed (CL %d); host path", static_cast<int>(err));
+        return false;
+    }
+    if (tprof) {
+        fprintf(stderr, "[gpu-accum-time] post_labels (queue drain + kernel + %zu MB read): %.1f ms\n",
+                ndst >> 20, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _t0).count());
+    }
+    gpu_accum_release();
+    return true;
+}
+
+void MnnEngine::gpu_accum_release() {
+    if (mPinnedPtr) {
+        mClRuntime->commandQueue().enqueueUnmapMemObject(*mPinnedBuf, mPinnedPtr);
+        mClRuntime->commandQueue().finish();
+        mPinnedPtr = nullptr;
+    }
+    mPinnedBuf.reset();
+    mAccumBuf.reset();
+    mGaussBuf.reset();
+    mAccumKernel.reset();
+    mAccumActive = false;
+}
+
 bool MnnEngine::gpu_accum_supported() const {
     // Requires OpenCL + fp32 (Precision_High) + BUFFER mode (the session
     // output device buffer is plain channel-major fp32 there).
@@ -1018,7 +1237,7 @@ bool MnnEngine::gpu_accum_supported() const {
 
 bool MnnEngine::gpu_accum_begin(const std::array<int64_t, 3>& full,
                                 const float* gauss) {
-    if (!gpu_accum_supported()) return false;
+    if (!gpu_accum_supported() && !gpu_post_supported()) return false;
     const bool tprof = std::getenv("SIAMIZE_GPU_ACCUM_TIME") != nullptr;
     auto _b0 = std::chrono::steady_clock::now();
     const auto bmark = [&](const char* what) {
@@ -1076,27 +1295,7 @@ bool MnnEngine::gpu_accum_begin(const std::array<int64_t, 3>& full,
         return false;
     }
 
-    // Pinned (page-locked) host staging buffer for the per-fold readback.
-    // Reading the device accumulator into pinned memory DMAs at full PCIe
-    // bandwidth (~10x faster than into a pageable std::vector on the NVIDIA
-    // ICD). Mapped once and kept resident for the fold.
-    mPinnedBuf.reset(new ::cl::Buffer(mClRuntime->context(),
-                                      CL_MEM_ALLOC_HOST_PTR | CL_MEM_READ_WRITE,
-                                      accumBytes, nullptr, &err));
-    if (err == CL_SUCCESS) {
-        mPinnedPtr = static_cast<float*>(mClRuntime->commandQueue().enqueueMapBuffer(
-            *mPinnedBuf, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, accumBytes,
-            nullptr, nullptr, &err));
-    }
-    if (err != CL_SUCCESS || mPinnedPtr == nullptr) {
-        mAccumBuf.reset();
-        mGaussBuf.reset();
-        mPinnedBuf.reset();
-        mPinnedPtr = nullptr;
-        return false;
-    }
-
-    bmark("after alloc+zero+gauss+pinned");
+    bmark("after alloc+zero+gauss");
     mAccumKernel = mClRuntime->buildKernelFromSource(
         kSiamAccumSource, "siam_accum", std::set<std::string>{}, 1);
     if (!mAccumKernel) {
@@ -1183,6 +1382,28 @@ void MnnEngine::gpu_accum_finish(float* logits_out) {
     const size_t total =
         static_cast<size_t>(mNumClasses) * static_cast<size_t>(mChannelStride);
     const size_t bytes = total * sizeof(float);
+    const size_t accumBytes = bytes;
+    cl_int err = CL_SUCCESS;
+
+    // Pinned (page-locked) host staging buffer for the per-fold readback,
+    // allocated here rather than in begin() so a run post-processed on the
+    // GPU (gpu_post_labels) never pays for it.
+    // Reading the device accumulator into pinned memory DMAs at full PCIe
+    // bandwidth (~10x faster than into a pageable std::vector on the NVIDIA
+    // ICD). Mapped once and kept resident for the fold.
+    mPinnedBuf.reset(new ::cl::Buffer(mClRuntime->context(),
+                                      CL_MEM_ALLOC_HOST_PTR | CL_MEM_READ_WRITE,
+                                      accumBytes, nullptr, &err));
+    if (err == CL_SUCCESS) {
+        mPinnedPtr = static_cast<float*>(mClRuntime->commandQueue().enqueueMapBuffer(
+            *mPinnedBuf, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, accumBytes,
+            nullptr, nullptr, &err));
+    }
+    if (err != CL_SUCCESS || mPinnedPtr == nullptr) {
+        gpu_accum_release();
+        throw std::runtime_error("MNN: pinned staging buffer for the GPU accumulator failed");
+    }
+
 
     // DMA the channel-major device accumulator into pinned host memory
     // (full PCIe bandwidth), then add into the cross-fold accumulator (same
@@ -1220,16 +1441,7 @@ void MnnEngine::gpu_accum_finish(float* logits_out) {
                     std::chrono::steady_clock::now() - _tf1).count());
     }
 
-    if (mPinnedPtr) {
-        mClRuntime->commandQueue().enqueueUnmapMemObject(*mPinnedBuf, mPinnedPtr);
-        mClRuntime->commandQueue().finish();
-        mPinnedPtr = nullptr;
-    }
-    mPinnedBuf.reset();
-    mAccumBuf.reset();
-    mGaussBuf.reset();
-    mAccumKernel.reset();
-    mAccumActive = false;
+    gpu_accum_release();
 }
 
 #else  // !SIAMIZE_MNN_GPU_ACCUM
@@ -1240,10 +1452,25 @@ bool MnnEngine::gpu_accum_begin(const std::array<int64_t, 3>&, const float*) {
 }
 void MnnEngine::gpu_accum_tile(const float*, int64_t, int64_t, int64_t) {}
 void MnnEngine::gpu_accum_finish(float*) {}
+bool MnnEngine::gpu_post_supported() const { return false; }
+bool MnnEngine::gpu_post_labels(const GpuPostLabels&) { return false; }
 
 #endif  // SIAMIZE_MNN_GPU_ACCUM
 
 }  // anonymous namespace
+
+void prefetch_model(const std::string& model_path) {
+    std::lock_guard<std::mutex> lk(g_prefetch_mtx);
+
+    if (g_prefetch.count(model_path)) {
+        return;
+    }
+
+    g_prefetch[model_path] = std::async(std::launch::async, [model_path]() {
+        return std::shared_ptr<MNN::Interpreter>(MNN::Interpreter::createFromFile(model_path.c_str()),
+                                                 MNN::Interpreter::destroy);
+    }).share();
+}
 
 std::unique_ptr<Engine>
 make_engine(const std::string& model_path,

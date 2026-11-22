@@ -562,6 +562,10 @@ void OrtEngine::run_tile(const float* tile, float* logits) {
 
 }  // anonymous namespace
 
+void prefetch_model(const std::string& model_path) {
+    (void)model_path;
+}
+
 std::unique_ptr<Engine>
 make_engine(const std::string& model_path,
             std::array<int64_t, 3> patch_size,

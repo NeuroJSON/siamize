@@ -93,10 +93,16 @@ std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
     const float icy = static_cast<float>(patch[1] / 2);
     const float icx = static_cast<float>(patch[2] / 2);
 
-    double gmax = 0.0;
+    // Parallel over z with per-slice max / min (no OpenMP min/max reduction:
+    // MSVC's OpenMP 2.0 lacks it); every value is the serial loop's.
+    const int64_t pz = patch[0], pyx = patch[1] * patch[2];
+    std::vector<double> zmax(pz, 0.0), zmin(pz, std::numeric_limits<double>::infinity());
 
-    for (int64_t z = 0; z < patch[0]; ++z) {
+    #pragma omp parallel for schedule(static)
+
+    for (int64_t z = 0; z < pz; ++z) {
         float dz = (z - icz) / sz;
+        double m = 0.0;
 
         for (int64_t y = 0; y < patch[1]; ++y) {
             float dy = (y - icy) / sy;
@@ -104,24 +110,46 @@ std::vector<float> compute_gaussian(std::array<int64_t, 3> patch,
             for (int64_t x = 0; x < patch[2]; ++x) {
                 float dx = (x - icx) / sx;
                 double v = std::exp(-0.5 * (dx * dx + dy * dy + dz * dz));
-                g[z * patch[1] * patch[2] + y * patch[2] + x] = static_cast<float>(v);
+                g[z * pyx + y * patch[2] + x] = static_cast<float>(v);
 
-                if (v > gmax) {
-                    gmax = v;
+                if (v > m) {
+                    m = v;
                 }
             }
         }
+
+        zmax[z] = m;
+    }
+
+    double gmax = 0.0;
+
+    for (double m : zmax) {
+        gmax = std::max(gmax, m);
     }
 
     const double inv_max = (gmax > 0.0) ? (value_scaling / gmax) : 1.0;
+
+    #pragma omp parallel for schedule(static)
+
+    for (int64_t z = 0; z < pz; ++z) {
+        double m = std::numeric_limits<double>::infinity();
+
+        for (int64_t i = z * pyx; i < (z + 1) * pyx; ++i) {
+            float& v = g[i];
+            v = static_cast<float>(v * inv_max);
+
+            if (v > 0.0f && v < m) {
+                m = v;
+            }
+        }
+
+        zmin[z] = m;
+    }
+
     double nz_min = std::numeric_limits<double>::infinity();
 
-    for (auto& v : g) {
-        v = static_cast<float>(v * inv_max);
-
-        if (v > 0.0f && v < nz_min) {
-            nz_min = v;
-        }
+    for (double m : zmin) {
+        nz_min = std::min(nz_min, m);
     }
 
     if (!std::isfinite(nz_min)) {
@@ -188,7 +216,8 @@ LogitsVolume sliding_window(const Volume& data,
                             const std::string& trt_cache_dir,
                             const EngineTuning& engine_tuning,
                             const std::vector<EngineTuning>& device_tunings,
-                            const std::vector<float>& workload) {
+                            const std::vector<float>& workload,
+                            GpuPostLabels* gpu_post) {
     if (model_paths.empty()) {
         throw std::runtime_error("no model paths provided");
     }
@@ -241,12 +270,25 @@ LogitsVolume sliding_window(const Volume& data,
                   siam::backend_name());
     (void)verbose;
 
+    siam::phase_mark("pre-inference setup");
     auto gauss = compute_gaussian(patch_size);
+    siam::phase_mark("compute_gaussian");
 
+    // GPU post-processing (labels): one fold on one device, so the whole
+    // result lives in a single engine's device accumulator. The host logits
+    // volume (C x the padded grid, ~1 GB) is then never allocated, unless
+    // the engine turns out not to support it.
+    const bool want_post = gpu_post != nullptr && gpu_post->codes != nullptr &&
+                           model_paths.size() == 1 && device_tunings.size() <= 1;
+    bool post_done = false;
     LogitsVolume logits;
-    logits.resize(num_classes, spatZ, spatY, spatX);
+
+    if (!want_post) {
+        logits.resize(num_classes, spatZ, spatY, spatX);
+    }
     std::vector<float> weights(static_cast<size_t>(spatZ) * spatY * spatX, 0.0f);
 
+    siam::phase_mark("allocate logits + weights");
     // The tile origins, in the fixed z/y/x order; and the per-voxel Gaussian
     // coverage, which depends only on the tiles (the same for every fold).
     std::vector<std::array<int64_t, 3>> tiles;
@@ -336,9 +378,11 @@ LogitsVolume sliding_window(const Volume& data,
                       std::getenv("SIAMIZE_OP_PROFILE") != nullptr;
     using sclk = std::chrono::steady_clock;
 
+    siam::phase_mark("tile list + gaussian coverage");
     const auto worker = [&](int dev) {
         std::vector<float> input_buf(patchN);
-        std::vector<float> pred_buf(num_classes * patchN);
+        std::vector<float> pred_buf;          // host path only (allocated on first use)
+        siam::phase_mark("worker: input/pred buffers");
         std::unique_ptr<Engine> engine;
         bool use_gpu_accum = false;
         int64_t cur_fold = -1, ntile = 0;
@@ -350,7 +394,24 @@ LogitsVolume sliding_window(const Volume& data,
             if (engine && use_gpu_accum) {
                 auto _f0 = sclk::now();
                 std::lock_guard<std::mutex> lk(accum_mtx);
-                engine->gpu_accum_finish(logits.data.data());
+
+                if (want_post) {
+                    gpu_post->weights   = weights.data();
+                    gpu_post->num_folds = static_cast<float>(n_folds);
+                    gpu_post->padded    = {spatZ, spatY, spatX};
+                    gpu_post->src       = {Z, Y, X};
+                    gpu_post->pad_lo    = {(spatZ - Z) / 2, (spatY - Y) / 2, (spatX - X) / 2};
+                    post_done = engine->gpu_post_labels(*gpu_post);
+                }
+
+                if (!post_done) {
+                    if (logits.data.empty()) {
+                        logits.resize(num_classes, spatZ, spatY, spatX);
+                    }
+
+                    engine->gpu_accum_finish(logits.data.data());
+                }
+
                 t_run += std::chrono::duration<double, std::milli>(sclk::now() - _f0).count();
             }
 
@@ -398,10 +459,16 @@ LogitsVolume sliding_window(const Volume& data,
             // the per-tile device->host readback and the host accumulate loop
             // are replaced by one per-fold readback in close_fold(). Falls back
             // to the host path if begin() fails (e.g. device alloc too big).
-            use_gpu_accum = engine->gpu_accum_supported() &&
+            use_gpu_accum = (engine->gpu_accum_supported() ||
+                             (want_post && engine->gpu_post_supported())) &&
                             engine->gpu_accum_begin({spatZ, spatY, spatX}, gauss.data());
 
-            if (prof && engine->gpu_accum_supported()) {
+            if (!use_gpu_accum && logits.data.empty()) {
+                std::lock_guard<std::mutex> lk(accum_mtx);
+                logits.resize(num_classes, spatZ, spatY, spatX);
+            }
+
+            if (prof && (engine->gpu_accum_supported() || (want_post && engine->gpu_post_supported()))) {
                 fprintf(stderr, "[sliding] device %d fold %" PRId64 " GPU accumulation: %s\n",
                         dev + 1, fi, use_gpu_accum ? "ON" : "begin() failed -> host path");
             }
@@ -434,6 +501,10 @@ LogitsVolume sliding_window(const Volume& data,
                 // Forward + accumulate on the GPU; no readback here.
                 engine->gpu_accum_tile(input_buf.data(), sz, sy, sx);
             } else {
+                if (pred_buf.empty()) {
+                    pred_buf.resize(num_classes * patchN);
+                }
+
                 engine->run_tile(input_buf.data(), pred_buf.data());
             }
 
@@ -521,7 +592,9 @@ LogitsVolume sliding_window(const Volume& data,
                 }
             }
 
+            siam::phase_mark("worker: model load + tiles");
             close_fold();
+            siam::phase_mark("worker: release engine");
         } catch (...) {
             errors[dev] = std::current_exception();
             next_item = n_folds * n_tiles;      // stop the other devices pulling tiles
@@ -544,6 +617,7 @@ LogitsVolume sliding_window(const Volume& data,
 
     if (ndev == 1) {
         worker(0);
+        siam::phase_mark("worker: free buffers");
     } else {
         std::vector<std::thread> pool;
 
@@ -560,6 +634,11 @@ LogitsVolume sliding_window(const Volume& data,
         if (e) {
             std::rethrow_exception(e);
         }
+    }
+
+    if (post_done) {
+        gpu_post->done = true;
+        return LogitsVolume{};
     }
 
     // Normalize

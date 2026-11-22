@@ -159,6 +159,12 @@ void log_progress(const char* tag, long long current, long long total);
 void log_hint(const char* fmt, ...)
 SIAM_LOG_PRINTF_FMT(1, 2);
 
+/*! \fn    void phase_mark(const char* what)
+    \brief With SIAMIZE_PHASE set, print the time since the previous mark
+           (and since the first one) as "[phase] <what>"; silent otherwise.
+*/
+void phase_mark(const char* what);
+
 }  // namespace siam
 
 #endif  // SIAMIZE_SIAM_LOG_H
