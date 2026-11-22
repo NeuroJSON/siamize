@@ -80,7 +80,7 @@ make coremloct               # Octave MEX,  -DSIAMIZE_GPU=coreml
 make coremlmex               # MATLAB MEX,  -DSIAMIZE_GPU=coreml
 
 # Vendor-neutral GPU via MNN OpenCL/Vulkan/Metal (the default MNN ref,
-# v3.5-gpu-opt3, carries the native-Conv3D fast path):
+# v3.5-gpu-opt4, carries the native-Conv3D fast path):
 make opencloct                # Octave MEX, -DSIAMIZE_BACKEND=mnn
 make openclmex                # MATLAB MEX, -DSIAMIZE_BACKEND=mnn
 ```
@@ -111,9 +111,10 @@ into a single folder; users just `addpath()` it.
 The MNN-backed MEX is identical from the .m caller's perspective —
 the wrapper queries `siamex('backend')` once at startup and
 auto-routes weight fetches to the right NeuroJSON doc
-(`doc=dynshape` → `fold_<N>_fp16.onnx` for ORT, `doc=mnn_n3d` →
-`fold_<N>_fp32.mnn` for MNN). Cache subdir differs accordingly
-(`models/` vs `models/mnn_n3d/`). For deployment, ship
+(`doc=dynshape` → `fold_<N>_fp16.onnx` for ORT, `doc=mnn_f16` →
+`fold_<N>_fp16.mnn` for MNN; an explicit `fold_<N>_fp32.mnn` comes from
+`doc=mnn_n3d`). Cache subdir differs accordingly
+(`models/` vs `models/mnn_f16/`, `models/mnn_n3d/`). For deployment, ship
 `siamex.mex*`, `siamize.m`, `jsonlab/`, and (unless built with
 `MNN_STATIC=1`) `libMNN.{so,dylib,dll}`.
 
@@ -316,7 +317,8 @@ The `doc=` parameter selects the weight variant:
 |---|---|---|
 | `dynshape` (default) | CUDA / TensorRT / CPU EPs | fp16 ONNX with dynamic D / H / W axes |
 | `coreml` | Apple Core ML EP (auto-picked when `opts.compute='coreml'` and `opts.coreml_static_shapes=true`) | fp16 fixed-shape with rank-5 InstanceNorm rewritten to rank-3 (so Apple's mlcompilerd accepts it) |
-| `mnn_n3d` | MNN-backed MEX (`make openclmex` / `make opencloct`) | Dynamic-shape `.mnn` binaries for the native-Conv3D OpenCL path. Basenames `fold_<N>_fp32.mnn`; ~540 MB / fold raw, ~122 MB gzipped on the wire. |
+| `mnn_f16` | MNN-backed MEX (`make openclmex` / `make opencloct`), default | Dynamic-shape `.mnn` binaries for the native-Conv3D path, Conv3D weights stored fp16 (lossless; needs NeuroJSON/MNN `v3.5-gpu-opt4`+). Basenames `fold_<N>_fp16.mnn`; ~283 MB / fold raw, 93-104 MB gzipped on the wire. |
+| `mnn_n3d` | MNN-backed MEX, older builds / explicit `fold_<N>_fp32.mnn` | The same models with fp32 weights. Basenames `fold_<N>_fp32.mnn`; ~566 MB / fold raw, ~122 MB gzipped on the wire. |
 
 The variants are cached in separate subdirs (`models/`,
 `models/coreml/`, `models/mnn_n3d/`) so a host that runs more than

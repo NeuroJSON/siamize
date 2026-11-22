@@ -192,7 +192,7 @@ One commit on `siam-vulkan-conv3d` (`7431aef`), for siamize's multi-GPU `-G 0101
 Two TITAN Vs, kwong scan, `-P 192x192x128`, 12 tiles: `-G 2` 15.7 s on the GPU, labels identical to
 `-G 1`; `-G 11` 7.5 s (`-G 1`: 10.2 s), labels identical.
 
-# Tensor-core Conv3D (`v3.5-gpu-opt3`, siamize's default `MNN_REF`)
+# Tensor-core Conv3D (`v3.5-gpu-opt3`)
 
 One commit on `siam-vulkan-conv3d` (`9e67691`).
 
@@ -205,3 +205,16 @@ RTX 5090 (158 TFLOP/s on 128-channel 48x48x32). The three MMA paths are within ~
 input gather, not the MMA rate, is the limit. One fold on kwong, end to end: TITAN V 10.1 -> 6.5 s,
 2080 SUPER 26.4 -> 14.3 s, RTX 4090 12.0 -> 9.1 s, RTX 5090 11.4 -> 9.0 s; 88-142 of 8.4M voxels change
 label, per-label Dice >= 0.9998.
+
+# fp16 Conv3D weights (`v3.5-gpu-opt4`, siamize's default `MNN_REF`)
+
+| Change | Detail |
+|---|---|
+| schema | `Convolution3D` gains `quanParameter:IDSTQuan` (appended, so older files load unchanged); type 3 = fp16 bit patterns in `buffer`, used when `weight` is empty. `schema/current/CaffeOp_generated.h` regenerated with the bundled flatc (which reproduces the old headers byte for byte). |
+| readers | `source/core/Conv3DWeight.hpp`: `conv3dWeight()` returns fp32 weights from either storage (fp16 expanded once, multithreaded); OpenCL `Conv3DBufExecution` / `Deconv3DBufExecution`, CPU `CPUConvolution3D` / `CPUDeconvolution3D`, `VulkanConvolution3D` and `GeometryConv3D` all read through it. The tensor-core Conv3D packs the stored fp16 bits directly. |
+| converter | `MNNConvert --fp16` (`SaveHalfFloat.cpp`) also stores Conv3D / ConvTranspose3D weights in fp16. |
+| tool | `tools/cpp/conv3dToFp16 in.mnn out.mnn`: re-store an existing model's 3D-convolution weights in fp16, reporting how many values the rounding changed. |
+
+SIAM folds 0-4: 566 -> 283 MB each, 0 of 141M weights changed (the `.mnn` came from the fp16 ONNX);
+gzipped 120-134 -> 93-104 MB. Labels identical to the fp32 files on OpenCL (TITAN V, RTX 5090) and the CPU
+backend. RTX 5090 end to end 4.5 -> 3.6 s (session setup 1.40 -> 0.66 s).

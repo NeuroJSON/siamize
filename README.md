@@ -48,7 +48,7 @@ without PyTorch, nnU-Net, or torchio at deployment time.
    `libonnxruntime.so` + per-fold 270 MB `.onnx` — drop-in for `siam-pred`
    with no Python at runtime. An alternative
    [MNN](https://github.com/alibaba/MNN) backend (~7 MB `libMNN.so` +
-   per-fold 540 MB native-Conv3D fp32 `.mnn`) is available via
+   per-fold 283 MB native-Conv3D `.mnn` with fp16-stored weights) is available via
    `-DSIAMIZE_BACKEND=mnn` for vendor-neutral GPU support
    (OpenCL / Vulkan / Metal); see [the MNN section](#optional-mnn-backend-vendor-neutral-gpu)
    below.
@@ -419,7 +419,11 @@ What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
    [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Relevant refs:
-   - **`v3.5-gpu-opt3` (default)** — `v3.5-gpu-opt2` plus an OpenCL
+   - **`v3.5-gpu-opt4` (default)** — `v3.5-gpu-opt3` plus fp16-stored
+     Conv3D / ConvTranspose3D weights (`Convolution3D.quanParameter`,
+     read by every backend), which the default `fold_<N>_fp16.mnn`
+     weights need; older refs can only load `fold_<N>_fp32.mnn`.
+   - **`v3.5-gpu-opt3`** — `v3.5-gpu-opt2` plus an OpenCL
      Conv3D on NVIDIA tensor cores (sm_70+, through inline PTX: wmma on
      sm_70, `mma.sync` on sm_75 / sm_80+), fp16 operands with fp32
      accumulation. Conv3D time drops 3.4x on a TITAN V; one fold end to
@@ -460,7 +464,7 @@ What `scripts/fetch_mnn.sh` does:
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt3`); e.g.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt4`); e.g.
 `MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
@@ -534,14 +538,24 @@ MNN-relevant environment variables:
 | `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |
 
 Weights are served as pre-converted `.mnn` binaries from
-`doc=mnn_n3d` on NeuroJSON. Files are dynamic-shape and run on the
-native-Conv3D OpenCL path (built against NeuroJSON/MNN's
-`v3.5-opencl-conv3d` tag). The `-M 0` shortcut expands to
-`fold_0_fp32.mnn` on this build and the resolver caches under
-`~/.cache/siamize/models/mnn_n3d/`. Each fp32 fold is ~540 MB
-uncompressed (~122 MB gzipped on the wire); the full 5-fold
-ensemble is ~2.7 GB on disk. Future `fold_<N>_fp16.mnn` /
-`fold_<N>_int8.mnn` variants live under the same doc when shipped.
+`doc=mnn_f16` on NeuroJSON. Files are dynamic-shape and run on the
+native-Conv3D path; their Conv3D / ConvTranspose3D weights are stored
+in fp16 (`Convolution3D.quanParameter`, NeuroJSON/MNN `v3.5-gpu-opt4`
+or later), which is lossless for SIAM: the weights come from the fp16
+ONNX export, so none of the 141M values changes. The `-M 0` shortcut
+expands to `fold_0_fp16.mnn` on this build and the resolver caches
+under `~/.cache/siamize/models/mnn_f16/`. Each fold is ~283 MB
+uncompressed (93-104 MB gzipped on the wire); the full 5-fold
+ensemble is ~1.4 GB on disk. Labels are identical to the fp32 files
+(OpenCL on four NVIDIA GPUs, CPU); with the tensor-core Conv3D the
+session setup is also shorter (RTX 5090: 4.5 -> 3.6 s per run).
+
+The previous fp32 files (`fold_<N>_fp32.mnn`, ~566 MB, `doc=mnn_n3d`,
+cached under `mnn_n3d/`) stay on the server for older builds and are
+still resolved when named explicitly (`-M fold_0_fp32.mnn`).
+`tools/cpp/conv3dToFp16` in the NeuroJSON/MNN fork re-stores any
+`.mnn`'s 3D-convolution weights in fp16 (and reports what the rounding
+changed); `MNNConvert --fp16` now does the same for Conv3D.
 
 Accuracy vs the fp16 ONNX reference on `tests/sub-01_T1w.nii.gz`:
 
@@ -561,11 +575,8 @@ Trade-offs vs the ORT path:
   Titan V) and runs across vendors that ORT-CUDA doesn't cover.
 - **+** MATLAB / Octave MEX targets: `make openclmex`,
   `make opencloct` (see `matlab/README.md`).
-- **-** Weights are ~2× larger than the fp16 ONNX bundle
-  (~540 MB / fold vs ~283 MB) — fp32 is required so the native
-  Conv3D path can address it directly without a runtime dequant.
-  fp16 weight storage in the .mnn schema is a known gap; see
-  `current_status_siamize_mnn.md` §2.3.
+- **~** Weights are the same size as the fp16 ONNX bundle (~283 MB /
+  fold): the Conv3D weights are stored fp16 and expanded at load.
 - **~** CPU runs are multithreaded — `-t 0` auto-selects up to 32
   (MNN's thread-pool cap; the ORT path caps at 16). The native
   Conv3D / Deconv3D executors bypass `CPURaster`, retiring the old
@@ -1088,7 +1099,7 @@ for MNN OpenCL and ~240 ms (fp32) / ~220 ms (fp16) for MNN Vulkan (GPU
 compute + readback); cuDNN runs the fp16 convolutions on Tensor Cores,
 while the MNN Conv3D kernels use plain fp32-accumulating FMA. A
 `VK_KHR_cooperative_matrix` Conv3D would be the route to closing that gap.
-MNN session setup also costs ~2.6 s vs ~0.7 s for ORT (540 MB fp32 `.mnn`).
+MNN session setup also costs ~2.6 s vs ~0.7 s for ORT (540 MB fp32 `.mnn`; the fp16 `.mnn` and model prefetch have since cut this, see above).
 
 The AMD Raphael iGPU (Mesa RADV) in the TITAN V host runs the Vulkan path
 correctly (99.97 % argmax agreement with CPU on a random 128^3 input) but,
