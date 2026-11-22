@@ -419,7 +419,14 @@ What `scripts/fetch_mnn.sh` does:
 
 1. Downloads source archive from
    [NeuroJSON/MNN](https://github.com/NeuroJSON/MNN). Relevant refs:
-   - **`v3.5-gpu-opt2` (default)** — `v3.5-gpu-opt` plus an OpenCL
+   - **`v3.5-gpu-opt3` (default)** — `v3.5-gpu-opt2` plus an OpenCL
+     Conv3D on NVIDIA tensor cores (sm_70+, through inline PTX: wmma on
+     sm_70, `mma.sync` on sm_75 / sm_80+), fp16 operands with fp32
+     accumulation. Conv3D time drops 3.4x on a TITAN V; one fold end to
+     end: TITAN V 10.1 -> 6.5 s, RTX 4090 12.0 -> 9.1 s, RTX 5090
+     11.4 -> 9.0 s, 2080 SUPER 26.4 -> 14.3 s; 0.001-0.002 % of voxels
+     change label. `MNN_CONV3D_TC=0` turns it off.
+   - **`v3.5-gpu-opt2`** — `v3.5-gpu-opt` plus an OpenCL
      context per device, so several GPUs (`-G 0101`) each run on their own
      GPU (`v3.5-gpu-opt` shares one context, so a second GPU fails with
      `CL_INVALID_DEVICE` and falls back to the CPU).
@@ -453,7 +460,7 @@ What `scripts/fetch_mnn.sh` does:
 
 First run takes ~15-20 min for the MNN compile; subsequent runs are
 cached at `third_party/mnn-build/`. Override the ref by passing
-`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt2`); e.g.
+`MNN_REF=<branch|tag|sha>` (default `v3.5-gpu-opt3`); e.g.
 `MNN_REF=v3.5-int64fix` for the minimal int64-only subset.
 
 For a self-contained binary with no `libMNN.so` to ship next to it,
@@ -519,6 +526,9 @@ MNN-relevant environment variables:
 | `MNN_VULKAN_NO_TRANSFER_QUEUE` | `1` | Keep host<->device copies on the compute queue instead of the GPU's dedicated transfer (copy-engine) queue. |
 | `MNN_VULKAN_HOST_IMPORT` | `1` | Opt-in `VK_EXT_external_memory_host` copies straight into the caller's buffer. Off by default: pinning the pages per copy costs more than the staging memcpy it saves. |
 | `MNN_VK_CONV3D_WTILE` / `_HTILE` / `_OCTILE` / `_LX` / `_LY` / `_LZ` | per layer size | Vulkan Conv3D tiling: output voxels along W and H and output-channel blocks per invocation, and the work-group shape (`MNN_VK_CONV3D_LOCAL` is an alias of `_LX`). Defaults, tuned on an RTX 5090: 2x1 voxels in 16x1x8 groups for >= 64k output voxels, 2x2 in 8x2x8 down to 8k, 1x1 in 8x4x4 below. Setting a variable overrides it for every layer; `tools/mnn_probe/layercheck.cpp` times alternatives. |
+| `MNN_CONV3D_TC` | `0` | OpenCL: don't use the NVIDIA tensor-core Conv3D (`conv_3d_tc_buf.cl`, sm_70+, default on); use the fp32 kernels. |
+| `SIAMIZE_GPU_POST` | `0` | MNN OpenCL: keep the label post-processing (normalize, back-resample, argmax) on the CPU. By default, for label output from one fold on one GPU, it runs on the GPU from the device-side logits accumulator and only one byte per voxel is read back (RTX 5090: 8.9 -> 5.7 s, peak RAM 3.1 -> 1.4 GB, identical labels). |
+| `SIAMIZE_PHASE` | `1` | Print per-phase timings (input load, preprocessing, model load, tiles, post-processing, save) and the engine's setup times. |
 | `MNN_CONV3D_LEGACY` | `1` | OpenCL: use the original `conv_3d_buf_nc4dhw4` / `_t22` Conv3D kernels instead of `conv_3d_buf_opt` (A/B comparison). |
 | `MNN_LAYERNORM_NOSPLIT` | `1` | OpenCL and Vulkan: keep the one-work-group-per-row LayerNorm kernels instead of the split-row path used for rows of >= 64k values. |
 | `SIAMIZE_PRECISION` | `High` (default) / `Normal` / `Low` | Maps to `BackendConfig::PrecisionMode`. `Normal` is the same as `--mnn-fp16`. `Low` enables fp16 compute, useful for non-NVIDIA OpenCL. |

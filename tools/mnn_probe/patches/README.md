@@ -181,7 +181,7 @@ backend on both GPU backends; end-to-end on `sub-01_T1w` the labels match the
 previous kernels on 99.9999 % (fp32) of voxels. One fold on the RTX 5090:
 OpenCL 13.6 -> 10.7 s, Vulkan 14.6 -> 13.2 s (fp32) / 13.2 -> 12.6 s (fp16).
 
-# OpenCL context per device (`v3.5-gpu-opt2`, siamize's default `MNN_REF`)
+# OpenCL context per device (`v3.5-gpu-opt2`)
 
 One commit on `siam-vulkan-conv3d` (`7431aef`), for siamize's multi-GPU `-G 0101`.
 
@@ -191,3 +191,17 @@ One commit on `siam-vulkan-conv3d` (`7431aef`), for siamize's multi-GPU `-G 0101
 
 Two TITAN Vs, kwong scan, `-P 192x192x128`, 12 tiles: `-G 2` 15.7 s on the GPU, labels identical to
 `-G 1`; `-G 11` 7.5 s (`-G 1`: 10.2 s), labels identical.
+
+# Tensor-core Conv3D (`v3.5-gpu-opt3`, siamize's default `MNN_REF`)
+
+One commit on `siam-vulkan-conv3d` (`9e67691`).
+
+| Commit | Change |
+|---|---|
+| `[OpenCL:Perf] Conv3D on NVIDIA tensor cores via inline PTX (2-12x per layer)` | NVIDIA's OpenCL compiler (NVVM) passes `asm()` PTX to ptxas, so tensor-core instructions work from OpenCL C without `cl_khr_fp16`. New `conv_3d_tc_buf.cl`: implicit-GEMM Conv3D, fp16 operands (input rounded in local memory, weights pre-packed) with fp32 accumulation, double-buffered tiles; wmma m16n16k16 on sm_70, `ldmatrix` + `mma.sync` m16n8k8 on sm_75 and m16n8k16 on sm_80+. `OpenCLRuntime::getNvComputeCapability()` selects it (sm_70+, fp32, Cin and Cout multiples of 32; fp32 kernels otherwise or if the build fails; `MNN_CONV3D_TC=0` disables). Weight packing multithreaded. `opencl_codegen.py` escapes `"` for the asm strings. |
+
+Per layer vs the fp32 `conv_3d_buf_opt`: 2.2-12.9x on a TITAN V (up to 35 TFLOP/s), up to 6.5x on an
+RTX 5090 (158 TFLOP/s on 128-channel 48x48x32). The three MMA paths are within ~10 % of each other: the
+input gather, not the MMA rate, is the limit. One fold on kwong, end to end: TITAN V 10.1 -> 6.5 s,
+2080 SUPER 26.4 -> 14.3 s, RTX 4090 12.0 -> 9.1 s, RTX 5090 11.4 -> 9.0 s; 88-142 of 8.4M voxels change
+label, per-label Dice >= 0.9998.
