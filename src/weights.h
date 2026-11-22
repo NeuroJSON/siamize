@@ -92,14 +92,14 @@ enum class WeightVariant {
                      Reshape ops (see tools/onnx_export/
                      rewrite_for_coreml.py) so Apple's mlcompilerd
                      accepts it. Used when the CoreML EP is active. */
-    MNN,        /**< doc=mnn_n3d: dynamic-shape .mnn binaries that
-                     run on the native-Conv3D OpenCL path (built
-                     against NeuroJSON/MNN's `siam-opencl-conv3d`
-                     branch). Used by the SIAMIZE_BACKEND=mnn build.
-                     Files use `fold_<N>_<precision>.mnn` naming:
-                     `_fp32` is the current default (~540 MB raw);
-                     `_fp16` and `_int8` are reserved for future
-                     variants under the same doc. */
+    MNN,        /**< the SIAMIZE_BACKEND=mnn build's .mnn binaries
+                     (dynamic shape, native Conv3D). Picks its doc by
+                     the file name: `fold_<N>_fp16.mnn` (the default,
+                     Conv3D weights stored fp16, ~283 MB; needs
+                     NeuroJSON/MNN v3.5-gpu-opt4+) from doc=mnn_f16,
+                     `fold_<N>_fp32.mnn` (~566 MB, any MNN build) from
+                     doc=mnn_n3d. */
+    MNN_F16,    /**< doc=mnn_f16, chosen by MNN for `*_fp16.mnn` */
 };
 
 std::string default_weights_url(WeightVariant variant = WeightVariant::DYNSHAPE);

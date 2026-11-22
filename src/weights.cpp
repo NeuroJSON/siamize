@@ -213,6 +213,13 @@ const char* variant_str(WeightVariant variant) {
         case WeightVariant::COREML:
             return "coreml";
 
+        case WeightVariant::MNN_F16:
+            // fold_<N>_fp16.mnn: the same models with their Conv3D weights
+            // stored fp16 (lossless for SIAM, exported from fp16 ONNX);
+            // half the size, needs the fp16 Conv3D weight schema
+            // (NeuroJSON/MNN v3.5-gpu-opt4+).
+            return "mnn_f16";
+
         case WeightVariant::MNN:
             // Server-side doc= name carries the dynamic-shape native
             // Conv3D MNN bundle. Individual files inside encode their
@@ -240,6 +247,8 @@ std::string default_weights_url(WeightVariant variant) {
     // doc=coreml:   fp16 fixed-shape ONNX with rank-5 InstanceNorm
     //   rewritten to rank-3 (see tools/onnx_export/rewrite_for_coreml.py)
     //   so Apple's mlcompilerd accepts it. Used by the CoreML EP.
+    // doc=mnn_f16:  the same .mnn models with fp16-stored Conv3D weights
+    //   (fold_<N>_fp16.mnn, ~283 MB raw; default for SIAMIZE_BACKEND=mnn).
     // doc=mnn_n3d:  .mnn binaries for the native-Conv3D OpenCL path
     //   (siam-opencl-conv3d branch of NeuroJSON/MNN). Dynamic-shape
     //   D/H/W. Used by SIAMIZE_BACKEND=mnn; fold_<N>_fp32.mnn is
@@ -265,9 +274,22 @@ std::string default_weights_url(WeightVariant variant) {
     \return          absolute path to the resolved .onnx file
     \throws std::runtime_error if none of the lookup stages produces a file
 */
+/* The MNN weights' doc follows the file name: *_fp16.mnn -> mnn_f16 */
+static WeightVariant mnn_variant_for(const std::string& spec, WeightVariant variant) {
+    static const std::string kF16 = "_fp16.mnn";
+
+    if (variant == WeightVariant::MNN && spec.size() >= kF16.size() &&
+            spec.compare(spec.size() - kF16.size(), kF16.size(), kF16) == 0) {
+        return WeightVariant::MNN_F16;
+    }
+
+    return variant;
+}
+
 std::string cached_model_path(const std::string& spec, WeightVariant variant) {
     namespace fs = std::filesystem;
     std::error_code ec;
+    variant = mnn_variant_for(spec, variant);
 
     if (spec.empty()) {
         return "";
@@ -290,6 +312,7 @@ std::string cached_model_path(const std::string& spec, WeightVariant variant) {
 std::string resolve_model_path(const std::string& spec, bool verbose,
                                WeightVariant variant) {
     namespace fs = std::filesystem;
+    variant = mnn_variant_for(spec, variant);
 
     if (spec.empty()) {
         throw std::runtime_error("empty model spec");

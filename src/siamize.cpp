@@ -587,7 +587,7 @@ long available_vram_mb(int gpuid = 0) {
 /*! \fn    std::string expand_fold_shortcut(const std::string& tok)
     \brief Expand a single-digit fold shortcut to the canonical filename
 
-    `"0".."9"` becomes `"fold_<d>_fp32.mnn"` (MNN build) or
+    `"0".."9"` becomes `"fold_<d>_fp16.mnn"` (MNN build) or
     `"fold_<d>_fp16.onnx"` (ONNX build); anything else passes through
     unchanged. Lets users write `-M 0,1,2,3,4` instead of spelling
     out the full filenames.
@@ -598,11 +598,10 @@ long available_vram_mb(int gpuid = 0) {
 std::string expand_fold_shortcut(const std::string& tok) {
     if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= '9') {
 #ifdef SIAMIZE_HAS_MNN
-        // MNN backend: native-Conv3D .mnn binaries with fp32 weights
-        // (see WeightVariant::MNN, doc=mnn_n3d). Future fp16/int8
-        // variants will live under the same doc as fold_<N>_fp16.mnn
-        // / fold_<N>_int8.mnn.
-        return "fold_" + tok + "_fp32.mnn";
+        // MNN backend: native-Conv3D .mnn binaries with fp16-stored
+        // Conv3D weights (doc=mnn_f16, see WeightVariant::MNN). The fp32
+        // files (doc=mnn_n3d) stay available as fold_<N>_fp32.mnn.
+        return "fold_" + tok + "_fp16.mnn";
 #else
         return "fold_" + tok + "_fp16.onnx";
 #endif
@@ -647,13 +646,15 @@ void usage(const char* exe) {
                  "                      human-readable JSON.\n"
 #ifdef SIAMIZE_HAS_MNN
                  "  -M, --models        comma-separated .mnn files (one per fold), logits are averaged.\n"
-                 "                      Defaults to single-fold 'fold_0_fp32.mnn'. Each entry can be\n"
+                 "                      Defaults to single-fold 'fold_0_fp16.mnn'. Each entry can be\n"
                  "                      a full path, a basename, or a single digit shortcut (e.g.\n"
-                 "                      -M 0,1,2,3,4 expands to fold_<N>_fp32.mnn). Bare basenames\n"
-                 "                      are looked up under $SIAMIZE_CACHE_DIR/mnn_n3d/ (default\n"
-                 "                      $HOME/.cache/siamize/models/mnn_n3d/) and auto-downloaded from\n"
+                 "                      -M 0,1,2,3,4 expands to fold_<N>_fp16.mnn). Bare basenames\n"
+                 "                      are looked up under $SIAMIZE_CACHE_DIR/mnn_f16/ (default\n"
+                 "                      $HOME/.cache/siamize/models/mnn_f16/) and auto-downloaded from\n"
                  "                      $SIAMIZE_WEIGHTS_BASE_URL on miss. The shipped .mnn files are\n"
-                 "                      dynamic-shape native-Conv3D fp32 weights (~540 MB / fold).\n"
+                 "                      dynamic-shape native-Conv3D models with fp16-stored Conv3D\n"
+                 "                      weights (~283 MB / fold, lossless); fold_<N>_fp32.mnn (~566 MB,\n"
+                 "                      from mnn_n3d/) still works.\n"
 #else
                  "  -M, --models        comma-separated .onnx files (one per fold), logits are averaged.\n"
                  "                      Defaults to single-fold 'fold_0_fp16.onnx'. Each entry can be\n"
@@ -680,7 +681,7 @@ void usage(const char* exe) {
                  "                        (PoCL CPU-OpenCL, older GPUs without native fp16).\n"
                  "                        Typical: 1.5-2x speedup with small accuracy cost.\n"
                  "      --mnn-buffer      force MNN's OpenCL BUFFER memory mode. Default ON\n"
-                 "                        because the shipped doc=mnn_n3d / fold_X_fp32.mnn\n"
+                 "                        because the shipped fold_X_fp16.mnn / _fp32.mnn\n"
                  "                        weights need BUFFER for the native Conv3DBufExecution\n"
                  "                        path; without it OpenCL falls through to a ~3300-op\n"
                  "                        geometry decomposition with multi-minute first-run\n"
@@ -690,7 +691,7 @@ void usage(const char* exe) {
                  "                        where BUFFER's `conv_2d_buf` int kernel fails to\n"
                  "                        JIT-compile (older NVIDIA + legacy mnn_i8a int8\n"
                  "                        weights, CL build error -9999). Inference will be\n"
-                 "                        slow on the shipped mnn_n3d weights.\n"
+                 "                        slow on the shipped .mnn weights.\n"
 #else
                  "  -c, --compute D     execution provider: auto|cpu|cuda|tensorrt (default auto).\n"
                  "                      auto tries CUDA / CoreML (if compiled in) then falls back to CPU.\n"
@@ -1808,10 +1809,10 @@ int main(int argc, char** argv) {
 
     if (models_csv.empty()) {
 #ifdef SIAMIZE_HAS_MNN
-        models_csv = "fold_0_fp32.mnn";
+        models_csv = "fold_0_fp16.mnn";
         siam::log_tag("models",
                       "-M/--models not given; defaulting to single-fold "
-                      "fold_0_fp32.mnn (auto-downloaded if missing).");
+                      "fold_0_fp16.mnn (auto-downloaded if missing).");
 #else
         models_csv = "fold_0_fp16.onnx";
         siam::log_tag("models",
